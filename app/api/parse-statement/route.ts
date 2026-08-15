@@ -3,6 +3,8 @@ import { extractPdfText } from "@/lib/parser/pdfTextExtractor";
 import { parseTransactions } from "@/lib/parser/chaseParser";
 import { toStatementTransaction } from "@/lib/parser/toStatementTransaction";
 import { purchaseFromStatement } from "@/lib/purchases/fromStatement";
+import { persistPurchase } from "@/lib/purchases/repository";
+import { createServerClient } from "@/lib/supabase-server";
 import { StatementTransaction } from "@/lib/purchases/statementTypes";
 
 export const runtime = "nodejs";
@@ -171,5 +173,39 @@ export async function POST(request: NextRequest) {
   const statementTransactions = parsed.map((tx) => toStatementTransaction(tx, year));
   const purchases = statementTransactions.map((tx) => purchaseFromStatement(tx));
 
-  return NextResponse.json({ ok: true, transactions: statementTransactions, purchases });
+  // Persist each statement Purchase for the authenticated user. The server
+  // client reads the Supabase session from request cookies, so browser and
+  // server share the same authenticated session.
+  const supabase = createServerClient();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return NextResponse.json(
+      { ok: false, error: "Authentication required. Please sign in first." },
+      { status: 401 }
+    );
+  }
+
+  const persistedPurchases = [];
+  for (const purchase of purchases) {
+    try {
+      persistedPurchases.push(await persistPurchase(purchase, user.id));
+    } catch {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Failed to save one or more statement purchases. Please try again.",
+          transactions: statementTransactions,
+          purchases: persistedPurchases,
+        },
+        { status: 500 }
+      );
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    transactions: statementTransactions,
+    purchases: persistedPurchases,
+  });
 }

@@ -16,33 +16,34 @@ Finance Buddy has progressed from a receipt-processing prototype into a multi-so
 
 Current major milestone:
 
-**Receipt Purchase Persistence — VERIFIED COMPLETE**
+**Statement Purchase Persistence — VERIFIED COMPLETE**
 
-The receipt → Purchase → Supabase persistence flow is wired and verified with a real authenticated browser request.
+The statement → Purchase → Supabase persistence flow is wired and verified with a real authenticated browser request.
 
 Verified complete:
 
 - Google OAuth/session works.
-- Receipt uploads to the private `receipts` Storage bucket using a user-scoped path.
-- Receipt extraction succeeds.
-- Receipt → Purchase conversion succeeds.
-- Purchase persists to Supabase.
-- `purchase_items` persist correctly.
-- `purchase_evidence` persists correctly.
-- Purchase evidence uses the actual Storage path as `sourceId`.
-- Purchase evidence metadata contains `bucket`/`path`.
-- Receipt evidence remains unverified.
-- Purchase provenance remains unverified for extracted facts.
-- Purchase rehydration returns complete items/evidence.
-- No duplicate evidence was created.
-- Real authenticated request returned HTTP 200.
+- Chase statement PDF uploaded through the private user-scoped `statements` Storage flow.
+- `POST /api/parse-statement` returned HTTP 200.
+- The real Chase statement produced 151 StatementTransactions.
+- 151 Purchases were returned and persisted.
+- Statement Purchases use `source = "statement"`.
+- Statement Purchases legitimately have `items = []`.
+- Persisted statement Purchases belong to the authenticated user.
+- Statement evidence persisted successfully.
+- Statement provenance persisted successfully.
+- Database verification through Supabase SQL confirmed the persisted statement data.
+- The statement parser/year-detection path is working with the real Chase statement.
 - `npm run build` passes.
 - Temporary persistence/test artifacts were removed.
 
-The earlier generic persistence integration milestone also remains valid:
-- `persistPurchase()` works in the real Next.js request context.
-- Atomic `persist_purchase` RPC works.
-- `ON DELETE CASCADE` was verified.
+Earlier verified milestones that remain valid:
+- Receipt Purchase Persistence — verified complete with real authenticated browser request.
+- Generic persistence integration — `persistPurchase()` works in the real Next.js request context, atomic `persist_purchase` RPC works, `ON DELETE CASCADE` was verified.
+
+Known architectural limitation:
+
+Each Purchase is persisted atomically through `persistPurchase()` / `persist_purchase`, but an entire statement import is not currently one atomic batch. A failure partway through a statement import could therefore leave a partial import.
 
 ---
 
@@ -576,20 +577,32 @@ The temporary `app/api/dev/test-persist` route has been removed.
 
 # Immediate Current Task
 
-Wire Statement → Purchase → Supabase persistence.
+Persisted Purchase Evidence Reconciliation
 
-After a Chase PDF statement is parsed into statement transactions and converted to canonical Purchases, persist them via `lib/purchases/repository.ts` using the authenticated server client. The persisted Purchases should be returned in the response alongside the existing parsed transaction data.
+The goal of the next milestone is to identify when independently persisted Purchases likely represent the same real-world purchase, especially:
 
-Do not modify production architecture merely to make the test pass.
+receipt Purchase
++
+statement Purchase
+→ reconciliation candidate
 
-If wiring reveals a genuine implementation bug, report it before broad changes.
+Candidate reconciliation must preserve the existing rule that matching does not automatically imply merging.
+
+Do not implement automatic merging yet.
 
 ---
 
-# Next Milestones After Statement Persistence
+# Next Milestones After Reconciliation
 
-1. Verify persisted statement Purchases end-to-end in the browser.
-2. Implement persisted evidence reconciliation/deduplication.
+1. Implement persisted evidence reconciliation/deduplication.
+2. Add Statement Import / Ingestion Batch architecture:
+   - assign an identity to each statement import
+   - associate all Purchases created from one statement with that import
+   - detect/prevent duplicate statement imports
+   - support safe retries
+   - audit import results
+   - track source-document provenance
+   - support future rollback/recovery of a specific import
 3. Add email/digital receipt ingestion.
 4. Add screenshot ingestion.
 5. Normalize canonical Purchase category taxonomy.
