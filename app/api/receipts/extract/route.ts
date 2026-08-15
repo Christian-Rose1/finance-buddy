@@ -4,6 +4,8 @@ import { validateReceiptExtraction } from "@/lib/receipts/schema";
 import { categorizeReceiptItems } from "@/lib/receipts/categorizer";
 import { calculateSavingsOpportunities } from "@/lib/receipts/savings";
 import { purchaseFromReceipt } from "@/lib/purchases/fromReceipt";
+import { persistPurchase } from "@/lib/purchases/repository";
+import { createServerClient } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,6 +43,7 @@ export async function POST(request: NextRequest) {
   }
 
   const file = formData.get("file");
+  const storagePath = formData.get("storagePath");
 
   if (!file || !(file instanceof File)) {
     return NextResponse.json(
@@ -122,8 +125,47 @@ export async function POST(request: NextRequest) {
   // Compute the savings summary for the validated, categorized receipt.
   const savings = calculateSavingsOpportunities(finalResult.data);
 
-  // Create a Purchase from the validated receipt data.
-  const purchase = purchaseFromReceipt(finalResult.data);
+  // Build stable Storage identity for the uploaded receipt, if available.
+  const uploadedStoragePath =
+    typeof storagePath === "string" && storagePath.length > 0
+      ? storagePath
+      : null;
 
-  return NextResponse.json({ ok: true, receipt: finalResult.data, savings, purchase });
+  // Create a Purchase from the validated receipt data.
+  const purchase = purchaseFromReceipt(finalResult.data, undefined, {
+    sourceId: uploadedStoragePath ?? undefined,
+    storage: uploadedStoragePath
+      ? { bucket: "receipts", path: uploadedStoragePath }
+      : undefined,
+  });
+
+  // Persist the Purchase for the authenticated user. The server client reads
+  // the Supabase session from request cookies, so browser and server share the
+  // same authenticated session.
+  const supabase = createServerClient();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return NextResponse.json(
+      { ok: false, error: "Authentication required. Please sign in first." },
+      { status: 401 }
+    );
+  }
+
+  let persistedPurchase;
+  try {
+    persistedPurchase = await persistPurchase(purchase, user.id);
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "Failed to save purchase. Please try again." },
+      { status: 500 }
+    );
+  }
+
+  return NextResponse.json({
+    ok: true,
+    receipt: finalResult.data,
+    savings,
+    purchase: persistedPurchase,
+  });
 }

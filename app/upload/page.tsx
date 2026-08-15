@@ -84,7 +84,13 @@ export default function UploadPage() {
 
     try {
       const supabase = createClient();
-      const filename = `${Date.now()}-${file.name}`;
+      const { data: userData, error: authError } = await supabase.auth.getUser();
+
+      if (authError || !userData.user) {
+        throw new Error("Authentication required. Please sign in first.");
+      }
+
+      const filename = `${userData.user.id}/${Date.now()}-${crypto.randomUUID()}-${file.name}`;
 
       const { error } = await supabase.storage.from("statements").upload(filename, file);
 

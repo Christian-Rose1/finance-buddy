@@ -67,7 +67,7 @@ export default function ReceiptsPage() {
     setFiles(data ?? []);
   }
 
-  async function extractReceipt(file: File) {
+  async function extractReceipt(file: File, storagePath: string) {
     setAnalyzing(true);
     setExtractionError("");
     setExtraction(null);
@@ -76,6 +76,7 @@ export default function ReceiptsPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      formData.append("storagePath", storagePath);
 
       const response = await fetch("/api/receipts/extract", {
         method: "POST",
@@ -117,7 +118,13 @@ export default function ReceiptsPage() {
       }
 
       const supabase = createClient();
-      const filename = `${Date.now()}-${crypto.randomUUID()}-${file.name}`;
+      const { data: userData, error: authError } = await supabase.auth.getUser();
+
+      if (authError || !userData.user) {
+        throw new Error("Authentication required. Please sign in first.");
+      }
+
+      const filename = `${userData.user.id}/${Date.now()}-${crypto.randomUUID()}-${file.name}`;
       const isImage = file.type.startsWith("image/");
 
       const { error } = await supabase.storage
@@ -133,7 +140,7 @@ export default function ReceiptsPage() {
 
       if (isImage) {
         setMessage("Receipt uploaded successfully.");
-        await extractReceipt(file);
+        await extractReceipt(file, filename);
       } else {
         setMessage(
           "Receipt uploaded successfully. PDF receipt extraction is not yet supported."

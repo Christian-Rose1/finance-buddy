@@ -26,9 +26,17 @@ import {
  * Field-level provenance is also populated to track how each value was
  * produced.
  */
+export interface PurchaseFromReceiptOptions {
+  /** Stable Storage identifier for the uploaded receipt object. */
+  sourceId?: string;
+  /** Storage bucket/path metadata for the uploaded receipt object. */
+  storage?: { bucket: string; path: string };
+}
+
 export function purchaseFromReceipt(
   receipt: ReceiptExtraction,
-  id?: string
+  id?: string,
+  options?: PurchaseFromReceiptOptions
 ): Purchase {
   const purchaseId =
     id || `purchase-${receipt.merchant ?? "unknown"}-${receipt.transaction_date ?? "no-date"}-${receipt.source}`;
@@ -52,15 +60,24 @@ export function purchaseFromReceipt(
     confidence: item.confidence,
   }));
 
+  // Use the uploaded Storage object identity when available. The Storage path
+  // is a stable identifier for this receipt source; otherwise fall back to the
+  // generated purchase id for non-Storage usage of the adapter.
+  const evidenceSourceId = options?.sourceId ?? purchaseId;
+  const evidenceMetadata = options?.storage
+    ? { bucket: options.storage.bucket, path: options.storage.path }
+    : null;
+
   const evidence: PurchaseEvidence[] = [
     {
       id: purchaseId,
       type: "receipt",
-      sourceId: purchaseId,
+      sourceId: evidenceSourceId,
       sourceName: receipt.source,
       confidence: receipt.confidence,
-      verified: true,
-      metadata: null,
+      // Receipt extraction is evidence-backed but not explicitly verified.
+      verified: false,
+      metadata: evidenceMetadata,
     },
   ];
 
