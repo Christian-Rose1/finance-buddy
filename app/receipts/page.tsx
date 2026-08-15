@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase";
 import type { ReceiptExtraction } from "@/lib/receipts/types";
+import type { ReceiptSavingsResult } from "@/lib/receipts/savings";
 
 type StorageFile = {
   name: string;
@@ -45,6 +46,7 @@ export default function ReceiptsPage() {
     isImage: boolean;
   } | null>(null);
   const [extraction, setExtraction] = useState<ReceiptExtraction | null>(null);
+  const [savings, setSavings] = useState<ReceiptSavingsResult | null>(null);
 
   async function loadFiles() {
     const supabase = createClient();
@@ -69,6 +71,7 @@ export default function ReceiptsPage() {
     setAnalyzing(true);
     setExtractionError("");
     setExtraction(null);
+    setSavings(null);
 
     try {
       const formData = new FormData();
@@ -86,6 +89,7 @@ export default function ReceiptsPage() {
       }
 
       setExtraction(data.receipt as ReceiptExtraction);
+      setSavings(data.savings as ReceiptSavingsResult);
     } catch (err: any) {
       setExtractionError(err.message ?? "Failed to analyze receipt.");
     } finally {
@@ -99,6 +103,7 @@ export default function ReceiptsPage() {
     setError("");
     setExtractionError("");
     setExtraction(null);
+    setSavings(null);
     setUploadedFile(null);
 
     if (previewUrl) {
@@ -264,11 +269,82 @@ export default function ReceiptsPage() {
                     </div>
                   </div>
                   <div>
+                    <div className="text-sm text-slate-400">Subtotal</div>
+                    <div className="font-medium text-white">
+                      {formatMoney(extraction.subtotal)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm text-slate-400">Already Saved</div>
+                    <div className="font-medium text-emerald-300">
+                      {extraction.discount != null
+                        ? formatMoney(extraction.discount)
+                        : "$0.00"}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      Discounts & coupons applied
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm text-slate-400">Tax</div>
+                    <div className="font-medium text-white">
+                      {formatMoney(extraction.tax)}
+                    </div>
+                  </div>
+                  <div>
                     <div className="text-sm text-slate-400">Total</div>
                     <div className="font-medium text-white">
                       {formatMoney(extraction.total)}
                     </div>
                   </div>
+                </div>
+
+                <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                  <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4">
+                    <div className="text-sm text-slate-400">Already Saved</div>
+                    <div className="mt-1 text-xl font-semibold text-emerald-300">
+                      {formatMoney(savings?.alreadySaved ?? 0)}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-4">
+                    <div className="text-sm text-slate-400">Money Found</div>
+                    <div className="mt-1 text-xl font-semibold text-sky-300">
+                      {formatMoney(savings?.moneyFound ?? 0)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">
+                    Savings Opportunities
+                  </h3>
+
+                  {savings && savings.opportunities.length === 0 ? (
+                    <div className="rounded-lg border border-white/10 bg-black/20 p-4 text-slate-400">
+                      No additional savings opportunities found yet.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {savings?.opportunities.map((opportunity, index) => (
+                        <div
+                          key={`${opportunity.title}-${index}`}
+                          className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-3"
+                        >
+                          <div>
+                            <div className="font-medium text-white">
+                              {opportunity.title}
+                            </div>
+                            <div className="text-sm text-slate-400">
+                              {opportunity.description}
+                            </div>
+                          </div>
+                          <div className="font-medium text-emerald-300">
+                            {formatMoney(opportunity.amount)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {extraction.items.length > 0 && (
@@ -281,20 +357,32 @@ export default function ReceiptsPage() {
                       {extraction.items.map((item, index) => (
                         <div
                           key={`${item.name}-${index}`}
-                          className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-3"
+                          className="rounded-lg border border-white/10 bg-black/20 p-3"
                         >
-                          <div>
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="font-medium text-white">
+                                {item.name ?? "Unknown item"}
+                              </div>
+                              <div className="mt-0.5 text-sm text-slate-400">
+                                <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-xs text-sky-300">
+                                  {item.category ?? "Other"}
+                                </span>
+                              </div>
+                              <div className="mt-1.5 text-sm text-slate-400">
+                                Qty: {item.quantity ?? "—"} · Unit:{" "}
+                                {formatMoney(item.unit_price)} · Confidence:{" "}
+                                {formatConfidence(item.confidence)}
+                              </div>
+                              {item.discount != null && item.discount > 0 && (
+                                <div className="mt-0.5 text-sm text-emerald-300">
+                                  Item discount: -{formatMoney(item.discount)}
+                                </div>
+                              )}
+                            </div>
                             <div className="font-medium text-white">
-                              {item.name ?? "Unknown item"}
+                              {formatMoney(item.total)}
                             </div>
-                            <div className="text-sm text-slate-400">
-                              Qty: {item.quantity ?? "—"} · Unit:{" "}
-                              {formatMoney(item.unit_price)} · Confidence:{" "}
-                              {formatConfidence(item.confidence)}
-                            </div>
-                          </div>
-                          <div className="font-medium text-white">
-                            {formatMoney(item.total)}
                           </div>
                         </div>
                       ))}

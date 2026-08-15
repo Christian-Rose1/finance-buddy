@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { OllamaReceiptExtractionProvider } from "@/lib/receipts/ollamaProvider";
 import { validateReceiptExtraction } from "@/lib/receipts/schema";
+import { categorizeReceiptItems } from "@/lib/receipts/categorizer";
+import { calculateSavingsOpportunities } from "@/lib/receipts/savings";
+import { purchaseFromReceipt } from "@/lib/purchases/fromReceipt";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -96,5 +99,31 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({ ok: true, receipt: result.data });
+  // Assign a spending category to each line item. Every other receipt
+  // field is preserved exactly as returned by the provider.
+  const categorized = {
+    ...result.data,
+    items: categorizeReceiptItems(result.data.items),
+  };
+
+  // Re-validate the final receipt after categorization.
+  const finalResult = validateReceiptExtraction(categorized);
+
+  if (!finalResult.success) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `Categorized receipt failed validation: ${finalResult.error.message}`,
+      },
+      { status: 500 }
+    );
+  }
+
+  // Compute the savings summary for the validated, categorized receipt.
+  const savings = calculateSavingsOpportunities(finalResult.data);
+
+  // Create a Purchase from the validated receipt data.
+  const purchase = purchaseFromReceipt(finalResult.data);
+
+  return NextResponse.json({ ok: true, receipt: finalResult.data, savings, purchase });
 }
