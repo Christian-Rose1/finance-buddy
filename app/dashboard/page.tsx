@@ -1,6 +1,11 @@
+import { redirect } from 'next/navigation';
+import Link from 'next/link';
 import { Nav } from '@/components/nav';
+import { PurchaseHistory } from '@/components/purchase-history';
+import { createServerClient } from '@/lib/supabase-server';
+import { getPurchasesForUser } from '@/lib/purchases/repository';
+import type { Purchase } from '@/lib/purchases/types';
 import {
-  ArrowUpRight,
   BarChart3,
   CircleDollarSign,
   FileUp,
@@ -8,7 +13,7 @@ import {
   Lightbulb,
   ReceiptText,
   Settings,
-  Sparkles,
+  ShoppingBag,
   Target,
   TrendingUp,
   Wallet,
@@ -21,29 +26,68 @@ const sidebarItems = [
   { label: 'Settings', icon: Settings, active: false },
 ];
 
-const metrics = [
-  { label: 'Money Found', value: '$1,842', icon: CircleDollarSign, accent: 'text-emerald-300' },
-  { label: 'Finance Buddy Score', value: '92', icon: Sparkles, accent: 'text-sky-300' },
-  { label: 'Potential Rewards Missed', value: '$324', icon: Target, accent: 'text-amber-300' },
-  { label: 'Monthly Spend', value: '$6,284', icon: Wallet, accent: 'text-violet-300' },
-];
+function formatCurrency(value: number, currency: string | null): string {
+  const code = currency && currency.length === 3 ? currency : 'USD';
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: code,
+    }).format(value);
+  } catch {
+    return `$${value.toFixed(2)}`;
+  }
+}
 
-const recommendations = [
-  {
-    title: 'Recover duplicate card charges',
-    detail: 'Two recurring charges from your last statement appear to be duplicates. Saving about $48 monthly.',
-  },
-  {
-    title: 'Unlock higher travel rewards',
-    detail: 'Switching one hotel booking to your travel card could earn an extra 2.3% back.',
-  },
-  {
-    title: 'Increase emergency fund transfer',
-    detail: 'A $150 automatic transfer would keep your savings target on pace this month.',
-  },
-];
+function computeTotalSpending(purchases: Purchase[]): number {
+  return purchases.reduce((sum, purchase) => {
+    const amount = purchase.amount;
+    if (amount === null || amount === undefined || Number.isNaN(amount)) {
+      return sum;
+    }
+    return sum + amount;
+  }, 0);
+}
 
-export default function DashboardPage() {
+function computeCategoryTotals(
+  purchases: Purchase[]
+): { category: string; total: number }[] {
+  const map = new Map<string, number>();
+  for (const purchase of purchases) {
+    if (!purchase.category) continue;
+    const amount = purchase.amount;
+    if (amount === null || amount === undefined || Number.isNaN(amount)) {
+      continue;
+    }
+    map.set(purchase.category, (map.get(purchase.category) ?? 0) + amount);
+  }
+  return Array.from(map.entries())
+    .map(([category, total]) => ({ category, total }))
+    .sort((a, b) => b.total - a.total);
+}
+
+async function loadDashboardData() {
+  const supabase = await createServerClient();
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+
+  if (userError || !userData.user) {
+    redirect('/login');
+  }
+
+  try {
+    const purchases = await getPurchasesForUser(userData.user.id);
+    return { purchases, error: null };
+  } catch {
+    return { purchases: [], error: 'Unable to load your purchases right now.' };
+  }
+}
+
+export default async function DashboardPage() {
+  const { purchases, error } = await loadDashboardData();
+
+  const totalSpending = computeTotalSpending(purchases);
+  const categoryTotals = computeCategoryTotals(purchases);
+  const hasPurchases = purchases.length > 0;
+
   return (
     <main className="min-h-screen bg-transparent text-slate-100">
       <Nav />
@@ -92,17 +136,27 @@ export default function DashboardPage() {
                     Track reward opportunities, spending trends, and statement uploads from one elegant control center.
                   </p>
                 </div>
-                <button
-                  type="button"
+                <Link
+                  href="/login"
                   className="inline-flex items-center justify-center rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/10"
                 >
                   Sign out
-                </button>
+                </Link>
               </div>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              {metrics.map(({ label, value, icon: Icon, accent }) => (
+              {[
+                {
+                  label: 'Total Spending',
+                  value: formatCurrency(totalSpending, 'USD'),
+                  icon: CircleDollarSign,
+                  accent: 'text-emerald-300',
+                },
+                { label: 'Purchases', value: String(purchases.length), icon: ShoppingBag, accent: 'text-sky-300' },
+                { label: 'Top Category', value: categoryTotals[0]?.category ?? '—', icon: Target, accent: 'text-amber-300' },
+                { label: 'Monthly Spend', value: '$6,284', icon: Wallet, accent: 'text-violet-300' },
+              ].map(({ label, value, icon: Icon, accent }) => (
                 <div key={label} className="fb-card p-4 sm:p-5">
                   <div className="flex items-center justify-between">
                     <p className="text-sm text-slate-400">{label}</p>
@@ -124,67 +178,84 @@ export default function DashboardPage() {
                     We will surface missed rewards, duplicate charges, and smart savings opportunities in seconds.
                   </p>
                 </div>
-                <button
-                  type="button"
+                <Link
+                  href="/upload"
                   className="inline-flex items-center justify-center rounded-2xl bg-gradient-to-r from-sky-400 to-cyan-300 px-5 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-sky-500/20 transition hover:opacity-90"
                 >
                   <FileUp className="mr-2 h-5 w-5" />
                   Upload statement
-                </button>
+                </Link>
               </div>
             </div>
 
+            {error ? (
+              <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 p-4 text-sm text-rose-200">
+                <p className="font-medium">Something went wrong</p>
+                <p className="mt-1 text-rose-100/80">{error}</p>
+              </div>
+            ) : null}
+
             <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
               <section className="fb-card p-4 sm:p-6">
-                <div className="flex items-center gap-2">
-                  <Target className="h-5 w-5 text-sky-300" />
-                  <h2 className="text-lg font-semibold text-white">Priority actions</h2>
-                </div>
-
-                <div className="mt-5 space-y-3">
-                  {recommendations.map((item) => (
-                    <div key={item.title} className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="font-medium text-white">{item.title}</p>
-                          <p className="mt-1 text-sm text-slate-400">{item.detail}</p>
-                        </div>
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-sky-400/10 text-sky-300">
-                          <ArrowUpRight className="h-4 w-4" />
-                        </div>
+                {!hasPurchases ? (
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <ShoppingBag className="h-5 w-5 text-sky-300" />
+                      <h2 className="text-lg font-semibold text-white">Purchase History</h2>
+                    </div>
+                    <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/60 p-6 text-center">
+                      <p className="font-medium text-white">No purchases yet</p>
+                      <p className="mt-2 text-sm text-slate-400">
+                        Upload a receipt or statement to start building your dashboard.
+                      </p>
+                      <div className="mt-4 flex justify-center gap-3">
+                        <Link href="/upload" className="fb-btn">
+                          Upload now
+                        </Link>
+                        <Link href="/receipts" className="fb-btn-secondary">
+                          Add receipt
+                        </Link>
                       </div>
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ) : (
+                  <PurchaseHistory purchases={purchases} />
+                )}
               </section>
 
               <section className="fb-card p-4 sm:p-6">
                 <div className="flex items-center gap-2">
                   <BarChart3 className="h-5 w-5 text-sky-300" />
-                  <h2 className="text-lg font-semibold text-white">This month at a glance</h2>
+                  <h2 className="text-lg font-semibold text-white">Category spending</h2>
                 </div>
 
-                <div className="mt-5 space-y-3">
-                  {[
-                    { label: 'Spend pacing', value: '+12.3% vs last month', tone: 'text-emerald-300' },
-                    { label: 'Cash-back recovery', value: '$186 available', tone: 'text-sky-300' },
-                    { label: 'Card utilization', value: '74% healthy balance', tone: 'text-violet-300' },
-                  ].map((item) => (
-                    <div
-                      key={item.label}
-                      className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
-                    >
-                      <div>
-                        <p className="text-sm text-slate-400">{item.label}</p>
-                        <p className="mt-1 text-sm font-medium text-white">{item.value}</p>
+                {!hasPurchases ? (
+                  <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/60 p-6 text-center">
+                    <p className="text-sm text-slate-400">
+                      Categories will appear here once you have added purchases.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="mt-5 space-y-3">
+                    {categoryTotals.slice(0, 6).map((item) => (
+                      <div
+                        key={item.category}
+                        className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3"
+                      >
+                        <div>
+                          <p className="text-sm text-slate-400">{item.category}</p>
+                          <p className="mt-1 text-sm font-medium text-white">
+                            {formatCurrency(item.total, 'USD')}
+                          </p>
+                        </div>
+                        <div className="rounded-full bg-white/5 px-3 py-1 text-sm text-emerald-300">
+                          <TrendingUp className="mr-1 inline h-4 w-4" />
+                          {((item.total / Math.max(totalSpending, 1)) * 100).toFixed(0)}%
+                        </div>
                       </div>
-                      <div className={`rounded-full bg-white/5 px-3 py-1 text-sm ${item.tone}`}>
-                        <TrendingUp className="mr-1 inline h-4 w-4" />
-                        Live
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </section>
             </div>
           </section>

@@ -12,6 +12,7 @@
 
 import type { CardBenefit, Wallet, WalletCard } from "./types";
 import type { ReceiptExtraction, ReceiptItem } from "@/lib/receipts/types";
+import { normalizeCategory, isLeafOf, type CanonicalCategoryKey } from "@/lib/rewards/categories";
 
 /** A single card/benefit opportunity matched against a receipt. */
 export interface BenefitMatch {
@@ -47,14 +48,43 @@ function toCents(value: number): number {
   return Math.max(0, Math.round(value * 100) / 100);
 }
 
-/** True when a receipt item's category exactly matches the given category. */
-function itemMatchesCategory(item: ReceiptItem, category: string | null): boolean {
-  return (
-    category !== null && normalize(item.category) === normalize(category)
-  );
+/**
+ * Normalize a receipt item category to a canonical category key.
+ * Legacy flat strings (e.g. "Dining") and already-canonical keys are
+ * accepted. Unknown values become null.
+ */
+function normalizeItemCategory(
+  category: string | null
+): CanonicalCategoryKey | null {
+  return normalizeCategory(category);
 }
 
-/** True when the receipt merchant contains the benefit's merchant (case-insensitive). */
+/**
+ * True when a receipt item's category matches the benefit's category.
+ *
+ * Matching supports both exact leaf matches and root-aware matching: a
+ * benefit targeting "food" matches items categorized as "food:dining" or
+ * legacy "Dining" (normalized to "food:dining").
+ */
+function itemMatchesCategory(
+  item: ReceiptItem,
+  category: string | null
+): boolean {
+  if (category === null) return false;
+
+  const itemCategory = normalizeItemCategory(item.category);
+  const benefitCategory = normalizeCategory(category);
+
+  if (itemCategory === null || benefitCategory === null) return false;
+  if (itemCategory === benefitCategory) return true;
+
+  return isLeafOf(itemCategory, benefitCategory);
+}
+
+/**
+ * True when the receipt merchant contains the benefit's merchant pattern
+ * (case-insensitive substring).
+ */
 function receiptMatchesMerchant(
   receipt: ReceiptExtraction,
   merchant: string | null
@@ -65,9 +95,34 @@ function receiptMatchesMerchant(
 }
 
 /**
+ * Check whether the receipt merchant is excluded by any pattern in the
+ * benefit's exclusion list. Returns the matching exclusion pattern, or null
+ * when not excluded.
+ */
+function merchantExcluded(
+  receipt: ReceiptExtraction,
+  excludedMerchants: string[] | undefined
+): string | null {
+  if (excludedMerchants === undefined || excludedMerchants.length === 0) {
+    return null;
+  }
+  if (receipt.merchant === null) return null;
+
+  const pattern = excludedMerchants.find((exclusion) =>
+    normalize(receipt.merchant).includes(normalize(exclusion))
+  );
+
+  return pattern ?? null;
+}
+
+/**
  * Matches an `earning_rate` benefit.
  *
- * Matching: receipt item category must equal `benefit.category`.
+ * Evaluation precedence:
+ * 1. Merchant exclusion wins → no match.
+ * 2. Specific merchant match uses the whole receipt as matched spend.
+ * 3. Canonical category match uses only items in that category (root-aware).
+ *
  * Value: when `percentage` is available,
  *   estimatedValue = matchedSpend × (percentage / 100)
  * Points/miles are NOT converted to dollars unless the benefit explicitly
@@ -78,17 +133,28 @@ function matchEarningRate(
   benefit: CardBenefit,
   card: WalletCard
 ): BenefitMatch | null {
-  if (benefit.category === null) {
+  const excluded = merchantExcluded(receipt, benefit.excludedMerchants);
+  if (excluded !== null) {
     return null;
   }
 
-  const matched = receipt.items.filter((item) =>
-    itemMatchesCategory(item, benefit.category)
-  );
+  const merchantMatch = receiptMatchesMerchant(receipt, benefit.merchant);
+
+  let matched: ReceiptItem[] = [];
+
+  if (merchantMatch) {
+    matched = receipt.items;
+  } else if (benefit.category !== null) {
+    matched = receipt.items.filter((item) =>
+      itemMatchesCategory(item, benefit.category)
+    );
+  }
 
   if (matched.length === 0) {
     return null;
   }
+
+  const categoryLabel = benefit.category ?? "merchant";
 
   const matchedItemNames = matched.map((item) => item.name ?? "Unknown item");
   const matchedSpend = matched.reduce((sum, item) => sum + (item.total ?? 0), 0);
@@ -98,7 +164,7 @@ function matchEarningRate(
 
   if (benefit.percentage !== null) {
     estimatedValue = toCents(matchedSpend * (benefit.percentage / 100));
-    reason = `Matches ${matched.length} ${benefit.category} item(s): $${matchedSpend.toFixed(
+    reason = `Matches ${matched.length} ${categoryLabel} item(s): $${matchedSpend.toFixed(
       2
     )} spend × ${benefit.percentage}% = $${estimatedValue.toFixed(
       2
@@ -106,7 +172,7 @@ function matchEarningRate(
   } else {
     estimatedValue = 0;
     const pointsEarned = matchedSpend * benefit.rewardValue;
-    reason = `Matches ${matched.length} ${benefit.category} item(s): $${matchedSpend.toFixed(
+    reason = `Matches ${matched.length} ${categoryLabel} item(s): $${matchedSpend.toFixed(
       2
     )} spend earns ${pointsEarned.toFixed(0)} ${benefit.rewardCurrency} (at ${
       benefit.rewardValue
@@ -127,16 +193,24 @@ function matchEarningRate(
 /**
  * Matches `statement_credit` and `offer` benefits.
  *
- * Matching: benefit applies only when its defined criteria match — the
- * receipt merchant contains `benefit.merchant` and/or receipt item
- * categories match `benefit.category`. Value uses `fixedValue`, capped by
- * `remainingLimit` when provided. Never negative.
+ * Evaluation precedence:
+ * 1. Merchant exclusion wins → no match.
+ * 2. Specific merchant match qualifies.
+ * 3. Canonical category match qualifies (root-aware).
+ *
+ * Value uses `fixedValue`, capped by `remainingLimit` when provided. Never
+ * negative.
  */
 function matchFixedValueBenefit(
   receipt: ReceiptExtraction,
   benefit: CardBenefit,
   card: WalletCard
 ): BenefitMatch | null {
+  const excluded = merchantExcluded(receipt, benefit.excludedMerchants);
+  if (excluded !== null) {
+    return null;
+  }
+
   const merchantMatch = receiptMatchesMerchant(receipt, benefit.merchant);
 
   const categoryMatchedItems =

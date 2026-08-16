@@ -12,13 +12,13 @@ This document should contain current state, current limitations, and the next ta
 
 # Current Status
 
-Finance Buddy has progressed from a receipt-processing prototype into a multi-source financial Purchase architecture.
+Finance Buddy has progressed from a receipt-processing prototype into a multi-source financial Purchase architecture with a working MVP dashboard and first optimization prototype.
 
 Current major milestone:
 
-**Statement Purchase Persistence — VERIFIED COMPLETE**
+**MVP Dashboard & Development Best-Card Optimization — VERIFIED COMPLETE**
 
-The statement → Purchase → Supabase persistence flow is wired and verified with a real authenticated browser request.
+The authenticated Purchase History dashboard, Purchase Detail page, and first development best-card optimization prototype are wired and verified in the browser.
 
 Verified complete:
 
@@ -36,14 +36,33 @@ Verified complete:
 - The statement parser/year-detection path is working with the real Chase statement.
 - `npm run build` passes.
 - Temporary persistence/test artifacts were removed.
+- Purchase History dashboard (`/dashboard`) renders authenticated user's persisted Purchases.
+- Recent Purchases link to individual Purchase Detail pages (`/purchases/[id]`).
+- Purchase Detail page shows merchant, date, amount, currency, source, category, evidence count, additional charges (discount/tax/tip/fees) when present, and item list for receipt Purchases.
+- Statement Purchases with `items = []` render cleanly without an empty item section.
+- `getPurchasesForUser` and `getPurchaseForUser` repository functions read only the authenticated user's data via the cookie-aware server Supabase client; RLS is the security boundary.
+- `purchaseToReceiptExtraction` adapter converts a canonical `Purchase` into the `ReceiptExtraction` shape consumed by the existing `optimizeReceiptCard()`.
+- Statement Purchases with no items use `purchase.category` as a fallback signal for the optimizer.
+- Development Best Card optimization prototype on Purchase Detail shows the recommended development card, estimated reward value, recommendation, and matched benefit reasons only when `bestEstimatedValue > 0`.
+- The optimization section is clearly labeled "Development test data — not real card advice."
+- No "missed value" or personalized claim such as "you could have earned $X more" is shown; `Purchase.cardId` is not currently populated from a real user wallet.
+- Browser verification completed successfully.
+- `npm run build` passes.
+- Canonical spending/rewards category taxonomy design is complete and captured in `lib/rewards/categoryDesign.md` and `lib/rewards/categories.ts`.
+- Created and revised the verified MVP Card Product Catalog seed set (`supabase/migrations/20260816110000_seed_card_product_catalog.sql`): 4 products, 3 reward programs, and 9 earning rules, all sourced from official issuer websites on 2026-08-16. Four rules were deferred because the current evaluator cannot enforce their conditions: Chase Freedom Unlimited 5% Chase Travel (channel), Chase Sapphire Preferred 5% Chase Travel, 2% other travel, and 3% online grocery/streaming (channel, merchant, and conditional exclusions), and Amex Gold 4X U.S. supermarkets (merchant-category exclusions).
+- Personalized best-card recommendation is wired end-to-end: Purchase Detail loads the authenticated user's WalletCards, uses explicit user-linked CardProducts, evaluates active catalog earning rules through the canonical eligibility layer, and recommends the best eligible user-owned card. When no linked user card exists, the page falls back to the isolated development-wallet recommendation, clearly labeled as test data.
 
 Earlier verified milestones that remain valid:
 - Receipt Purchase Persistence — verified complete with real authenticated browser request.
+- Statement Purchase Persistence — verified complete with real authenticated browser request.
 - Generic persistence integration — `persistPurchase()` works in the real Next.js request context, atomic `persist_purchase` RPC works, `ON DELETE CASCADE` was verified.
 
-Known architectural limitation:
+Known architectural limitations:
 
-Each Purchase is persisted atomically through `persistPurchase()` / `persist_purchase`, but an entire statement import is not currently one atomic batch. A failure partway through a statement import could therefore leave a partial import.
+1. Each Purchase is persisted atomically through `persistPurchase()` / `persist_purchase`, but an entire statement import is not currently one atomic batch. A failure partway through a statement import could therefore leave a partial import.
+2. The development wallet uses simplified categories such as "Travel" and "Groceries", while persisted statement Purchases currently use categories such as "Travel / Transportation" and "Bills & Subscriptions". The deterministic optimizer correctly produces no match when categories do not align. A canonical spending/rewards category taxonomy and mapping strategy is needed before personalized card optimization can be reliably shown across all sources.
+3. The rewards eligibility evaluator produces `likely_eligible` for category-based rule matches and `confirmed_eligible` only for explicit merchant matches. Personalized recommendations must never represent `likely_eligible` as guaranteed eligible. The MVP catalog seed therefore defers rules that depend on channel/booking-source restrictions or merchant-category exclusions that the current evaluator cannot enforce.
+4. Points and miles earning rules are recommended when they match, but the optimizer does not silently convert them to dollar values. Only percentage-based cashback, statement credits, and fixed-value offers contribute to `bestEstimatedValue`. The UI shows the eligible rule explanation so the user sees the points/miles earn rate.
 
 ---
 
@@ -449,6 +468,14 @@ Do not edit these applied migrations.
 
 Future database changes require new migrations.
 
+# Pending Migrations
+
+Created and ready for manual application:
+
+`20260816104000_create_card_product_catalog.sql` — shared catalog schema (reward_programs, card_products, earning_rules).
+
+`20260816110000_seed_card_product_catalog.sql` — verified seed data for 4 card products and 9 earning rules.
+
 ---
 
 # Atomic Purchase Persistence RPC
@@ -577,18 +604,7 @@ The temporary `app/api/dev/test-persist` route has been removed.
 
 # Immediate Current Task
 
-Persisted Purchase Evidence Reconciliation
-
-The goal of the next milestone is to identify when independently persisted Purchases likely represent the same real-world purchase, especially:
-
-receipt Purchase
-+
-statement Purchase
-→ reconciliation candidate
-
-Candidate reconciliation must preserve the existing rule that matching does not automatically imply merging.
-
-Do not implement automatic merging yet.
+Wire receipt Purchase persistence end-to-end. When a receipt is extracted and converted to a canonical Purchase, persist it via `persistPurchase()` using the authenticated server client, then verify it appears in the authenticated user's Purchase History. The seed migration and personalized best-card optimizer are complete; the next milestone is connecting the receipt pipeline to persistence.
 
 ---
 

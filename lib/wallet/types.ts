@@ -26,6 +26,9 @@ export type BenefitType =
 /** The currency in which a benefit or card earns. */
 export type RewardCurrency = "cashback" | "points" | "miles" | "none";
 
+/** Provenance/source of a wallet card. */
+export type WalletCardSource = "development" | "user" | "manual" | "other";
+
 /** A benefit associated with a specific card. */
 export interface CardBenefit {
   /** Stable identifier for the benefit. */
@@ -49,6 +52,9 @@ export interface CardBenefit {
   /** Merchant the benefit applies to, when merchant-specific. */
   merchant: string | null;
 
+  /** Merchants explicitly excluded from this benefit, even if category matches. */
+  excludedMerchants?: string[];
+
   /** The currency this benefit rewards (e.g. points, cashback, miles). */
   rewardCurrency: RewardCurrency;
 
@@ -70,8 +76,8 @@ export interface CardBenefit {
   /** Whether the benefit is currently active. */
   active: boolean;
 
-  /** Provenance. Always "development" for dev fixtures. */
-  source: "development";
+  /** Provenance. "development" for dev fixtures; issuer-backed rules use CardProductSource. */
+  source: string;
 }
 
 /** A credit/debit card in the user's wallet. */
@@ -97,8 +103,19 @@ export interface WalletCard {
   /** Whether the card is currently active. */
   active: boolean;
 
-  /** Provenance. Always "development" for dev fixtures. */
-  source: "development";
+  /**
+   * Provenance/source of the card.
+   * - "development" for in-code test fixtures.
+   * - "user" for cards persisted by the user.
+   * - "manual" for future manual entry sources.
+   */
+  source: WalletCardSource;
+
+  /**
+   * Optional link to a shared card product in the catalog.
+   * When null, the card is user-entered and the fields above are authoritative.
+   */
+  cardProductId: string | null;
 }
 
 /** The user's wallet: held cards plus their associated benefits. */

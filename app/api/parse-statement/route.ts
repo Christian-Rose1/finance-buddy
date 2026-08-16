@@ -176,7 +176,7 @@ export async function POST(request: NextRequest) {
   // Persist each statement Purchase for the authenticated user. The server
   // client reads the Supabase session from request cookies, so browser and
   // server share the same authenticated session.
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
 
   if (authError || !user) {

@@ -10,7 +10,7 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL('/login', requestUrl.origin));
   }
 
-  const supabase = createServerClient();
+  const supabase = await createServerClient();
 
   // Exchange the OAuth code for an authenticated session. The @supabase/ssr
   // server client writes the session into cookies (readable by both this route

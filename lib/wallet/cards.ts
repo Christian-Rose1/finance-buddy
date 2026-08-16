@@ -27,6 +27,7 @@ export const DEVELOPMENT_WALLET: Wallet = {
       lastFour: "1234",
       active: true,
       source: "development",
+      cardProductId: null,
     },
     {
       id: "dev-card-amex-gold-0001",
@@ -37,6 +38,7 @@ export const DEVELOPMENT_WALLET: Wallet = {
       lastFour: "5678",
       active: true,
       source: "development",
+      cardProductId: null,
     },
     {
       id: "dev-card-cap1-venturex-0001",
@@ -47,6 +49,7 @@ export const DEVELOPMENT_WALLET: Wallet = {
       lastFour: "9012",
       active: true,
       source: "development",
+      cardProductId: null,
     },
     {
       id: "dev-card-inactive-0001",
@@ -57,6 +60,7 @@ export const DEVELOPMENT_WALLET: Wallet = {
       lastFour: "0000",
       active: false,
       source: "development",
+      cardProductId: null,
     },
   ],
   benefits: [
@@ -68,8 +72,9 @@ export const DEVELOPMENT_WALLET: Wallet = {
       title: "3x points on dining (dev fixture)",
       description:
         "DEVELOPMENT FIXTURE — earns 3 points per dollar on dining. Not a verified/current real-world benefit.",
-      category: "Dining",
+      category: "food:dining",
       merchant: null,
+      excludedMerchants: [],
       rewardCurrency: "points",
       rewardValue: 3,
       percentage: null,
@@ -87,8 +92,9 @@ export const DEVELOPMENT_WALLET: Wallet = {
       title: "4x points on groceries (dev fixture)",
       description:
         "DEVELOPMENT FIXTURE — earns 4 points per dollar on groceries. Not a verified/current real-world benefit.",
-      category: "Groceries",
+      category: "food:groceries",
       merchant: null,
+      excludedMerchants: [],
       rewardCurrency: "points",
       rewardValue: 4,
       percentage: null,
@@ -106,8 +112,9 @@ export const DEVELOPMENT_WALLET: Wallet = {
       title: "Travel purchase protection (dev fixture)",
       description:
         "DEVELOPMENT FIXTURE — illustrative travel benefit. Not a verified/current real-world benefit.",
-      category: "Travel",
+      category: "travel",
       merchant: null,
+      excludedMerchants: [],
       rewardCurrency: "none",
       rewardValue: 0,
       percentage: null,
@@ -125,8 +132,9 @@ export const DEVELOPMENT_WALLET: Wallet = {
       title: "$50 annual travel credit (dev fixture)",
       description:
         "DEVELOPMENT FIXTURE — illustrative statement credit. Not a verified/current real-world benefit.",
-      category: "Travel",
+      category: "travel",
       merchant: null,
+      excludedMerchants: [],
       rewardCurrency: "none",
       rewardValue: 0,
       percentage: null,
@@ -146,6 +154,7 @@ export const DEVELOPMENT_WALLET: Wallet = {
         "DEVELOPMENT FIXTURE — illustrative merchant offer. Not a real, currently available offer.",
       category: null,
       merchant: "Dev Cafe",
+      excludedMerchants: [],
       rewardCurrency: "cashback",
       rewardValue: 0,
       percentage: null,
@@ -165,6 +174,7 @@ export const DEVELOPMENT_WALLET: Wallet = {
         "DEVELOPMENT FIXTURE — intentionally inactive to verify active filtering.",
       category: null,
       merchant: null,
+      excludedMerchants: [],
       rewardCurrency: "none",
       rewardValue: 0,
       percentage: null,

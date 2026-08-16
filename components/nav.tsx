@@ -14,6 +14,9 @@ export function Nav() {
           <Link href="/dashboard" className="rounded-full px-3 py-2 transition hover:bg-white/10 hover:text-white">
             Dashboard
           </Link>
+          <Link href="/wallet" className="rounded-full px-3 py-2 transition hover:bg-white/10 hover:text-white">
+            Wallet
+          </Link>
           <Link href="/upload" className="rounded-full px-3 py-2 transition hover:bg-white/10 hover:text-white">
             Upload
           </Link>
