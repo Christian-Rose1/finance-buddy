@@ -18,6 +18,7 @@ import type {
   RewardProgram,
   CardProduct,
   EarningRule,
+  ProductBenefit,
   CardProductSource,
 } from "./catalogTypes";
 import type { CardNetwork, RewardCurrency } from "@/lib/wallet/types";
@@ -56,6 +57,24 @@ function toCardProduct(row: Record<string, unknown>): CardProduct {
     source: (row.source as CardProductSource) ?? "unknown",
     lastVerifiedAt: (row.last_verified_at as string | null) ?? null,
     metadata: (row.metadata as Record<string, unknown> | null) ?? null,
+  };
+}
+
+function toProductBenefit(row: Record<string, unknown>): ProductBenefit {
+  return {
+    id: row.id as string,
+    cardProductId: (row.card_product_id as string) ?? "",
+    type: (row.type as ProductBenefit["type"]) ?? "other",
+    title: (row.title as string | null) ?? "",
+    description: (row.description as string | null) ?? null,
+    eligibleCategory: (row.eligible_category as string | null) ?? null,
+    eligibleMerchant: (row.eligible_merchant as string | null) ?? null,
+    fixedValue: parseNumeric(row.fixed_value),
+    annualLimit: parseNumeric(row.annual_limit),
+    requiresActivation: (row.requires_activation as boolean | null) ?? false,
+    source: (row.source as CardProductSource) ?? "unknown",
+    lastVerifiedAt: (row.last_verified_at as string | null) ?? null,
+    active: (row.active as boolean | null) ?? true,
   };
 }
 
@@ -152,6 +171,65 @@ export async function getCardProduct(
   }
 
   return toCardProduct(row as Record<string, unknown>);
+}
+
+/**
+ * Load a single product benefit definition by id.
+ */
+export async function getProductBenefit(
+  benefitId: string,
+  client?: SupabaseClient
+): Promise<ProductBenefit | null> {
+  const supabase = client ?? await createServerClient();
+
+  const { data: row, error } = await supabase
+    .from("product_benefits")
+    .select("*")
+    .eq("id", benefitId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error("Failed to load product benefit.");
+  }
+
+  if (!row) {
+    return null;
+  }
+
+  return toProductBenefit(row as Record<string, unknown>);
+}
+
+/**
+ * Load product benefit definitions by a set of ids, optionally filtered to
+ * active product-level benefits.
+ */
+export async function getProductBenefits(
+  ids: string[],
+  options: { activeOnly?: boolean } = {},
+  client?: SupabaseClient
+): Promise<ProductBenefit[]> {
+  const supabase = client ?? await createServerClient();
+
+  if (ids.length === 0) {
+    return [];
+  }
+
+  let query = supabase
+    .from("product_benefits")
+    .select("*")
+    .in("id", ids);
+
+  if (options.activeOnly) {
+    query = query.eq("active", true);
+  }
+
+  const { data: rows, error } = await query;
+
+  if (error) {
+    throw new Error("Failed to load product benefits.");
+  }
+
+  return (rows ?? []).map((row) => toProductBenefit(row as Record<string, unknown>));
 }
 
 /**

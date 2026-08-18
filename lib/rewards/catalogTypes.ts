@@ -82,6 +82,68 @@ export interface CardProduct {
   metadata: Record<string, unknown> | null;
 }
 
+/**
+ * A product-level, non-earning benefit/perk/credit definition.
+ *
+ * Distinction (per the approved Card Product Catalog design):
+ * - EarningRule  = how a product earns transaction-level rewards.
+ * - ProductBenefit = a perk/credit/protection that does not produce
+ *   transaction-level rewards (e.g. statement credit, lounge access).
+ *
+ * This is the shared, non-user-owned definition. User-specific usage state
+ * (activation, remaining value, expiry) lives separately in
+ * `lib/wallet` as `WalletBenefit` and references this by `productBenefitId`.
+ */
+export interface ProductBenefit {
+  /** Stable benefit identifier. */
+  id: string;
+
+  /** The card product this benefit belongs to. */
+  cardProductId: string;
+
+  /** Benefit classification. */
+  type:
+    | "statement_credit"
+    | "travel_credit"
+    | "lounge_access"
+    | "purchase_protection"
+    | "extended_warranty"
+    | "trip_delay"
+    | "free_checked_bag"
+    | "hotel_status"
+    | "other";
+
+  /** Short title. */
+  title: string;
+
+  /** Longer description. */
+  description: string | null;
+
+  /** Category this benefit relates to, if any. */
+  eligibleCategory: string | null;
+
+  /** Merchant this benefit relates to, if any. */
+  eligibleMerchant: string | null;
+
+  /** Fixed dollar value, when applicable. */
+  fixedValue: number | null;
+
+  /** Annual limit or cap, when applicable. */
+  annualLimit: number | null;
+
+  /** Whether activation is required. */
+  requiresActivation: boolean;
+
+  /** Authoritative source. */
+  source: CardProductSource;
+
+  /** ISO timestamp when this record was last verified. */
+  lastVerifiedAt: string | null;
+
+  /** Whether the benefit is currently active at the product level. */
+  active: boolean;
+}
+
 /** A rule describing how a card product earns rewards for eligible transactions. */
 export interface EarningRule {
   /** Stable rule identifier. */

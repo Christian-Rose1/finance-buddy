@@ -3,8 +3,10 @@ import { Nav } from "@/components/nav";
 import { createServerClient } from "@/lib/supabase-server";
 import { getWalletCardsForUser } from "@/lib/wallet/repository";
 import { getCardProducts } from "@/lib/rewards/catalogRepository";
+import { getWalletBenefitsWithProducts } from "@/lib/wallet/benefitsRepository";
 import { WalletCardList } from "@/components/wallet-card-list";
 import { WalletCardForm } from "@/components/wallet-card-form";
+import type { WalletBenefitDisplay } from "@/lib/wallet/benefitsRepository";
 import { Wallet } from "lucide-react";
 
 async function loadWalletData() {
@@ -20,14 +22,33 @@ async function loadWalletData() {
       getWalletCardsForUser(userData.user.id),
       getCardProducts({ activeOnly: true }),
     ]);
-    return { cards, products, error: null };
+
+    // Load persisted benefit state for each card, rehydrated with its shared
+    // product definition. Empty benefit state renders cleanly via the UI.
+    const benefitsByCard: Record<string, WalletBenefitDisplay[]> = {};
+    const benefitResults = await Promise.all(
+      cards.map(async (card) => ({
+        cardId: card.id,
+        benefits: await getWalletBenefitsWithProducts(card.id, userData.user.id),
+      }))
+    );
+    for (const result of benefitResults) {
+      benefitsByCard[result.cardId] = result.benefits;
+    }
+
+    return { cards, products, benefitsByCard, error: null };
   } catch {
-    return { cards: [], products: [], error: "Unable to load your wallet right now." };
+    return {
+      cards: [],
+      products: [],
+      benefitsByCard: {},
+      error: "Unable to load your wallet right now.",
+    };
   }
 }
 
 export default async function WalletPage() {
-  const { cards, products, error } = await loadWalletData();
+  const { cards, products, benefitsByCard, error } = await loadWalletData();
 
   return (
     <main className="min-h-screen bg-transparent text-slate-100">
@@ -74,7 +95,11 @@ export default async function WalletPage() {
               </span>
             </h2>
           </div>
-          <WalletCardList cards={cards} products={products} />
+          <WalletCardList
+            cards={cards}
+            products={products}
+            benefitsByCard={benefitsByCard}
+          />
         </section>
       </div>
     </main>

@@ -126,3 +126,49 @@ export interface Wallet {
   /** Every benefit across all cards. */
   benefits: CardBenefit[];
 }
+
+/**
+ * User-specific state for a shared, product-level benefit definition.
+ *
+ * Separation of concerns:
+ * - The shared product benefit definition lives in the catalog
+ *   (`product_benefits`).
+ * - The user's owned card instance lives in `wallet_cards`.
+ * - This row captures the per-user state: eligibility, activation, expiry,
+ *   remaining/used value, and unstructured metadata.
+ *
+ * Statement credits / capped benefits use `remainingValue` / `usedValue`.
+ * `remainingValue` is null when the benefit is not capped.
+ */
+export interface WalletBenefit {
+  /** Stable identifier for the user's benefit state row. */
+  id: string;
+
+  /** The id of the user's wallet card this benefit belongs to. */
+  walletCardId: string;
+
+  /**
+   * The shared product-level benefit this user state is derived from.
+   * This is the reference to `product_benefits`, never a copy of the
+   * definition.
+   */
+  productBenefitId: string;
+
+  /** Whether the user considers this benefit active/eligible. */
+  active: boolean;
+
+  /** When the user activated this benefit, if activated. */
+  activatedAt: string | null;
+
+  /** When this benefit expires for the user, if it expires. */
+  expiresAt: string | null;
+
+  /** Remaining value (e.g. statement credit) available, when capped. */
+  remainingValue: number | null;
+
+  /** Value already used/claimed against the benefit. */
+  usedValue: number;
+
+  /** Unstructured user-specific metadata. */
+  metadata: Record<string, unknown> | null;
+}

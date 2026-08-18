@@ -14,10 +14,15 @@ import {
   type PurchaseOptimizationResult,
 } from '@/lib/purchases/optimizePurchase';
 import { DEVELOPMENT_WALLET } from '@/lib/wallet/cards';
+import { getWalletBenefitsWithProducts } from '@/lib/wallet/benefitsRepository';
+import {
+  evaluateBenefitOpportunity,
+  type BenefitOpportunity,
+} from '@/lib/wallet/benefitOpportunity';
 import type { Purchase } from '@/lib/purchases/types';
 import type { WalletCard } from '@/lib/wallet/types';
 import type { CardProduct, EarningRule } from '@/lib/rewards/catalogTypes';
-import { ArrowLeft, Receipt, Calendar, CreditCard, Tag, Sparkles } from 'lucide-react';
+import { ArrowLeft, Receipt, Calendar, CreditCard, Tag, Sparkles, Gift } from 'lucide-react';
 
 function formatCurrency(value: number, currency: string | null): string {
   const code = currency && currency.length === 3 ? currency : 'USD';
@@ -63,9 +68,25 @@ function formatStatus(status: string): string {
   }
 }
 
+function formatBenefitStatus(status: BenefitOpportunity['status']): string {
+  switch (status) {
+    case 'confirmed_eligible':
+      return 'Eligible';
+    case 'likely_eligible':
+      return 'Likely eligible';
+    case 'insufficient_information':
+      return 'Cannot confirm';
+    case 'not_eligible':
+      return 'Not eligible';
+    default:
+      return status;
+  }
+}
+
 async function loadPurchaseWithOptimization(id: string): Promise<{
   purchase: Purchase;
   optimization: PurchaseOptimizationResult | null;
+  benefitOpportunities: BenefitOpportunity[];
 } | null> {
   const supabase = await createServerClient();
   const { data: userData, error: userError } = await supabase.auth.getUser();
@@ -105,13 +126,51 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
       optimization = optimizePurchaseWithDevelopmentWallet(purchase, DEVELOPMENT_WALLET);
     }
 
+    // Load the user's active wallet benefit state (rehydrated with shared
+    // product definitions) and evaluate each against this Purchase.
+    const benefitOpportunities = await loadBenefitOpportunities(
+      purchase,
+      walletCards,
+      userId
+    );
+
     return {
       purchase,
       optimization: optimization.bestCardId !== null ? optimization : null,
+      benefitOpportunities,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Load active wallet benefits for the user's cards and evaluate each against
+ * the Purchase. Only benefits that are not clearly not_eligible are returned,
+ * so the UI shows meaningful opportunities.
+ */
+async function loadBenefitOpportunities(
+  purchase: Purchase,
+  walletCards: WalletCard[],
+  userId: string
+): Promise<BenefitOpportunity[]> {
+  const activeCards = walletCards.filter((card) => card.active);
+
+  const displaysPerCard = await Promise.all(
+    activeCards.map((card) => getWalletBenefitsWithProducts(card.id, userId))
+  );
+
+  const opportunities: BenefitOpportunity[] = [];
+  for (const displays of displaysPerCard) {
+    for (const { product, state } of displays) {
+      const opportunity = evaluateBenefitOpportunity(purchase, product, state);
+      if (opportunity.status !== 'not_eligible') {
+        opportunities.push(opportunity);
+      }
+    }
+  }
+
+  return opportunities;
 }
 
 async function loadRulesForProducts(
@@ -146,7 +205,7 @@ export default async function PurchaseDetailPage({
     notFound();
   }
 
-  const { purchase, optimization } = result;
+  const { purchase, optimization, benefitOpportunities } = result;
   const hasItems = purchase.items.length > 0;
   const hasExtraCharges =
     purchase.discount !== null ||
@@ -366,6 +425,52 @@ export default async function PurchaseDetailPage({
                     ))}
                 </div>
               )}
+            </div>
+          )}
+
+          {benefitOpportunities.length > 0 && (
+            <div className="mt-8 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-5">
+              <div className="flex items-center gap-2">
+                <Gift className="h-5 w-5 text-emerald-300" />
+                <h2 className="text-lg font-semibold text-white">Benefit opportunities</h2>
+              </div>
+              <div className="mt-4 space-y-2">
+                {benefitOpportunities.map((opportunity) => (
+                  <div
+                    key={opportunity.walletBenefitId}
+                    className="rounded-2xl border border-white/10 bg-white/5 p-4"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-medium text-white">{opportunity.title}</p>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                          opportunity.status === 'confirmed_eligible' ||
+                          opportunity.status === 'likely_eligible'
+                            ? 'bg-emerald-400/10 text-emerald-300'
+                            : 'bg-amber-400/10 text-amber-200'
+                        }`}
+                      >
+                        {formatBenefitStatus(opportunity.status)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-400">{opportunity.reason}</p>
+                    {(opportunity.status === 'confirmed_eligible' ||
+                      opportunity.status === 'likely_eligible') &&
+                    opportunity.usableValue !== null ? (
+                      <p className="mt-2 text-sm font-medium text-emerald-300">
+                        Usable value: {formatCurrency(opportunity.usableValue, purchase.currency)}
+                      </p>
+                    ) : null}
+                    {opportunity.status === 'insufficient_information' &&
+                    opportunity.potentialValue !== null ? (
+                      <p className="mt-2 text-sm font-medium text-amber-200">
+                        Up to {formatCurrency(opportunity.potentialValue, purchase.currency)} if
+                        booked through Chase Travel
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

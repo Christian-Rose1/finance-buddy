@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import type { WalletCard } from "@/lib/wallet/types";
 import type { CardProduct } from "@/lib/rewards/catalogTypes";
+import type { WalletBenefitDisplay } from "@/lib/wallet/benefitsRepository";
 import {
   deleteWalletCardAction,
   toggleWalletCardAction,
@@ -22,6 +23,26 @@ import {
 interface WalletCardListProps {
   cards: WalletCard[];
   products: CardProduct[];
+  benefitsByCard: Record<string, WalletBenefitDisplay[]>;
+}
+
+function formatCurrency(value: number | null): string {
+  if (value === null || value === undefined) return "";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(value);
+}
+
+function formatDate(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function networkLabel(network: WalletCard["network"]): string {
@@ -52,7 +73,7 @@ function rewardLabel(currency: WalletCard["rewardCurrency"]): string {
   }
 }
 
-export function WalletCardList({ cards, products }: WalletCardListProps) {
+export function WalletCardList({ cards, products, benefitsByCard }: WalletCardListProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [status, setStatus] = useState<WalletActionState | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -182,6 +203,60 @@ export function WalletCardList({ cards, products }: WalletCardListProps) {
                 </div>
 
                 <WalletCardProductLink card={card} products={products} />
+
+                {(benefitsByCard[card.id] ?? []).length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                      Benefits
+                    </p>
+                    {benefitsByCard[card.id].map(({ product, state }) => (
+                      <div
+                        key={product.id}
+                        className="rounded-xl border border-white/10 bg-white/5 p-3"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium text-slate-200">
+                            {product.title}
+                          </p>
+                          {state.active ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/10 px-2 py-0.5 text-xs font-medium text-emerald-300">
+                              <Circle className="h-2 w-2 fill-current" />
+                              Active
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-700/50 px-2 py-0.5 text-xs font-medium text-slate-400">
+                              <Circle className="h-2 w-2 fill-current" />
+                              Inactive
+                            </span>
+                          )}
+                          {state.activatedAt ? (
+                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-slate-400">
+                              Activated {formatDate(state.activatedAt)}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-400">
+                          {state.remainingValue !== null &&
+                          state.remainingValue !== undefined ? (
+                            <span className="rounded-full border border-sky-400/20 bg-sky-400/10 px-2 py-0.5 text-sky-200">
+                              {formatCurrency(state.remainingValue)} remaining
+                            </span>
+                          ) : null}
+                          {state.expiresAt ? (
+                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5">
+                              Expires {formatDate(state.expiresAt)}
+                            </span>
+                          ) : null}
+                          {product.requiresActivation && !state.activatedAt ? (
+                            <span className="rounded-full border border-amber-400/20 bg-amber-400/10 px-2 py-0.5 text-amber-200">
+                              Activation required
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>
 
