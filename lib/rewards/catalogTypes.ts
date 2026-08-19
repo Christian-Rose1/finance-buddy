@@ -131,6 +131,9 @@ export interface ProductBenefit {
   /** Annual limit or cap, when applicable. */
   annualLimit: number | null;
 
+  /** The recurring cycle or timeframe over which this benefit applies. */
+  periodType: "none" | "calendar_year" | "cardmember_year" | "quarter" | "month";
+
   /** Whether activation is required. */
   requiresActivation: boolean;
 

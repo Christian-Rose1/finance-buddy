@@ -30,6 +30,8 @@ export interface CreateWalletBenefitInput {
   active?: boolean;
   activatedAt?: string | null;
   expiresAt?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
   remainingValue?: number | null;
   usedValue?: number;
   metadata?: Record<string, unknown> | null;
@@ -40,6 +42,8 @@ export interface UpdateWalletBenefitInput {
   active?: boolean;
   activatedAt?: string | null;
   expiresAt?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
   remainingValue?: number | null;
   usedValue?: number;
   metadata?: Record<string, unknown> | null;
@@ -54,6 +58,8 @@ function toWalletBenefit(row: Record<string, unknown>): WalletBenefit {
     active: (row.active as boolean) ?? true,
     activatedAt: (row.activated_at as string | null) ?? null,
     expiresAt: (row.expires_at as string | null) ?? null,
+    periodStart: (row.period_start as string | null) ?? null,
+    periodEnd: (row.period_end as string | null) ?? null,
     remainingValue: parseNumeric(row.remaining_value),
     usedValue: parseNumeric(row.used_value) ?? 0,
     metadata: (row.metadata as Record<string, unknown> | null) ?? null,
@@ -86,6 +92,12 @@ function toRowPayload(
   }
   if ("expiresAt" in input && input.expiresAt !== undefined) {
     payload.expires_at = input.expiresAt;
+  }
+  if ("periodStart" in input && input.periodStart !== undefined) {
+    payload.period_start = input.periodStart;
+  }
+  if ("periodEnd" in input && input.periodEnd !== undefined) {
+    payload.period_end = input.periodEnd;
   }
   if ("remainingValue" in input && input.remainingValue !== undefined) {
     payload.remaining_value = input.remainingValue;

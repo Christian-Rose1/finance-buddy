@@ -163,6 +163,12 @@ export interface WalletBenefit {
   /** When this benefit expires for the user, if it expires. */
   expiresAt: string | null;
 
+  /** Start of current tracking period (ISO timestamp), if applicable. */
+  periodStart: string | null;
+
+  /** End of current tracking period (ISO timestamp), if applicable. */
+  periodEnd: string | null;
+
   /** Remaining value (e.g. statement credit) available, when capped. */
   remainingValue: number | null;
 

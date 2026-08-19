@@ -71,6 +71,7 @@ function toProductBenefit(row: Record<string, unknown>): ProductBenefit {
     eligibleMerchant: (row.eligible_merchant as string | null) ?? null,
     fixedValue: parseNumeric(row.fixed_value),
     annualLimit: parseNumeric(row.annual_limit),
+    periodType: (row.period_type as ProductBenefit["periodType"]) ?? "none",
     requiresActivation: (row.requires_activation as boolean | null) ?? false,
     source: (row.source as CardProductSource) ?? "unknown",
     lastVerifiedAt: (row.last_verified_at as string | null) ?? null,
