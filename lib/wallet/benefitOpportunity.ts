@@ -84,6 +84,14 @@ const BENEFITS_REQUIRING_BOOKING_CHANNEL: ReadonlySet<string> = new Set([
   "5e19b3d1-8a7c-4b2e-9d3a-4f5c6d7e8f90",
 ]);
 
+/**
+ * Checks whether a Purchase was manually confirmed as booked through
+ * Chase Travel via metadata.bookingChannel.
+ */
+function isChaseTravelConfirmed(purchase: Purchase): boolean {
+  return purchase.metadata?.bookingChannel === "chase_travel";
+}
+
 /** Normalizes a string for case-insensitive matching. */
 function normalize(value: string | null | undefined): string {
   return (value ?? "").toLowerCase().trim();
@@ -178,20 +186,32 @@ export function evaluateBenefitOpportunity(
     };
   }
 
-  // Category match.
-  if (categoryMatches(purchase.category, product.eligibleCategory)) {
-    // Required but unverifiable booking channel → insufficient information.
-    if (BENEFITS_REQUIRING_BOOKING_CHANNEL.has(product.id)) {
-      return {
-        ...base,
-        status: "insufficient_information",
-        usableValue: null,
-        potentialValue: capValue(purchase.amount, state.remainingValue),
-        missingConditions: ["booking_channel"],
-        reason:
-          "This looks like a qualifying purchase, but we can't confirm it was booked through the required channel.",
-      };
-    }
+    // Category match.
+    if (categoryMatches(purchase.category, product.eligibleCategory)) {
+      // Required but unverifiable booking channel → insufficient information.
+      if (BENEFITS_REQUIRING_BOOKING_CHANNEL.has(product.id)) {
+        // If the user has confirmed Chase Travel booking, move to confirmed_eligible
+        if (isChaseTravelConfirmed(purchase)) {
+          return {
+            ...base,
+            status: "confirmed_eligible",
+            usableValue: capValue(purchase.amount, state.remainingValue),
+            potentialValue: null,
+            missingConditions: [],
+            reason: `This looks like a qualifying purchase booked through Chase Travel.`,
+          };
+        }
+
+        return {
+          ...base,
+          status: "insufficient_information",
+          usableValue: null,
+          potentialValue: capValue(purchase.amount, state.remainingValue),
+          missingConditions: ["booking_channel"],
+          reason:
+            "This looks like a qualifying purchase, but we can't confirm it was booked through the required channel.",
+        };
+      }
 
     return {
       ...base,

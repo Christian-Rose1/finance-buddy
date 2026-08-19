@@ -27,6 +27,14 @@ export interface ConfirmPurchaseCardResult {
   confirmed: boolean;
 }
 
+/** Booking channel confirmation result. */
+export interface ConfirmPurchaseBookingChannelResult {
+  /** The persisted Purchase, rehydrated with complete items + evidence. */
+  purchase: Purchase;
+  /** True when bookingChannel was set; false when cleared. */
+  confirmed: boolean;
+}
+
 /**
  * Confirm (or clear) which wallet card was used for a purchase.
  *
@@ -146,4 +154,106 @@ export async function confirmPurchaseCardAction(
   }
 
   return { purchase: refreshed, confirmed: cardId !== null };
+}
+
+/**
+ * Confirm (or clear) which booking channel was used for a purchase.
+ *
+ * Rules:
+ * - Only active, user-owned purchases may be updated.
+ * - `channel` = "chase_travel" sets metadata.bookingChannel and provenance.bookingChannel
+ * - `channel` = null clears only metadata.bookingChannel and provenance.bookingChannel
+ * - Other provenance/metadata fields are preserved
+ *
+ * @param purchaseId   The purchase id to update.
+ * @param channel      "chase_travel" or null
+ * @returns The persisted purchase and a flag indicating whether the
+ *          confirmation was set (not cleared).
+ * @throws If the purchase is not found or does not belong to the user.
+ */
+export async function confirmPurchaseBookingChannelAction(
+  purchaseId: string,
+  channel: "chase_travel" | null
+): Promise<ConfirmPurchaseBookingChannelResult> {
+  const supabase = await createServerClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    throw new Error("Authentication required. Please sign in first.");
+  }
+  const userId = user.id;
+
+  // 1. Load the Purchase through the user-scoped repository path.
+  const purchase = await getPurchaseForUser(purchaseId, userId);
+  if (!purchase) {
+    throw new Error("Purchase not found or does not belong to the user.");
+  }
+
+  // 2. Re-read existing metadata/provenance to preserve all fields
+  const { data: row, error: rowErr } = await supabase
+    .from("purchases")
+    .select("metadata,provenance")
+    .eq("id", purchaseId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (rowErr) {
+    throw new Error("Failed to read current purchase metadata/provenance.");
+  }
+
+  const existingMetadata = (row?.metadata as Record<string, unknown>) || {};
+  const existingProvenance =
+    (row?.provenance as Record<string, PurchaseFieldProvenance>) || {};
+
+  // ---- Merge bookingChannel ----
+  let mergedMetadata: Record<string, unknown>;
+  let mergedProvenance: Record<string, PurchaseFieldProvenance>;
+
+  if (channel === null) {
+    // CLEAR: remove only metadata.bookingChannel
+    mergedMetadata = { ...existingMetadata };
+    delete mergedMetadata.bookingChannel;
+
+    // CLEAR: remove only provenance.bookingChannel
+    mergedProvenance = { ...existingProvenance };
+    delete mergedProvenance.bookingChannel;
+  } else {
+    // SET: add to both metadata and provenance
+    mergedMetadata = { ...existingMetadata, bookingChannel: "chase_travel" };
+    mergedProvenance = {
+      ...existingProvenance,
+      bookingChannel: createManualProvenance(
+        "bookingChannel",
+        "user-booking-channel-confirmation",
+        "verified",
+        []
+      ),
+    };
+  }
+
+  // ---- Update purchase row ----
+  const { error: updateError } = await supabase
+    .from("purchases")
+    .update({
+      metadata: mergedMetadata,
+      provenance: mergedProvenance,
+    })
+    .eq("id", purchaseId)
+    .eq("user_id", userId);
+
+  if (updateError) {
+    throw new Error("Failed to update purchase booking channel confirmation.");
+  }
+
+  // 3. Revalidate path and re-read purchase
+  revalidatePath(`/purchases/${purchaseId}`);
+  const refreshed = await getPurchaseForUser(purchaseId, userId);
+  if (!refreshed) {
+    throw new Error("Purchase not found after update.");
+  }
+
+  return { purchase: refreshed, confirmed: channel !== null };
 }

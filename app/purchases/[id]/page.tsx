@@ -1,28 +1,31 @@
-import { redirect, notFound } from 'next/navigation';
-import Link from 'next/link';
-import { Nav } from '@/components/nav';
-import { createServerClient } from '@/lib/supabase-server';
-import { getPurchaseForUser } from '@/lib/purchases/repository';
-import { getWalletCardsForUser } from '@/lib/wallet/repository';
+import { redirect, notFound } from "next/navigation";
+import Link from "next/link";
+import { Nav } from "@/components/nav";
+import { createServerClient } from "@/lib/supabase-server";
+import { getPurchaseForUser } from "@/lib/purchases/repository";
+import { getWalletCardsForUser } from "@/lib/wallet/repository";
 import {
   getCardProducts,
   getEarningRulesForProduct,
-} from '@/lib/rewards/catalogRepository';
+} from "@/lib/rewards/catalogRepository";
 import {
   optimizePurchaseWithLinkedCards,
   optimizePurchaseWithDevelopmentWallet,
   type PurchaseOptimizationResult,
-} from '@/lib/purchases/optimizePurchase';
-import { DEVELOPMENT_WALLET } from '@/lib/wallet/cards';
-import { getWalletBenefitsWithProducts } from '@/lib/wallet/benefitsRepository';
+} from "@/lib/purchases/optimizePurchase";
+import { DEVELOPMENT_WALLET } from "@/lib/wallet/cards";
+import { getWalletBenefitsWithProducts } from "@/lib/wallet/benefitsRepository";
 import {
   evaluateBenefitOpportunity,
   type BenefitOpportunity,
-} from '@/lib/wallet/benefitOpportunity';
-import { computeMoneyFound, type MoneyFoundResult } from '@/lib/purchases/moneyFound';
-import type { Purchase } from '@/lib/purchases/types';
-import type { WalletCard } from '@/lib/wallet/types';
-import type { CardProduct, EarningRule } from '@/lib/rewards/catalogTypes';
+} from "@/lib/wallet/benefitOpportunity";
+import {
+  computeMoneyFound,
+  type MoneyFoundResult,
+} from "@/lib/purchases/moneyFound";
+import type { Purchase } from "@/lib/purchases/types";
+import type { WalletCard } from "@/lib/wallet/types";
+import type { CardProduct, EarningRule } from "@/lib/rewards/catalogTypes";
 import {
   ArrowLeft,
   Receipt,
@@ -32,14 +35,15 @@ import {
   Sparkles,
   Gift,
   Coins,
-} from 'lucide-react';
-import { CardUsedSelector } from '@/components/card-used-selector';
+} from "lucide-react";
+import { CardUsedSelector } from "@/components/card-used-selector";
+import { BookingChannelSelector } from "../../../components/booking-channel-selector";
 
 function formatCurrency(value: number, currency: string | null): string {
-  const code = currency && currency.length === 3 ? currency : 'USD';
+  const code = currency && currency.length === 3 ? currency : "USD";
   try {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
       currency: code,
     }).format(value);
   } catch {
@@ -48,12 +52,12 @@ function formatCurrency(value: number, currency: string | null): string {
 }
 
 function formatDate(date: string | null): string {
-  if (!date) return '—';
+  if (!date) return "—";
   try {
-    return new Date(date).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
+    return new Date(date).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
     });
   } catch {
     return date;
@@ -66,29 +70,29 @@ function formatRewardUnits(units: number): string {
 
 function formatStatus(status: string): string {
   switch (status) {
-    case 'confirmed_eligible':
-      return 'eligible';
-    case 'likely_eligible':
-      return 'likely eligible';
-    case 'unknown':
-      return 'cannot confirm';
-    case 'not_eligible':
-      return 'not eligible';
+    case "confirmed_eligible":
+      return "eligible";
+    case "likely_eligible":
+      return "likely eligible";
+    case "unknown":
+      return "cannot confirm";
+    case "not_eligible":
+      return "not eligible";
     default:
       return status;
   }
 }
 
-function formatBenefitStatus(status: BenefitOpportunity['status']): string {
+function formatBenefitStatus(status: BenefitOpportunity["status"]): string {
   switch (status) {
-    case 'confirmed_eligible':
-      return 'Eligible';
-    case 'likely_eligible':
-      return 'Likely eligible';
-    case 'insufficient_information':
-      return 'Cannot confirm';
-    case 'not_eligible':
-      return 'Not eligible';
+    case "confirmed_eligible":
+      return "Eligible";
+    case "likely_eligible":
+      return "Likely eligible";
+    case "insufficient_information":
+      return "Cannot confirm";
+    case "not_eligible":
+      return "Not eligible";
     default:
       return status;
   }
@@ -102,10 +106,13 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
   walletCards: WalletCard[];
 } | null> {
   const supabase = await createServerClient();
-  const { data: userData, error: userError } = await supabase.auth.getUser();
+  const {
+    data: userData,
+    error: userError,
+  } = await supabase.auth.getUser();
 
   if (userError || !userData.user) {
-    redirect('/login');
+    redirect("/login");
   }
 
   const userId = userData.user.id;
@@ -136,7 +143,10 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
         rulesByProductId
       );
     } else {
-      optimization = optimizePurchaseWithDevelopmentWallet(purchase, DEVELOPMENT_WALLET);
+      optimization = optimizePurchaseWithDevelopmentWallet(
+        purchase,
+        DEVELOPMENT_WALLET
+      );
     }
 
     // Load the user's active wallet benefit state (rehydrated with shared
@@ -187,7 +197,7 @@ async function loadBenefitOpportunities(
   for (const displays of displaysPerCard) {
     for (const { product, state } of displays) {
       const opportunity = evaluateBenefitOpportunity(purchase, product, state);
-      if (opportunity.status !== 'not_eligible') {
+      if (opportunity.status !== "not_eligible") {
         opportunities.push(opportunity);
       }
     }
@@ -200,7 +210,9 @@ async function loadRulesForProducts(
   products: CardProduct[],
   linkedCards: WalletCard[]
 ): Promise<Map<string, EarningRule[]>> {
-  const linkedProductIds = new Set(linkedCards.map((card) => card.cardProductId!));
+  const linkedProductIds = new Set(
+    linkedCards.map((card) => card.cardProductId!)
+  );
   const rulesByProductId = new Map<string, EarningRule[]>();
 
   await Promise.all(
@@ -208,7 +220,9 @@ async function loadRulesForProducts(
       const product = products.find((p) => p.id === productId);
       if (!product) return;
 
-      const rules = await getEarningRulesForProduct(productId, { activeOnly: true });
+      const rules = await getEarningRulesForProduct(productId, {
+        activeOnly: true,
+      });
       rulesByProductId.set(productId, rules);
     })
   );
@@ -228,7 +242,13 @@ export default async function PurchaseDetailPage({
     notFound();
   }
 
-  const { purchase, optimization, benefitOpportunities, moneyFound, walletCards } = result;
+  const {
+    purchase,
+    optimization,
+    benefitOpportunities,
+    moneyFound,
+    walletCards,
+  } = result;
   const hasItems = purchase.items.length > 0;
   const hasExtraCharges =
     purchase.discount !== null ||
@@ -236,8 +256,8 @@ export default async function PurchaseDetailPage({
     purchase.tip !== null ||
     purchase.fees !== null;
 
-  const isDevelopment = optimization?.mode === 'development';
-  const isPersonalized = optimization?.mode === 'personalized';
+  const isDevelopment = optimization?.mode === "development";
+  const isPersonalized = optimization?.mode === "personalized";
   const hasRewardUnits =
     optimization !== null &&
     optimization.bestEstimatedRewardUnits !== null &&
@@ -246,6 +266,8 @@ export default async function PurchaseDetailPage({
     optimization !== null &&
     optimization.bestEstimatedValue !== null &&
     optimization.bestEstimatedValue > 0;
+
+  const bookingChannel = (purchase.metadata?.bookingChannel as string) || null;
 
   return (
     <main className="min-h-screen bg-transparent text-slate-100">
@@ -267,12 +289,12 @@ export default async function PurchaseDetailPage({
               <span className="capitalize">{purchase.source}</span> Purchase
             </p>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-              {purchase.merchant ?? 'Unknown merchant'}
+              {purchase.merchant ?? "Unknown merchant"}
             </h1>
             <p className="mt-1 text-xl font-medium text-emerald-300">
               {purchase.amount !== null && !Number.isNaN(purchase.amount)
                 ? formatCurrency(purchase.amount, purchase.currency)
-                : '—'}
+                : "—"}
             </p>
           </div>
 
@@ -280,34 +302,49 @@ export default async function PurchaseDetailPage({
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="flex items-center gap-2 text-slate-400">
                 <Calendar className="h-4 w-4" />
-                <p className="text-xs font-semibold uppercase tracking-wider">Date</p>
+                <p className="text-xs font-semibold uppercase tracking-wider">
+                  Date
+                </p>
               </div>
-              <p className="mt-2 text-sm font-medium text-white">{formatDate(purchase.date)}</p>
+              <p className="mt-2 text-sm font-medium text-white">
+                {formatDate(purchase.date)}
+              </p>
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="flex items-center gap-2 text-slate-400">
                 <Tag className="h-4 w-4" />
-                <p className="text-xs font-semibold uppercase tracking-wider">Category</p>
+                <p className="text-xs font-semibold uppercase tracking-wider">
+                  Category
+                </p>
               </div>
-              <p className="mt-2 text-sm font-medium text-white">{purchase.category ?? '—'}</p>
+              <p className="mt-2 text-sm font-medium text-white">
+                {purchase.category ?? "—"}
+              </p>
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="flex items-center gap-2 text-slate-400">
                 <Receipt className="h-4 w-4" />
-                <p className="text-xs font-semibold uppercase tracking-wider">Source</p>
+                <p className="text-xs font-semibold uppercase tracking-wider">
+                  Source
+                </p>
               </div>
-              <p className="mt-2 text-sm font-medium text-white capitalize">{purchase.source}</p>
+              <p className="mt-2 text-sm font-medium text-white capitalize">
+                {purchase.source}
+              </p>
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <div className="flex items-center gap-2 text-slate-400">
                 <CreditCard className="h-4 w-4" />
-                <p className="text-xs font-semibold uppercase tracking-wider">Evidence</p>
+                <p className="text-xs font-semibold uppercase tracking-wider">
+                  Evidence
+                </p>
               </div>
               <p className="mt-2 text-sm font-medium text-white">
-                {purchase.evidence.length} record{purchase.evidence.length === 1 ? '' : 's'}
+                {purchase.evidence.length} record
+                {purchase.evidence.length === 1 ? "" : "s"}
               </p>
             </div>
           </div>
@@ -319,9 +356,17 @@ export default async function PurchaseDetailPage({
             activeCards={walletCards.filter((card) => card.active)}
           />
 
+          {/* Booking channel selector */}
+          <BookingChannelSelector
+            purchaseId={id}
+            currentChannel={bookingChannel}
+          />
+
           {hasExtraCharges && (
             <div className="mt-8">
-              <h2 className="text-lg font-semibold text-white">Additional charges</h2>
+              <h2 className="text-lg font-semibold text-white">
+                Additional charges
+              </h2>
               <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {purchase.discount !== null && (
                   <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -365,24 +410,31 @@ export default async function PurchaseDetailPage({
               <div className="mt-4 space-y-3">
                 {purchase.items.map((item) => (
                   <div
-                    key={`${item.name ?? 'item'}-${item.category ?? 'none'}-${item.total ?? '0'}`}
+                    key={`${item.name ?? "item"}-${item.category ?? "none"}-${
+                      item.total ?? "0"
+                    }`}
                     className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/60 p-4"
                   >
                     <div>
-                      <p className="font-medium text-white">{item.name ?? 'Unnamed item'}</p>
+                      <p className="font-medium text-white">
+                        {item.name ?? "Unnamed item"}
+                      </p>
                       {item.category ? (
-                        <p className="mt-1 text-xs text-slate-400">{item.category}</p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {item.category}
+                        </p>
                       ) : null}
                     </div>
                     <div className="text-right">
                       <p className="text-sm font-semibold text-white">
                         {item.total !== null && !Number.isNaN(item.total)
                           ? formatCurrency(item.total, purchase.currency)
-                          : '—'}
+                          : "—"}
                       </p>
                       {item.quantity !== null && item.unitPrice !== null ? (
                         <p className="mt-1 text-xs text-slate-400">
-                          {item.quantity} × {formatCurrency(item.unitPrice, purchase.currency)}
+                          {item.quantity} ×{" "}
+                          {formatCurrency(item.unitPrice, purchase.currency)}
                         </p>
                       ) : null}
                     </div>
@@ -396,14 +448,20 @@ export default async function PurchaseDetailPage({
             <div
               className={`mt-8 rounded-2xl border p-5 ${
                 isPersonalized
-                  ? 'border-sky-400/20 bg-sky-400/10'
-                  : 'border-amber-400/20 bg-amber-400/10'
+                  ? "border-sky-400/20 bg-sky-400/10"
+                  : "border-amber-400/20 bg-amber-400/10"
               }`}
             >
               <div className="flex items-center gap-2">
-                <Sparkles className={`h-5 w-5 ${isPersonalized ? 'text-sky-300' : 'text-amber-300'}`} />
+                <Sparkles
+                  className={`h-5 w-5 ${
+                    isPersonalized ? "text-sky-300" : "text-amber-300"
+                  }`}
+                />
                 <h2 className="text-lg font-semibold text-white">
-                  {isPersonalized ? 'Best card for this purchase' : 'Best card (development test)'}
+                  {isPersonalized
+                    ? "Best card for this purchase"
+                    : "Best card (development test)"}
                 </h2>
               </div>
 
@@ -415,30 +473,41 @@ export default async function PurchaseDetailPage({
 
               <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
                 <p className="text-xs text-slate-400">
-                  {isPersonalized ? 'Recommended card' : 'Recommended development card'}
+                  {isPersonalized
+                    ? "Recommended card"
+                    : "Recommended development card"}
                 </p>
                 <p className="mt-1 text-base font-semibold text-white">
-                  {optimization.bestCardName ?? 'Unknown card'}
+                  {optimization.bestCardName ?? "Unknown card"}
                 </p>
 
                 {hasRewardUnits ? (
                   <p className="mt-2 text-sm text-emerald-300">
-                    Estimated rewards:{' '}
-                    {formatRewardUnits(optimization.bestEstimatedRewardUnits as number)}{' '}
+                    Estimated rewards:{" "}
+                    {formatRewardUnits(
+                      optimization.bestEstimatedRewardUnits as number
+                    )}{" "}
                     {optimization.bestRewardCurrency}
                   </p>
                 ) : hasDollarValue ? (
                   <p className="mt-2 text-sm text-emerald-300">
-                    Estimated reward value:{' '}
-                    {formatCurrency(optimization.bestEstimatedValue, purchase.currency)}
+                    Estimated reward value:{" "}
+                    {formatCurrency(
+                      optimization.bestEstimatedValue,
+                      purchase.currency
+                    )}
                   </p>
                 ) : (
-                  <p className="mt-2 text-sm text-slate-400">Dollar value not estimated</p>
+                  <p className="mt-2 text-sm text-slate-400">
+                    Dollar value not estimated
+                  </p>
                 )}
               </div>
 
               {optimization.recommendation ? (
-                <p className="mt-4 text-sm text-slate-300">{optimization.recommendation}</p>
+                <p className="mt-4 text-sm text-slate-300">
+                  {optimization.recommendation}
+                </p>
               ) : null}
 
               {optimization.matches.length > 0 && (
@@ -446,8 +515,13 @@ export default async function PurchaseDetailPage({
                   {optimization.matches
                     .filter((match) => match.cardId === optimization.bestCardId)
                     .map((match) => (
-                      <div key={match.benefitId} className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                        <p className="text-sm font-medium text-white">{match.benefitTitle}</p>
+                      <div
+                        key={match.benefitId}
+                        className="rounded-2xl border border-white/10 bg-white/5 p-3"
+                      >
+                        <p className="text-sm font-medium text-white">
+                          {match.benefitTitle}
+                        </p>
                         <p className="mt-1 text-xs text-slate-400">
                           {formatStatus(match.status)} — {match.reason}
                         </p>
@@ -462,7 +536,9 @@ export default async function PurchaseDetailPage({
             <div className="mt-8 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-5">
               <div className="flex items-center gap-2">
                 <Gift className="h-5 w-5 text-emerald-300" />
-                <h2 className="text-lg font-semibold text-white">Benefit opportunities</h2>
+                <h2 className="text-lg font-semibold text-white">
+                  Benefit opportunities
+                </h2>
               </div>
               <div className="mt-4 space-y-2">
                 {benefitOpportunities.map((opportunity) => (
@@ -471,31 +547,43 @@ export default async function PurchaseDetailPage({
                     className="rounded-2xl border border-white/10 bg-white/5 p-4"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-medium text-white">{opportunity.title}</p>
+                      <p className="text-sm font-medium text-white">
+                        {opportunity.title}
+                      </p>
                       <span
                         className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                          opportunity.status === 'confirmed_eligible' ||
-                          opportunity.status === 'likely_eligible'
-                            ? 'bg-emerald-400/10 text-emerald-300'
-                            : 'bg-amber-400/10 text-amber-200'
+                          opportunity.status === "confirmed_eligible" ||
+                          opportunity.status === "likely_eligible"
+                            ? "bg-emerald-400/10 text-emerald-300"
+                            : "bg-amber-400/10 text-amber-200"
                         }`}
                       >
                         {formatBenefitStatus(opportunity.status)}
                       </span>
                     </div>
-                    <p className="mt-1 text-xs text-slate-400">{opportunity.reason}</p>
-                    {(opportunity.status === 'confirmed_eligible' ||
-                      opportunity.status === 'likely_eligible') &&
+                    <p className="mt-1 text-xs text-slate-400">
+                      {opportunity.reason}
+                    </p>
+                    {(opportunity.status === "confirmed_eligible" ||
+                      opportunity.status === "likely_eligible") &&
                     opportunity.usableValue !== null ? (
                       <p className="mt-2 text-sm font-medium text-emerald-300">
-                        Usable value: {formatCurrency(opportunity.usableValue, purchase.currency)}
+                        Usable value:{" "}
+                        {formatCurrency(
+                          opportunity.usableValue,
+                          purchase.currency
+                        )}
                       </p>
                     ) : null}
-                    {opportunity.status === 'insufficient_information' &&
+                    {opportunity.status === "insufficient_information" &&
                     opportunity.potentialValue !== null ? (
                       <p className="mt-2 text-sm font-medium text-amber-200">
-                        Up to {formatCurrency(opportunity.potentialValue, purchase.currency)} if
-                        booked through Chase Travel
+                        Up to{" "}
+                        {formatCurrency(
+                          opportunity.potentialValue,
+                          purchase.currency
+                        )}{" "}
+                        if booked through Chase Travel
                       </p>
                     ) : null}
                   </div>
@@ -508,13 +596,16 @@ export default async function PurchaseDetailPage({
             <div className="mt-8 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-5">
               <div className="flex items-center gap-2">
                 <Coins className="h-5 w-5 text-emerald-300" />
-                <h2 className="text-lg font-semibold text-white">Money Found</h2>
+                <h2 className="text-lg font-semibold text-white">
+                  Money Found
+                </h2>
               </div>
               <p className="mt-2 text-2xl font-extrabold text-emerald-300">
                 {formatCurrency(moneyFound.total, moneyFound.currency)}
               </p>
               <p className="mt-1 text-xs text-slate-400">
-                Confirmed value only — does not include potential or likely-only savings.
+                Confirmed value only — does not include potential or likely-only
+                savings.
               </p>
 
               {moneyFound.items.length > 0 && (
@@ -524,7 +615,9 @@ export default async function PurchaseDetailPage({
                       key={`${item.source}-${item.benefitId}`}
                       className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
                     >
-                      <span className="text-sm text-slate-300">{item.description}</span>
+                      <span className="text-sm text-slate-300">
+                        {item.description}
+                      </span>
                       <span className="text-sm font-medium text-emerald-300">
                         {formatCurrency(item.value, item.currency)}
                       </span>
@@ -545,4 +638,3 @@ export default async function PurchaseDetailPage({
     </main>
   );
 }
-
