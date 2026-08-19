@@ -186,6 +186,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // NOTE: A Chase statement account number is NOT a card identifier and is
+  // never used to populate Purchase.cardId. The account number is a different
+  // identifier from a credit-card last four, so matching them would be
+  // incorrect. Card-used confirmation requires card-specific evidence (e.g. a
+  // card's printed last four on a receipt, or explicit user confirmation) and
+  // must come from a legitimate evidence source, not the statement account
+  // number. Statement Purchases therefore keep cardId = null here.
   const persistedPurchases = [];
   for (const purchase of purchases) {
     try {

@@ -134,6 +134,15 @@ export interface PurchaseOptimizationMatch {
 
 /** Result of optimizing a Purchase against a wallet. */
 export interface PurchaseOptimizationResult {
+  /**
+   * Id of the card the Purchase was actually made with, when known.
+   *
+   * Populated for personalized optimization from `purchase.cardId`. This is
+   * distinct from `bestCardId` (the hypothetical best card): rules on cards
+   * OTHER than the used card are recommendations, not actual rewards.
+   */
+  usedCardId: string | null;
+
   /** Id of the card that provides the highest estimated dollar value. */
   bestCardId: string | null;
 
@@ -472,6 +481,7 @@ function runOptimization(
   }
 
   return {
+    usedCardId: purchase.cardId,
     bestCardId,
     bestCardName,
     bestEstimatedValue,

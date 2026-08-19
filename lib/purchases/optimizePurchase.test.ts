@@ -384,6 +384,45 @@ describe("optimizePurchaseWithLinkedCards", () => {
     assert.equal(result.matches[0].status, "likely_eligible");
   });
 
+  it("exposes the used card id from purchase.cardId (F1)", () => {
+    // When the Purchase knows the card actually used, the optimization result
+    // surfaces it so downstream Money Found can restrict rewards to that card.
+    const purchase = makePurchase({
+      merchant: "Restaurant",
+      category: "food:dining",
+      cardId: "user-card-csp",
+    });
+
+    const result = optimizePurchaseWithLinkedCards(
+      purchase,
+      [makeLinkedCard()],
+      new Map([["product-csp", product]]),
+      new Map([["product-csp", [diningRule]]])
+    );
+
+    assert.equal(result.mode, "personalized");
+    assert.equal(result.usedCardId, "user-card-csp");
+    // Best-card recommendation is unaffected by the used-card knowledge.
+    assert.equal(result.bestCardId, "user-card-csp");
+  });
+
+  it("keeps usedCardId null when purchase.cardId is unknown", () => {
+    const purchase = makePurchase({
+      merchant: "Restaurant",
+      category: "food:dining",
+      cardId: null,
+    });
+
+    const result = optimizePurchaseWithLinkedCards(
+      purchase,
+      [makeLinkedCard()],
+      new Map([["product-csp", product]]),
+      new Map([["product-csp", [diningRule]]])
+    );
+
+    assert.equal(result.usedCardId, null);
+  });
+
   it("returns no recommendation when the linked card has no matching rule", () => {
     const purchase = makePurchase({
       merchant: "Gas Station",

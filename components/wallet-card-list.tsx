@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import type { WalletCard } from "@/lib/wallet/types";
-import type { CardProduct } from "@/lib/rewards/catalogTypes";
+import type { CardProduct, ProductBenefit } from "@/lib/rewards/catalogTypes";
 import type { WalletBenefitDisplay } from "@/lib/wallet/benefitsRepository";
 import {
   deleteWalletCardAction,
@@ -71,6 +71,61 @@ function rewardLabel(currency: WalletCard["rewardCurrency"]): string {
     default:
       return "No rewards";
   }
+}
+
+/** Truncate a string to a safe display length. */
+function truncate(text: string, max = 160): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1).trim() + "…";
+}
+
+/** Human-readable noun for a benefit's eligible category. */
+function categoryNoun(category: string | null): string | null {
+  if (!category) return null;
+  switch (category) {
+    case "travel:hotels":
+      return "hotel stays";
+    case "travel:airfare":
+      return "airline purchases";
+    case "food:dining":
+      return "dining purchases";
+    case "food:groceries":
+      return "grocery purchases";
+    case "shopping:electronics":
+      return "electronics purchases";
+    default: {
+      const leaf = category.split(":")[1] ?? category;
+      return leaf.replace(/_/g, " ");
+    }
+  }
+}
+
+/**
+ * Extract a booking-channel name (e.g. "Chase Travel") from the benefit's
+ * description when present. Derived from the verified product description, not
+ * invented. Returns null when no channel is mentioned.
+ */
+function extractChannel(description: string | null): string | null {
+  if (!description) return null;
+  const match = description.match(/(?:booked|purchased) through ([A-Z][\w\s]+?)(?:[.,]|$)/i);
+  return match ? match[1].trim() : null;
+}
+
+/**
+ * Concise, faithful condition hint built from the product definition.
+ *
+ * Example output for the CSP hotel credit:
+ *   "qualifying hotel stays booked through Chase Travel"
+ *
+ * Rendered as: "Use on qualifying hotel stays booked through Chase Travel."
+ */
+function deriveBenefitCondition(product: ProductBenefit): string {
+  const noun = categoryNoun(product.eligibleCategory);
+  const channel = extractChannel(product.description ?? null);
+  const parts: string[] = [];
+  if (noun) parts.push(`qualifying ${noun}`);
+  if (channel) parts.push(`booked through ${channel}`);
+  return parts.join(" ");
 }
 
 export function WalletCardList({ cards, products, benefitsByCard }: WalletCardListProps) {
@@ -235,6 +290,19 @@ export function WalletCardList({ cards, products, benefitsByCard }: WalletCardLi
                             </span>
                           ) : null}
                         </div>
+
+                        {product.description ? (
+                          <p className="mt-2 text-sm text-slate-300">
+                            {truncate(product.description, 160)}
+                          </p>
+                        ) : null}
+
+                        {deriveBenefitCondition(product) ? (
+                          <p className="mt-1.5 text-xs italic text-sky-300">
+                            Use on {deriveBenefitCondition(product)}.
+                          </p>
+                        ) : null}
+
                         <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-400">
                           {state.remainingValue !== null &&
                           state.remainingValue !== undefined ? (

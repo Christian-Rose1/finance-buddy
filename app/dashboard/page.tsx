@@ -4,7 +4,10 @@ import { Nav } from '@/components/nav';
 import { PurchaseHistory } from '@/components/purchase-history';
 import { createServerClient } from '@/lib/supabase-server';
 import { getPurchasesForUser } from '@/lib/purchases/repository';
+import { getWalletCardsForUser } from '@/lib/wallet/repository';
+import { getWalletBenefitsWithProducts } from '@/lib/wallet/benefitsRepository';
 import type { Purchase } from '@/lib/purchases/types';
+import type { WalletBenefitDisplay } from '@/lib/wallet/benefitsRepository';
 import {
   BarChart3,
   CircleDollarSign,
@@ -65,6 +68,71 @@ function computeCategoryTotals(
     .sort((a, b) => b.total - a.total);
 }
 
+// =============================================================================
+// Available benefits aggregation (dashboard-wide view)
+//
+// Sums `remainingValue` of ACTIVE benefits for the user's active wallet cards.
+// Each benefit row is distinct (one per card), so summing across cards does not
+// double-count. We additionally dedupe by benefit row id as a safety net and
+// skip inactive benefits / negative-or-zero balances.
+//
+// This is "available / unclaimed benefit value" — it is NOT Money Found. It is
+// the balance still available to be applied to future qualifying purchases.
+// =============================================================================
+
+interface AvailableBenefitItem {
+  title: string;
+  remaining: number;
+}
+
+interface AvailableBenefitsResult {
+  total: number;
+  items: AvailableBenefitItem[];
+  error: string | null;
+}
+
+async function loadAvailableBenefits(
+  userId: string
+): Promise<AvailableBenefitsResult> {
+  try {
+    const cards = await getWalletCardsForUser(userId);
+    const activeCards = cards.filter((card) => card.active);
+
+    const items: AvailableBenefitItem[] = [];
+    const seen = new Set<string>();
+    let total = 0;
+
+    for (const card of activeCards) {
+      const displays: WalletBenefitDisplay[] =
+        await getWalletBenefitsWithProducts(card.id, userId);
+
+      for (const { product, state } of displays) {
+        // Only active benefits count as currently-available value.
+        if (!state.active) continue;
+        // Dedupe by benefit row id (a benefit belongs to one card).
+        if (seen.has(state.id)) continue;
+        seen.add(state.id);
+
+        if (state.remainingValue !== null && state.remainingValue > 0) {
+          items.push({ title: product.title, remaining: state.remainingValue });
+          total += state.remainingValue;
+        }
+      }
+    }
+
+    // Round to cents.
+    total = Math.round(total * 100) / 100;
+
+    return { total, items, error: null };
+  } catch {
+    return {
+      total: 0,
+      items: [],
+      error: 'Unable to load your wallet benefits right now.',
+    };
+  }
+}
+
 async function loadDashboardData() {
   const supabase = await createServerClient();
   const { data: userData, error: userError } = await supabase.auth.getUser();
@@ -73,16 +141,29 @@ async function loadDashboardData() {
     redirect('/login');
   }
 
+  const userId = userData.user.id;
+
   try {
-    const purchases = await getPurchasesForUser(userData.user.id);
-    return { purchases, error: null };
+    const [purchases, availableBenefits] = await Promise.all([
+      getPurchasesForUser(userId),
+      loadAvailableBenefits(userId),
+    ]);
+    return { purchases, availableBenefits, error: null };
   } catch {
-    return { purchases: [], error: 'Unable to load your purchases right now.' };
+    return {
+      purchases: [],
+      availableBenefits: {
+        total: 0,
+        items: [],
+        error: 'Unable to load your purchases right now.',
+      },
+      error: 'Unable to load your purchases right now.',
+    };
   }
 }
 
 export default async function DashboardPage() {
-  const { purchases, error } = await loadDashboardData();
+  const { purchases, availableBenefits, error } = await loadDashboardData();
 
   const totalSpending = computeTotalSpending(purchases);
   const categoryTotals = computeCategoryTotals(purchases);
@@ -167,6 +248,70 @@ export default async function DashboardPage() {
                   <p className="mt-5 text-3xl font-semibold text-white">{value}</p>
                 </div>
               ))}
+            </div>
+
+            {/* ---- Value Summary (MVP) ---- */}
+            <div className="grid gap-4 md:grid-cols-3">
+              {/* 1. Confirmed Money Found */}
+              <div className="fb-card p-4 sm:p-5">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-400">Confirmed Money Found</p>
+                  <span className="rounded-2xl bg-white/5 p-2 text-emerald-300">
+                    <CircleDollarSign className="h-4 w-4" />
+                  </span>
+                </div>
+                <p className="mt-5 text-3xl font-semibold text-amber-300">Not calculated yet</p>
+                <p className="mt-2 text-xs text-slate-500">
+                  Money you've already earned on past purchases. Only confirmed, merchant-matched cashback and confirmed benefit value count. Computed per purchase on the Purchase Detail page; not yet rolled up to the dashboard.
+                </p>
+              </div>
+
+              {/* 2. Available benefits (unclaimed balances on cards you own) */}
+              <div className="fb-card p-4 sm:p-5">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-400">Available benefits</p>
+                  <span className="rounded-2xl bg-white/5 p-2 text-sky-300">
+                    <Wallet className="h-4 w-4" />
+                  </span>
+                </div>
+                <p className="mt-5 text-3xl font-semibold text-white">
+                  {availableBenefits.error
+                    ? 'Not calculated'
+                    : formatCurrency(availableBenefits.total, 'USD')}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Unclaimed benefit balances on cards you own — not yet applied to any purchase.
+                </p>
+                {availableBenefits.items.length > 0 ? (
+                  <div className="mt-3 space-y-1.5">
+                    {availableBenefits.items.map((item) => (
+                      <div
+                        key={item.title}
+                        className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-1.5"
+                      >
+                        <span className="text-sm text-slate-300">{item.title}</span>
+                        <span className="text-sm font-medium text-sky-300">
+                          {formatCurrency(item.remaining, 'USD')}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              {/* 3. Potential opportunities */}
+              <div className="fb-card p-4 sm:p-5">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-400">Potential opportunities</p>
+                  <span className="rounded-2xl bg-white/5 p-2 text-amber-300">
+                    <Lightbulb className="h-4 w-4" />
+                  </span>
+                </div>
+                <p className="mt-5 text-3xl font-semibold text-amber-300">Not calculated yet</p>
+                <p className="mt-2 text-xs text-slate-500">
+                  Could-be savings from likely or unverifiable benefit matches. Not confirmed, so never counted as Money Found.
+                </p>
+              </div>
             </div>
 
             <div className="fb-card overflow-hidden p-4 sm:p-6">

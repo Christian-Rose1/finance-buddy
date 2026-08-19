@@ -19,10 +19,21 @@ import {
   evaluateBenefitOpportunity,
   type BenefitOpportunity,
 } from '@/lib/wallet/benefitOpportunity';
+import { computeMoneyFound, type MoneyFoundResult } from '@/lib/purchases/moneyFound';
 import type { Purchase } from '@/lib/purchases/types';
 import type { WalletCard } from '@/lib/wallet/types';
 import type { CardProduct, EarningRule } from '@/lib/rewards/catalogTypes';
-import { ArrowLeft, Receipt, Calendar, CreditCard, Tag, Sparkles, Gift } from 'lucide-react';
+import {
+  ArrowLeft,
+  Receipt,
+  Calendar,
+  CreditCard,
+  Tag,
+  Sparkles,
+  Gift,
+  Coins,
+} from 'lucide-react';
+import { CardUsedSelector } from '@/components/card-used-selector';
 
 function formatCurrency(value: number, currency: string | null): string {
   const code = currency && currency.length === 3 ? currency : 'USD';
@@ -87,6 +98,8 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
   purchase: Purchase;
   optimization: PurchaseOptimizationResult | null;
   benefitOpportunities: BenefitOpportunity[];
+  moneyFound: MoneyFoundResult;
+  walletCards: WalletCard[];
 } | null> {
   const supabase = await createServerClient();
   const { data: userData, error: userError } = await supabase.auth.getUser();
@@ -134,10 +147,20 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
       userId
     );
 
+    // Money Found = confirmed dollar value only (from optimization and from
+    // confirmed benefit opportunities). Pure, deterministic, no DB writes.
+    const moneyFound = computeMoneyFound(
+      purchase,
+      optimization.bestCardId !== null ? optimization : null,
+      benefitOpportunities
+    );
+
     return {
       purchase,
       optimization: optimization.bestCardId !== null ? optimization : null,
       benefitOpportunities,
+      moneyFound,
+      walletCards,
     };
   } catch {
     return null;
@@ -205,7 +228,7 @@ export default async function PurchaseDetailPage({
     notFound();
   }
 
-  const { purchase, optimization, benefitOpportunities } = result;
+  const { purchase, optimization, benefitOpportunities, moneyFound, walletCards } = result;
   const hasItems = purchase.items.length > 0;
   const hasExtraCharges =
     purchase.discount !== null ||
@@ -288,6 +311,13 @@ export default async function PurchaseDetailPage({
               </p>
             </div>
           </div>
+
+          {/* Card used selector */}
+          <CardUsedSelector
+            purchaseId={id}
+            currentCardId={purchase.cardId}
+            activeCards={walletCards.filter((card) => card.active)}
+          />
 
           {hasExtraCharges && (
             <div className="mt-8">
@@ -473,8 +503,46 @@ export default async function PurchaseDetailPage({
               </div>
             </div>
           )}
+
+          {moneyFound.total > 0 && (
+            <div className="mt-8 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-5">
+              <div className="flex items-center gap-2">
+                <Coins className="h-5 w-5 text-emerald-300" />
+                <h2 className="text-lg font-semibold text-white">Money Found</h2>
+              </div>
+              <p className="mt-2 text-2xl font-extrabold text-emerald-300">
+                {formatCurrency(moneyFound.total, moneyFound.currency)}
+              </p>
+              <p className="mt-1 text-xs text-slate-400">
+                Confirmed value only — does not include potential or likely-only savings.
+              </p>
+
+              {moneyFound.items.length > 0 && (
+                <div className="mt-3 space-y-1.5">
+                  {moneyFound.items.map((item) => (
+                    <div
+                      key={`${item.source}-${item.benefitId}`}
+                      className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                    >
+                      <span className="text-sm text-slate-300">{item.description}</span>
+                      <span className="text-sm font-medium text-emerald-300">
+                        {formatCurrency(item.value, item.currency)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {moneyFound.total === 0 ? (
+            <p className="mt-8 text-xs text-slate-500">
+              No confirmed savings found for this purchase.
+            </p>
+          ) : null}
         </div>
       </div>
     </main>
   );
 }
+
