@@ -1,0 +1,113 @@
+import { redirect } from "next/navigation";
+import { Nav } from "@/components/nav";
+import { createServerClient } from "@/lib/supabase-server";
+import { getGoalsForUser } from "@/lib/goals/repository";
+import { GoalForm } from "@/components/goal-form";
+import { Target } from "lucide-react";
+
+async function loadGoalsData() {
+  const supabase = await createServerClient();
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+
+  if (userError || !userData.user) {
+    redirect("/login");
+  }
+
+  try {
+    const goals = await getGoalsForUser(userData.user.id);
+    return { goals, error: null };
+  } catch (err) {
+    return {
+      goals: [],
+      error: "Unable to load your goals right now.",
+    };
+  }
+}
+
+export default async function GoalsPage() {
+  const { goals, error } = await loadGoalsData();
+
+  return (
+    <main className="min-h-screen bg-transparent text-slate-100">
+      <Nav />
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 lg:px-8">
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">
+              Financial Goals
+            </h1>
+            <p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-base">
+              Plan your travel goals and we'll help you find the best way to fund them with points.
+            </p>
+          </div>
+          <div className="hidden h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-sky-400/30 bg-sky-400/10 text-sky-300 sm:flex">
+            <Target className="h-6 w-6" />
+          </div>
+        </div>
+
+        {error ? (
+          <div className="mb-6 rounded-2xl border border-rose-400/20 bg-rose-400/10 p-4 text-sm text-rose-200">
+            <p className="font-medium">Something went wrong</p>
+            <p className="mt-1 text-rose-100/80">{error}</p>
+          </div>
+        ) : null}
+
+        <section className="fb-card mb-8 p-4 sm:p-6">
+          <h2 className="text-lg font-semibold text-white">Create a new travel goal</h2>
+          <p className="mt-1 text-sm text-slate-400 mb-5">
+            Tell us where you want to go and your preferences.
+          </p>
+          <GoalForm />
+        </section>
+
+        <section>
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-white">
+              Your Goals
+              <span className="ml-2 rounded-full bg-white/10 px-2 py-0.5 text-sm font-normal text-slate-400">
+                {goals.length}
+              </span>
+            </h2>
+          </div>
+
+          <div className="space-y-4">
+            {goals.length === 0 ? (
+              <div className="fb-card p-8 text-center">
+                <p className="text-slate-400">You haven't created any goals yet.</p>
+              </div>
+            ) : (
+              goals.map((goal) => (
+                <div key={goal.id} className="fb-card p-4 sm:p-6">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h3 className="text-lg font-medium text-white">{goal.title}</h3>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400">
+                        <span>
+                          {goal.origin.join(", ")} → {goal.destinations.join(", ")}
+                        </span>
+                        <span>•</span>
+                        <span className="capitalize">{goal.cabinPreference}</span>
+                        <span>•</span>
+                        <span>{goal.travelerCount} {goal.travelerCount === 1 ? "traveler" : "travelers"}</span>
+                      </div>
+                    </div>
+                    <div className="rounded-full bg-sky-400/10 px-2.5 py-0.5 text-xs font-medium text-sky-300 capitalize">
+                      {goal.status}
+                    </div>
+                  </div>
+
+                  <div className="mt-6 border-t border-white/5 pt-4">
+                    <p className="text-sm font-medium text-slate-300">Strategy not calculated yet.</p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Calculations will appear here once the planning engine is active.
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
