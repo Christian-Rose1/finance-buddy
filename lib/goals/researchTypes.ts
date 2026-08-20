@@ -1,0 +1,56 @@
+export type ResearchSourceTier = "official" | "specialist" | "general";
+
+export interface ResearchQuery {
+  query: string;
+  includeDomains: string[];
+  maxResults?: number;
+}
+
+export interface ResearchResult {
+  title: string;
+  url: string;
+  content: string;
+  score: number | null;
+  publishedDate: string | null;
+  sourceTier: ResearchSourceTier;
+}
+
+export interface ResearchResponse {
+  query: string;
+  results: ResearchResult[];
+  searchedAt: string;
+}
+
+export interface ResearchProvider {
+  search(input: ResearchQuery): Promise<ResearchResponse>;
+}
+
+export const OFFICIAL_DOMAINS: readonly string[] = Object.freeze([
+  "chase.com",
+  "americanexpress.com",
+  "capitalone.com",
+  "citi.com",
+  "wellsfargo.com",
+  "bilt.com",
+  "united.com",
+  "aircanada.com",
+  "flyingblue.us",
+  "britishairways.com",
+  "southwest.com",
+  "hyatt.com",
+  "marriott.com",
+  "ihg.com",
+  "hilton.com",
+]);
+
+export const SPECIALIST_DOMAINS: readonly string[] = Object.freeze([
+  "awardwallet.com",
+  "frequentmiler.com",
+  "upgradedpoints.com",
+  "thepointsguy.com",
+]);
+
+export const TRUSTED_DOMAINS: readonly string[] = Object.freeze([
+  ...OFFICIAL_DOMAINS,
+  ...SPECIALIST_DOMAINS,
+]);
