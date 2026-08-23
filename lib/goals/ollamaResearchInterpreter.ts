@@ -1,5 +1,13 @@
 import type { Goal } from "./types";
 import type { ResearchResponse, ResearchResult } from "./researchTypes";
+import {
+  ResearchInterpreterError,
+  type InterpretedResearch,
+  type ResearchRewardProgram,
+  type ResearchFocus,
+  type InterpretResearchInput,
+  type ResearchInterpreter,
+} from "./researchInterpreter";
 import type {
   StrategyAwardOption,
   StrategyCardOffer,
@@ -7,35 +15,16 @@ import type {
   StrategyDataStatus,
 } from "./strategyTypes";
 
+export {
+  ResearchInterpreterError,
+  type InterpretedResearch,
+  type ResearchRewardProgram,
+  type ResearchFocus,
+  type InterpretResearchInput,
+} from "./researchInterpreter";
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DIAGNOSTIC_SNIPPET_LENGTH = 300;
-
-export class ResearchInterpreterError extends Error {
-  constructor(
-    message: string,
-    readonly provider: string,
-    readonly model: string,
-    readonly status?: number,
-    readonly details?: string
-  ) {
-    super(message);
-    this.name = "ResearchInterpreterError";
-  }
-}
-
-export interface InterpretedResearch {
-  awardOptions: StrategyAwardOption[];
-  cardOffers: StrategyCardOffer[];
-  sources: StrategySource[];
-  assumptions: string[];
-  warnings: string[];
-}
-
-export interface InterpretResearchInput {
-  goal: Goal;
-  rewardPrograms: string[];
-  research: ResearchResponse[];
-}
 
 interface SourceEntry {
   source: StrategySource;
@@ -44,9 +33,10 @@ interface SourceEntry {
 
 interface ValidationContext {
   goal: Goal;
-  rewardPrograms: string[];
+  rewardPrograms: ResearchRewardProgram[];
   sourceMap: Map<string, SourceEntry>;
   model: string;
+  focus: ResearchFocus;
 }
 
 const LIVE_AVAILABILITY_MARKERS = [
@@ -60,16 +50,97 @@ const LIVE_AVAILABILITY_MARKERS = [
   "dates",
 ];
 
+const FOCUS_INSTRUCTIONS: Record<ResearchFocus, string> = {
+  award_options:
+    "Research focus is award_options: extract supported award options only; cardOffers must be [].\n" +
+    "- Emit an award option whenever one cited source supports:\n" +
+    "  a recognizable program name and an exact points price.\n" +
+    "- An award option does NOT require the cited source to match the research\n" +
+    "  query's exact origin, destination, dates, traveler count, cabin, or hotel\n" +
+    "  property. Do not omit a sourced award benchmark merely because it does\n" +
+    "  not match every detail in the research query.\n" +
+    "- Valid planning benchmarks include general U.S.-to-Europe flight pricing,\n" +
+    "  regional route pricing, airline-program award-chart pricing, hotel-program\n" +
+    "  or destination hotel points-per-night pricing, and total-stay pricing when\n" +
+    "  explicitly supported by the source.\n" +
+    "- For a non-exact benchmark: set availabilityStatus=\"unknown\"; set\n" +
+    "  itineraryLabel to describe ONLY the scope the source supports (never\n" +
+    "  rewrite it as the customer's exact route, dates, or hotel); include an\n" +
+    "  assumption or warning disclosing the mismatch.\n" +
+    "- Every award option MUST identify whether it is a flight or hotel\n" +
+    "  redemption via redemptionType \"flight\" or \"hotel\".\n" +
+    "- Set pricingBasis ONLY to what the cited source establishes:\n" +
+    "  - flight options may use \"one_way\", \"round_trip\", or \"unknown\".\n" +
+    "  - hotel options may use \"per_night\", \"total_stay\", or \"unknown\".\n" +
+    "  - Use \"unknown\" when the source does not establish the basis.\n" +
+    "- Never infer round-trip pricing from a one-way price.\n" +
+    "- Never infer total-stay pricing from a per-night price.\n" +
+    "- Missing itinerary, fees, seats, cabin, transfer details, or valuation\n" +
+    "  must be null and must NOT cause the option to be omitted.\n" +
+    "- For public award-charts/examples, use availabilityStatus=\"unknown\".\n" +
+    "- Do not require transfer evidence to emit the base award option.\n" +
+    "- A clear shortened program name may map to the unique supplied catalog\n" +
+    "  name containing that name, such as \"Flying Blue\" mapping to\n" +
+    "  \"Air France-KLM Flying Blue\". Never make an ambiguous mapping.\n" +
+    "- Identify how many travelers or nights the cited points figure covers:\n" +
+    "  - travelerCountCovered (number|null): travelers covered by the points price.\n" +
+    "  - nightCountCovered (number|null): nights covered by the points price.\n" +
+    "  - coverageStatus: \"source_explicit\" | \"standard_assumption\" | \"unknown\".\n" +
+    "  - Use \"source_explicit\" only when the source establishes the quantity.\n" +
+    "  - Use \"standard_assumption\" for a single-traveler flight benchmark when\n" +
+    "    the source presents a normal per-ticket award price but does not state a\n" +
+    "    group quantity (travelerCountCovered=1, nightCountCovered=null).\n" +
+    "  - Use \"standard_assumption\" with one night for per-night hotel pricing\n" +
+    "    (travelerCountCovered=null, nightCountCovered=1).\n" +
+    "  - Use \"unknown\" with null counts when coverage cannot safely be determined.\n" +
+    "  - Never assume a group price applies to one traveler.\n" +
+    "  - Never assume a per-night hotel price covers the entire stay.\n" +
+    "- Every award option MUST include a goalMatch and a goalMismatchReasons array\n" +
+    "  classifying how well the cited source content matches the research query's\n" +
+    "  travel criteria (origin, destination, dates, traveler count, cabin, and hotel\n" +
+    "  property/scope).\n" +
+    "  - goalMatch: \"exact\" | \"partial\" | \"general\" | \"different_destination\".\n" +
+    "  - goalMismatchReasons: array of \"origin\" | \"destination\" | \"dates\" |\n" +
+    "    \"traveler_count\" | \"cabin\" | \"property\".\n" +
+    "  - \"exact\": the cited source scope matches the requested route/destination\n" +
+    "    and relevant trip characteristics. goalMismatchReasons must be [].\n" +
+    "    Classification must reflect the cited source content, NOT merely the\n" +
+    "    research query wording.\n" +
+    "  - \"partial\": the source matches an important part of the goal but not\n" +
+    "    every detail. Include the specific mismatch reasons.\n" +
+    "  - \"general\": broad program/region benchmark with no contradictory\n" +
+    "    destination. Include no mismatch reasons, or only reasons that do not\n" +
+    "    contradict the goal (e.g., missing dates for a general benchmark).\n" +
+    "  - \"different_destination\": the source explicitly concerns a different\n" +
+    "    destination than the research query. goalMismatchReasons MUST include\n" +
+    "    \"destination\".\n" +
+    "  - different-destination options may still be preserved as fallbacks, but\n" +
+    "    they must not be presented as primary matches.\n" +
+    "  - Missing exact dates normally prevents an exact date match.\n" +
+    "  - General benchmarks should not be omitted merely for being general.\n" +
+    "  - Do not include duplicate reasons. Use each reason at most once.\n" +
+    "  - Example classifications:\n" +
+    "    * Denver-to-Paris source for a Denver-to-Paris query → exact, []\n" +
+    "    * General U.S.-to-Paris source → partial, [\"origin\"]\n" +
+    "    * General U.S.-to-Europe benchmark → general, []\n" +
+    "    * U.S.-to-London source for a Paris query → different_destination, [\"destination\"]\n" +
+    "    * Generic Hyatt category price with no Paris property → general or partial with [\"property\"]",
+  card_offers:
+    "Research focus is card_offers: extract actual credit-card offers only; awardOptions must be []; a rewards-program name is not a card name.",
+};
+
 const INTERPRET_PROMPT = `You are a strict research interpreter. You convert supplied
 web research results into structured award-planning facts.
 
 You will be given:
 - A travel goal.
-- A list of reward-program names/IDs the user has access to.
+- A list of reward programs, each with an id and a name.
 - A list of research sources, each with an id, label, and content.
 
 Your job is to extract ONLY facts that are explicitly supported by the supplied
 research content. You must never invent, infer, or guess.
+
+<focus_instruction>
 
 Return ONLY valid JSON matching this exact contract:
 
@@ -79,11 +150,13 @@ Return ONLY valid JSON matching this exact contract:
       "id": string,
       "sourceId": string,
       "programName": string,
-      "itineraryLabel": string,
+      "redemptionType": "flight" | "hotel",
+      "pricingBasis": "one_way" | "round_trip" | "per_night" | "total_stay" | "unknown",
+      "itineraryLabel": string | null,
       "pointsRequired": number,
-      "cashFees": number,
-      "seats": number,
-      "cabin": string,
+      "cashFees": number | null,
+      "seats": number | null,
+      "cabin": string | null,
       "transferFromProgramId": string | null,
       "transferRatio": number | null,
       "centsPerPoint": number | null,
@@ -111,12 +184,16 @@ Rules:
 - Extract only facts explicitly supported by the supplied research content.
 - Every award option and card offer MUST reference a sourceId that exists in the
   supplied sources.
+- sourceId MUST copy the supplied source id/URL exactly as provided in the
+  sources list. Never use the source title as sourceId.
 - Every numeric value (pointsRequired, cashFees, seats, welcomeBonusPoints,
   spendingRequirement, spendingDeadlineMonths, annualFee, transferRatio,
   centsPerPoint) MUST appear verbatim in the cited source content. Do not
   compute, round, or estimate numbers.
-- programName and transferFromProgramId MUST come from the supplied
-  reward-program list.
+- programName MUST be the name of a supplied reward program.
+- transferFromProgramId and destinationProgramId MUST be the id of a supplied
+  reward program. When a researched program is referenced, use the id that
+  belongs to that program's name.
 - Do not invent availability, award space, points prices, taxes, fees, transfer
   ratios, welcome bonuses, annual fees, URLs, dates, or program IDs.
 - Set availabilityStatus to "available" ONLY if a source explicitly reports
@@ -125,9 +202,22 @@ Rules:
 - Preserve ranges when sources provide ranges; do not convert them into false
   exact values.
 - Conflicting or incomplete claims become warnings, not silently selected facts.
-- Unknown values must be null or cause the candidate to be omitted.
+- Optional unknown fields must be null.
+- Omit an award candidate only when sourceId, programName, or pointsRequired cannot be supported.
 - If no award options or card offers can be supported, return empty arrays.
 - Do not explain anything. Output JSON only.`;
+
+export function buildResearchSystemPrompt(focus: ResearchFocus): string {
+  return `${INTERPRET_PROMPT}\n${FOCUS_INSTRUCTIONS[focus]}`;
+}
+
+export function buildPublicResearchPayload(input: InterpretResearchInput): string {
+  return JSON.stringify({
+    focus: input.focus,
+    rewardPrograms: input.rewardPrograms,
+    research: input.research,
+  });
+}
 
 function buildSources(research: ResearchResponse[]): SourceEntry[] {
   const entries: SourceEntry[] = [];
@@ -149,6 +239,55 @@ function buildSources(research: ResearchResponse[]): SourceEntry[] {
     }
   }
   return entries;
+}
+
+/**
+ * Resolve a model-supplied source reference to the canonical source ID.
+ *
+ * Resolution order:
+ *   a. If the reference exactly matches a canonical source ID, use it.
+ *   b. Otherwise, if it exactly matches a research-result title and that title
+ *      resolves to exactly one distinct canonical source ID, use that canonical
+ *      source ID.
+ *   c. Otherwise reject with ResearchInterpreterError.
+ *
+ * Matching is exact after trimming leading/trailing whitespace. No fuzzy,
+ * substring, semantic, or case-insensitive matching is performed.
+ */
+function resolveCanonicalSourceId(
+  rawSourceId: string,
+  ctx: ValidationContext,
+  entityLabel: string
+): string {
+  const trimmed = rawSourceId.trim();
+
+  // a. Exact canonical source ID match.
+  if (ctx.sourceMap.has(trimmed)) {
+    return trimmed;
+  }
+
+  // b. Exact title match resolving to exactly one distinct canonical source ID.
+  const titleMatches = Array.from(ctx.sourceMap.values()).filter(
+    (entry) => entry.result.title.trim() === trimmed
+  );
+  const distinctIds = new Set(titleMatches.map((entry) => entry.source.id));
+  if (distinctIds.size === 1) {
+    return Array.from(distinctIds)[0];
+  }
+  if (distinctIds.size > 1) {
+    throw new ResearchInterpreterError(
+      `${entityLabel} references ambiguous source title "${rawSourceId}".`,
+      "ollama",
+      ctx.model
+    );
+  }
+
+  // c. Reject.
+  throw new ResearchInterpreterError(
+    `${entityLabel} references unknown source "${rawSourceId}".`,
+    "ollama",
+    ctx.model
+  );
 }
 
 function parseModelResponse(raw: string, model: string): unknown {
@@ -254,10 +393,9 @@ function requireStringArray(
   return strings;
 }
 
-function assertNumberSupported(
+function requireFiniteNonNegativeNumber(
   value: unknown,
   field: string,
-  sourceContent: string,
   model: string
 ): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -274,19 +412,32 @@ function assertNumberSupported(
       model
     );
   }
+  return value;
+}
+
+function numberIsSupportedBySource(value: number, sourceContent: string): boolean {
   const tokens = sourceContent.match(/\d+(?:[\d,.]*\d)?/g) || [];
-  const matched = tokens.some((token) => {
+  return tokens.some((token) => {
     const normalizedToken = token.replace(/,/g, "");
     return Number(normalizedToken) === value;
   });
-  if (!matched) {
+}
+
+function assertNumberSupported(
+  value: unknown,
+  field: string,
+  sourceContent: string,
+  model: string
+): number {
+  const num = requireFiniteNonNegativeNumber(value, field, model);
+  if (!numberIsSupportedBySource(num, sourceContent)) {
     throw new ResearchInterpreterError(
-      `Model output field "${field}" value "${value}" is not supported by the cited source content.`,
+      `Model output field "${field}" value "${num}" is not supported by the cited source content.`,
       "ollama",
       model
     );
   }
-  return value;
+  return num;
 }
 
 function assertOptionalNumberSupported(
@@ -298,7 +449,11 @@ function assertOptionalNumberSupported(
   if (value === null || value === undefined) {
     return null;
   }
-  return assertNumberSupported(value, field, sourceContent, model);
+  const num = requireFiniteNonNegativeNumber(value, field, model);
+  if (!numberIsSupportedBySource(num, sourceContent)) {
+    return null;
+  }
+  return num;
 }
 
 function assertLiveAvailabilitySupported(
@@ -318,6 +473,288 @@ function assertLiveAvailabilitySupported(
   }
 }
 
+function requirePositiveInteger(
+  value: unknown,
+  field: string,
+  model: string
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new ResearchInterpreterError(
+      `Model output field "${field}" must be a finite number.`,
+      "ollama",
+      model
+    );
+  }
+  if (value <= 0 || !Number.isInteger(value)) {
+    throw new ResearchInterpreterError(
+      `Model output field "${field}" must be a positive integer.`,
+      "ollama",
+      model
+    );
+  }
+  return value;
+}
+
+function requireOptionalPositiveInteger(
+  value: unknown,
+  field: string,
+  model: string
+): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return requirePositiveInteger(value, field, model);
+}
+
+function validateCoverage(
+  obj: Record<string, unknown>,
+  sourceContent: string,
+  redemptionType: string,
+  pricingBasis: string,
+  id: string,
+  model: string
+): {
+  travelerCountCovered: number | null;
+  nightCountCovered: number | null;
+  coverageStatus: "source_explicit" | "standard_assumption" | "unknown";
+} {
+  const coverageStatusRaw =
+    obj.coverageStatus === null || obj.coverageStatus === undefined
+      ? "unknown"
+      : obj.coverageStatus;
+
+  if (
+    coverageStatusRaw !== "source_explicit" &&
+    coverageStatusRaw !== "standard_assumption" &&
+    coverageStatusRaw !== "unknown"
+  ) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" has invalid coverageStatus "${coverageStatusRaw}".`,
+      "ollama",
+      model
+    );
+  }
+
+  const travelerCountCovered = requireOptionalPositiveInteger(
+    obj.travelerCountCovered,
+    "awardOptions[].travelerCountCovered",
+    model
+  );
+  const nightCountCovered = requireOptionalPositiveInteger(
+    obj.nightCountCovered,
+    "awardOptions[].nightCountCovered",
+    model
+  );
+
+  // Flight: nightCountCovered must be null
+  if (redemptionType === "flight" && nightCountCovered !== null) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" is a flight but has nightCountCovered.`,
+      "ollama",
+      model
+    );
+  }
+
+  // Hotel: travelerCountCovered must be null
+  if (redemptionType === "hotel" && travelerCountCovered !== null) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" is a hotel but has travelerCountCovered.`,
+      "ollama",
+      model
+    );
+  }
+
+  // coverageStatus="unknown": both counts must be null
+  if (coverageStatusRaw === "unknown") {
+    if (travelerCountCovered !== null || nightCountCovered !== null) {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" has coverageStatus "unknown" but a count is non-null.`,
+        "ollama",
+        model
+      );
+    }
+    return { travelerCountCovered: null, nightCountCovered: null, coverageStatus: "unknown" };
+  }
+
+  // coverageStatus="source_explicit": applicable count must be non-null and source-backed
+  if (coverageStatusRaw === "source_explicit") {
+    if (redemptionType === "flight") {
+      if (travelerCountCovered === null) {
+        throw new ResearchInterpreterError(
+          `Award option "${id}" has coverageStatus "source_explicit" but travelerCountCovered is null.`,
+          "ollama",
+          model
+        );
+      }
+      if (!numberIsSupportedBySource(travelerCountCovered, sourceContent)) {
+        throw new ResearchInterpreterError(
+          `Award option "${id}" travelerCountCovered "${travelerCountCovered}" is not supported by the cited source content.`,
+          "ollama",
+          model
+        );
+      }
+    } else {
+      // hotel
+      if (nightCountCovered === null) {
+        throw new ResearchInterpreterError(
+          `Award option "${id}" has coverageStatus "source_explicit" but nightCountCovered is null.`,
+          "ollama",
+          model
+        );
+      }
+      if (!numberIsSupportedBySource(nightCountCovered, sourceContent)) {
+        throw new ResearchInterpreterError(
+          `Award option "${id}" nightCountCovered "${nightCountCovered}" is not supported by the cited source content.`,
+          "ollama",
+          model
+        );
+      }
+    }
+    return {
+      travelerCountCovered,
+      nightCountCovered,
+      coverageStatus: "source_explicit",
+    };
+  }
+
+  // coverageStatus="standard_assumption"
+  if (redemptionType === "flight") {
+    if (travelerCountCovered !== 1 || nightCountCovered !== null) {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" has coverageStatus "standard_assumption" but flight coverage is not travelerCountCovered=1 / nightCountCovered=null.`,
+        "ollama",
+        model
+      );
+    }
+  } else {
+    // hotel
+    if (pricingBasis !== "per_night") {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" has coverageStatus "standard_assumption" but hotel pricingBasis is not "per_night".`,
+        "ollama",
+        model
+      );
+    }
+    if (travelerCountCovered !== null || nightCountCovered !== 1) {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" has coverageStatus "standard_assumption" but hotel coverage is not travelerCountCovered=null / nightCountCovered=1.`,
+        "ollama",
+        model
+      );
+    }
+  }
+
+  return {
+    travelerCountCovered,
+    nightCountCovered,
+    coverageStatus: "standard_assumption",
+  };
+}
+
+const VALID_GOAL_MATCHES = new Set([
+  "exact",
+  "partial",
+  "general",
+  "different_destination",
+]);
+
+const VALID_MISMATCH_REASONS = new Set([
+  "origin",
+  "destination",
+  "dates",
+  "traveler_count",
+  "cabin",
+  "property",
+]);
+
+function validateGoalClassification(
+  obj: Record<string, unknown>,
+  id: string,
+  model: string
+): {
+  goalMatch: "exact" | "partial" | "general" | "different_destination";
+  goalMismatchReasons: Array<
+    "origin" | "destination" | "dates" | "traveler_count" | "cabin" | "property"
+  >;
+} {
+  const rawGoalMatch = obj.goalMatch;
+  const rawReasons = obj.goalMismatchReasons;
+
+  // If both fields are omitted, normalize to general + []
+  if (rawGoalMatch === undefined && rawReasons === undefined) {
+    return { goalMatch: "general", goalMismatchReasons: [] };
+  }
+
+  // If only one is missing, the model output is inconsistent; still treat as omitted
+  // and normalize to general + []
+  if (rawGoalMatch === undefined || rawReasons === undefined) {
+    return { goalMatch: "general", goalMismatchReasons: [] };
+  }
+
+  if (typeof rawGoalMatch !== "string" || !VALID_GOAL_MATCHES.has(rawGoalMatch)) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" has invalid goalMatch "${String(rawGoalMatch)}".`,
+      "ollama",
+      model
+    );
+  }
+
+  if (!Array.isArray(rawReasons)) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" has non-array goalMismatchReasons.`,
+      "ollama",
+      model
+    );
+  }
+
+  const reasons: Array<
+    "origin" | "destination" | "dates" | "traveler_count" | "cabin" | "property"
+  > = [];
+  const seen = new Set<string>();
+
+  for (const item of rawReasons) {
+    if (typeof item !== "string" || !VALID_MISMATCH_REASONS.has(item)) {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" has unknown goalMismatchReasons value "${String(item)}".`,
+        "ollama",
+        model
+      );
+    }
+    if (seen.has(item)) {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" has duplicate goalMismatchReasons value "${item}".`,
+        "ollama",
+        model
+      );
+    }
+    seen.add(item);
+    reasons.push(item as "origin" | "destination" | "dates" | "traveler_count" | "cabin" | "property");
+  }
+
+  // exact requires empty reasons
+  if (rawGoalMatch === "exact" && reasons.length > 0) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" has goalMatch "exact" but non-empty goalMismatchReasons.`,
+      "ollama",
+      model
+    );
+  }
+
+  // different_destination requires "destination" in reasons
+  if (rawGoalMatch === "different_destination" && !reasons.includes("destination")) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" has goalMatch "different_destination" but goalMismatchReasons does not include "destination".`,
+      "ollama",
+      model
+    );
+  }
+
+  return {
+    goalMatch: rawGoalMatch as "exact" | "partial" | "general" | "different_destination",
+    goalMismatchReasons: reasons,
+  };
+}
+
 function validateAwardOption(
   raw: unknown,
   ctx: ValidationContext
@@ -325,9 +762,14 @@ function validateAwardOption(
   const obj = requireObject(raw, "awardOptions[]", ctx.model);
 
   const id = requireString(obj.id, "awardOptions[].id", ctx.model);
-  const sourceId = requireString(obj.sourceId, "awardOptions[].sourceId", ctx.model);
+  const rawSourceId = requireString(obj.sourceId, "awardOptions[].sourceId", ctx.model);
   const programName = requireString(obj.programName, "awardOptions[].programName", ctx.model);
 
+  const sourceId = resolveCanonicalSourceId(
+    rawSourceId,
+    ctx,
+    `Award option "${id}"`
+  );
   const sourceEntry = ctx.sourceMap.get(sourceId);
   if (!sourceEntry) {
     throw new ResearchInterpreterError(
@@ -336,9 +778,73 @@ function validateAwardOption(
       ctx.model
     );
   }
+
+  const redemptionTypeRaw = requireString(
+    obj.redemptionType,
+    "awardOptions[].redemptionType",
+    ctx.model
+  );
+  if (redemptionTypeRaw !== "flight" && redemptionTypeRaw !== "hotel") {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" has invalid redemptionType "${redemptionTypeRaw}".`,
+      "ollama",
+      ctx.model
+    );
+  }
+
+  const pricingBasisRaw = requireString(
+    obj.pricingBasis,
+    "awardOptions[].pricingBasis",
+    ctx.model
+  );
+  if (
+    pricingBasisRaw !== "one_way" &&
+    pricingBasisRaw !== "round_trip" &&
+    pricingBasisRaw !== "per_night" &&
+    pricingBasisRaw !== "total_stay" &&
+    pricingBasisRaw !== "unknown"
+  ) {
+    throw new ResearchInterpreterError(
+      `Award option "${id}" has invalid pricingBasis "${pricingBasisRaw}".`,
+      "ollama",
+      ctx.model
+    );
+  }
+
+  if (redemptionTypeRaw === "flight") {
+    if (pricingBasisRaw === "per_night" || pricingBasisRaw === "total_stay") {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" is a flight but has pricingBasis "${pricingBasisRaw}".`,
+        "ollama",
+        ctx.model
+      );
+    }
+  }
+
+  if (redemptionTypeRaw === "hotel") {
+    if (pricingBasisRaw === "one_way" || pricingBasisRaw === "round_trip") {
+      throw new ResearchInterpreterError(
+        `Award option "${id}" is a hotel but has pricingBasis "${pricingBasisRaw}".`,
+        "ollama",
+        ctx.model
+      );
+    }
+  }
+
   const sourceContent = sourceEntry.result.content;
 
-  if (!ctx.rewardPrograms.includes(programName)) {
+  let finalProgramName = programName;
+  const exactMatch = ctx.rewardPrograms.find((p) => p.name === programName);
+  if (!exactMatch) {
+    const partialMatches = ctx.rewardPrograms.filter((p) =>
+      p.name.toLowerCase().includes(programName.toLowerCase())
+    );
+    if (partialMatches.length === 1) {
+      finalProgramName = partialMatches[0].name;
+    }
+  }
+
+  if (!ctx.rewardPrograms.some((program) => program.name === finalProgramName)) {
     throw new ResearchInterpreterError(
       `Award option "${id}" references program "${programName}" which was not supplied.`,
       "ollama",
@@ -352,20 +858,20 @@ function validateAwardOption(
     sourceContent,
     ctx.model
   );
-  const cashFees = assertNumberSupported(
+  const cashFees = assertOptionalNumberSupported(
     obj.cashFees,
     "awardOptions[].cashFees",
     sourceContent,
     ctx.model
   );
-  const seats = assertNumberSupported(
+  const seats = assertOptionalNumberSupported(
     obj.seats,
     "awardOptions[].seats",
     sourceContent,
     ctx.model
   );
 
-  const cabin = requireString(obj.cabin, "awardOptions[].cabin", ctx.model);
+  const cabin = requireOptionalString(obj.cabin, "awardOptions[].cabin", ctx.model);
 
   const transferFromProgramId =
     obj.transferFromProgramId === null || obj.transferFromProgramId === undefined
@@ -378,7 +884,7 @@ function validateAwardOption(
 
   if (
     transferFromProgramId !== null &&
-    !ctx.rewardPrograms.includes(transferFromProgramId)
+    !ctx.rewardPrograms.some((program) => program.id === transferFromProgramId)
   ) {
     throw new ResearchInterpreterError(
       `Award option "${id}" references transfer program "${transferFromProgramId}" which was not supplied.`,
@@ -387,25 +893,19 @@ function validateAwardOption(
     );
   }
 
-  const transferRatio =
-    obj.transferRatio === null || obj.transferRatio === undefined
-      ? null
-      : assertNumberSupported(
-          obj.transferRatio,
-          "awardOptions[].transferRatio",
-          sourceContent,
-          ctx.model
-        );
+  const transferRatio = assertOptionalNumberSupported(
+    obj.transferRatio,
+    "awardOptions[].transferRatio",
+    sourceContent,
+    ctx.model
+  );
 
-  const centsPerPoint =
-    obj.centsPerPoint === null || obj.centsPerPoint === undefined
-      ? null
-      : assertNumberSupported(
-          obj.centsPerPoint,
-          "awardOptions[].centsPerPoint",
-          sourceContent,
-          ctx.model
-        );
+  const centsPerPoint = assertOptionalNumberSupported(
+    obj.centsPerPoint,
+    "awardOptions[].centsPerPoint",
+    sourceContent,
+    ctx.model
+  );
 
   const availabilityStatusRaw = requireString(
     obj.availabilityStatus,
@@ -432,11 +932,24 @@ function validateAwardOption(
     );
   }
 
+  const coverage = validateCoverage(
+    obj,
+    sourceContent,
+    redemptionTypeRaw,
+    pricingBasisRaw,
+    id,
+    ctx.model
+  );
+
+  const goalClassification = validateGoalClassification(obj, id, ctx.model);
+
   return {
     id,
     sourceId,
-    programName,
-    itineraryLabel: requireString(
+    programName: finalProgramName,
+    redemptionType: redemptionTypeRaw,
+    pricingBasis: pricingBasisRaw,
+    itineraryLabel: requireOptionalString(
       obj.itineraryLabel,
       "awardOptions[].itineraryLabel",
       ctx.model
@@ -449,6 +962,11 @@ function validateAwardOption(
     transferRatio,
     centsPerPoint,
     availabilityStatus: availabilityStatusRaw,
+    travelerCountCovered: coverage.travelerCountCovered,
+    nightCountCovered: coverage.nightCountCovered,
+    coverageStatus: coverage.coverageStatus,
+    goalMatch: goalClassification.goalMatch,
+    goalMismatchReasons: goalClassification.goalMismatchReasons,
   };
 }
 
@@ -467,8 +985,13 @@ function validateCardOffer(
   const obj = requireObject(raw, "cardOffers[]", ctx.model);
 
   const id = requireString(obj.id, "cardOffers[].id", ctx.model);
-  const sourceId = requireString(obj.sourceId, "cardOffers[].sourceId", ctx.model);
+  const rawSourceId = requireString(obj.sourceId, "cardOffers[].sourceId", ctx.model);
 
+  const sourceId = resolveCanonicalSourceId(
+    rawSourceId,
+    ctx,
+    `Card offer "${id}"`
+  );
   const sourceEntry = ctx.sourceMap.get(sourceId);
   if (!sourceEntry) {
     throw new ResearchInterpreterError(
@@ -515,7 +1038,7 @@ function validateCardOffer(
 
   if (
     destinationProgramId !== null &&
-    !ctx.rewardPrograms.includes(destinationProgramId)
+    !ctx.rewardPrograms.some((program) => program.id === destinationProgramId)
   ) {
     throw new ResearchInterpreterError(
       `Card offer "${id}" references destination program "${destinationProgramId}" which was not supplied.`,
@@ -574,6 +1097,22 @@ function validateInterpretedOutput(
 
   const cardOffers = cardOffersRaw.map((raw) => validateCardOffer(raw, ctx));
 
+  if (ctx.focus === "award_options" && cardOffers.length > 0) {
+    throw new ResearchInterpreterError(
+      `Focus is award_options but ${cardOffers.length} card offer(s) were returned.`,
+      "ollama",
+      ctx.model
+    );
+  }
+
+  if (ctx.focus === "card_offers" && awardOptions.length > 0) {
+    throw new ResearchInterpreterError(
+      `Focus is card_offers but ${awardOptions.length} award option(s) were returned.`,
+      "ollama",
+      ctx.model
+    );
+  }
+
   return {
     awardOptions,
     cardOffers,
@@ -583,7 +1122,28 @@ function validateInterpretedOutput(
   };
 }
 
-export class OllamaResearchInterpreter {
+export function validateResearchModelContent(
+  rawContent: string,
+  input: InterpretResearchInput,
+  model: string
+): InterpretedResearch {
+  const entries = buildSources(input.research);
+  const sourceMap = new Map(entries.map((e) => [e.source.id, e]));
+
+  const parsed = parseModelResponse(rawContent, model);
+
+  const validationContext: ValidationContext = {
+    goal: input.goal,
+    rewardPrograms: input.rewardPrograms,
+    sourceMap,
+    model,
+    focus: input.focus,
+  };
+
+  return validateInterpretedOutput(parsed, validationContext);
+}
+
+export class OllamaResearchInterpreter implements ResearchInterpreter {
   private readonly baseUrl: string;
   private readonly model: string;
 
@@ -626,11 +1186,11 @@ export class OllamaResearchInterpreter {
 
   async interpret(input: InterpretResearchInput): Promise<InterpretedResearch> {
     const entries = buildSources(input.research);
-    const sourceMap = new Map(entries.map((e) => [e.source.id, e]));
 
     const context = {
       goal: input.goal,
       rewardPrograms: input.rewardPrograms,
+      focus: input.focus,
       sources: entries.map((e) => ({
         id: e.source.id,
         label: e.result.title,
@@ -639,21 +1199,39 @@ export class OllamaResearchInterpreter {
       })),
     };
 
-    const raw = await this.callOllama(context);
+    if (process.env.STRATEGY_DEBUG === "1") {
+      const totalResultCount = input.research.reduce(
+        (sum, response) => sum + response.results.length,
+        0
+      );
+      const resultDetails = input.research.flatMap((response) =>
+        response.results.map((result) => ({
+          title: result.title,
+          url: result.url,
+          contentLength: result.content.length,
+        }))
+      );
+      console.info(
+        `[strategy-research-input-debug:${input.focus}]`,
+        JSON.stringify({
+          focus: input.focus,
+          researchResponseCount: input.research.length,
+          totalResultCount,
+          results: resultDetails,
+        })
+      );
+    }
 
-    const parsed = parseModelResponse(raw, this.model);
+    const raw = await this.callOllama(context, input.focus);
 
-    const validationContext: ValidationContext = {
-      goal: input.goal,
-      rewardPrograms: input.rewardPrograms,
-      sourceMap,
-      model: this.model,
-    };
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.info(`[strategy-research-debug:${input.focus}]`, raw);
+    }
 
-    return validateInterpretedOutput(parsed, validationContext);
+    return validateResearchModelContent(raw, input, this.model);
   }
 
-  private async callOllama(context: unknown): Promise<string> {
+  private async callOllama(context: unknown, focus: ResearchFocus): Promise<string> {
     const controller = new AbortController();
     const timeoutId = setTimeout(
       () => controller.abort(),
@@ -669,8 +1247,8 @@ export class OllamaResearchInterpreter {
         body: JSON.stringify({
           model: this.model,
           messages: [
-            { role: "system", content: INTERPRET_PROMPT },
-            { role: "user", content: JSON.stringify(context) },
+            { role: "system", content: buildResearchSystemPrompt(focus) },
+            { role: "user", content: `${JSON.stringify(context)}\n${FOCUS_INSTRUCTIONS[focus]}` },
           ],
           stream: false,
           format: "json",

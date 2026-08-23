@@ -53,6 +53,40 @@ const rewardAccounts: RewardAccount[] = [
   },
 ];
 
+const validFlightOption = {
+  id: "award-1",
+  sourceId: "src-award",
+  programName: "Air France Flying Blue",
+  redemptionType: "flight" as const,
+  pricingBasis: "round_trip" as const,
+  itineraryLabel: "JFK-CDG round trip",
+  pointsRequired: 120000,
+  cashFees: 200,
+  seats: 4,
+  cabin: "economy",
+  transferFromProgramId: null,
+  transferRatio: null,
+  centsPerPoint: 1.3,
+  availabilityStatus: "available" as const,
+};
+
+const validHotelOption = {
+  id: "award-2",
+  sourceId: "src-award",
+  programName: "Hilton Honors",
+  redemptionType: "hotel" as const,
+  pricingBasis: "per_night" as const,
+  itineraryLabel: "Hilton Paris Opera",
+  pointsRequired: 60000,
+  cashFees: 50,
+  seats: null,
+  cabin: null,
+  transferFromProgramId: null,
+  transferRatio: null,
+  centsPerPoint: null,
+  availabilityStatus: "unknown" as const,
+};
+
 function makeContext(overrides: Partial<PersonalizedStrategyContext> = {}): PersonalizedStrategyContext {
   return {
     goal,
@@ -70,22 +104,7 @@ function makeContext(overrides: Partial<PersonalizedStrategyContext> = {}): Pers
       { category: "dining", monthlyAverage: 300 },
       { category: "travel", monthlyAverage: 150 },
     ],
-    awardOptions: [
-      {
-        id: "award-1",
-        sourceId: "src-award",
-        programName: "Air France Flying Blue",
-        itineraryLabel: "JFK-CDG round trip",
-        pointsRequired: 120000,
-        cashFees: 200,
-        seats: 4,
-        cabin: "economy",
-        transferFromProgramId: null,
-        transferRatio: null,
-        centsPerPoint: 1.3,
-        availabilityStatus: "available",
-      },
-    ],
+    awardOptions: [validFlightOption],
     cardOffers: [
       {
         id: "offer-1",
@@ -126,6 +145,8 @@ function makeValidStrategy(): PersonalizedStrategy {
     pointsGap: 0,
     recommendedAwardOptionId: "award-1",
     recommendedCardOfferId: null,
+    flightOptions: [validFlightOption],
+    hotelOptions: [],
     actions: [
       {
         priority: 1,
@@ -517,4 +538,224 @@ test("input context is not mutated", async () => {
   const after = JSON.stringify(context);
 
   assert.equal(after, before);
+});
+
+test("one validated flight is returned in flightOptions", async () => {
+  restoreEnv();
+
+  const context = makeContext();
+
+  const strategy = makeValidStrategy();
+
+  stubFetch(JSON.stringify(strategy));
+
+  const provider = new OllamaStrategyProvider(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await provider.generateStrategy(context);
+
+  assert.equal(result.flightOptions.length, 1);
+  assert.equal(result.flightOptions[0].id, "award-1");
+  assert.equal(result.flightOptions[0].redemptionType, "flight");
+});
+
+test("one validated hotel is returned in hotelOptions", async () => {
+  restoreEnv();
+
+  const context = makeContext({
+    awardOptions: [validFlightOption, validHotelOption],
+  });
+
+  const strategy = makeValidStrategy();
+
+  stubFetch(JSON.stringify(strategy));
+
+  const provider = new OllamaStrategyProvider(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await provider.generateStrategy(context);
+
+  assert.equal(result.hotelOptions.length, 1);
+  assert.equal(result.hotelOptions[0].id, "award-2");
+  assert.equal(result.hotelOptions[0].redemptionType, "hotel");
+});
+
+test("duplicate IDs are deduplicated", async () => {
+  restoreEnv();
+
+  const context = makeContext({
+    awardOptions: [
+      validFlightOption,
+      validFlightOption,
+      validHotelOption,
+      validHotelOption,
+    ],
+  });
+
+  const strategy = makeValidStrategy();
+
+  stubFetch(JSON.stringify(strategy));
+
+  const provider = new OllamaStrategyProvider(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await provider.generateStrategy(context);
+
+  assert.equal(result.flightOptions.length, 1);
+  assert.equal(result.hotelOptions.length, 1);
+});
+
+test("original order is preserved when deduplicating", async () => {
+  restoreEnv();
+
+  const flightB = { ...validFlightOption, id: "flight-b", pointsRequired: 101 };
+  const flightA = { ...validFlightOption, id: "flight-a", pointsRequired: 102 };
+
+  const context = makeContext({
+    awardOptions: [flightB, validFlightOption, flightA, validFlightOption],
+  });
+
+  const strategy = makeValidStrategy();
+
+  stubFetch(JSON.stringify(strategy));
+
+  const provider = new OllamaStrategyProvider(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await provider.generateStrategy(context);
+
+  // First-seen order: flight-b, then award-1, then flight-a. Duplicates removed.
+  assert.deepEqual(
+    result.flightOptions.map((o) => o.id),
+    ["flight-b", "award-1", "flight-a"]
+  );
+});
+
+test("empty context options produce two empty arrays", async () => {
+  restoreEnv();
+
+  const context = makeContext({ awardOptions: [] });
+
+  // No award option exists in the context, so the strategy must not
+  // reference one (the provider's existing validation enforces this).
+  const strategy = {
+    ...makeValidStrategy(),
+    recommendedAwardOptionId: null,
+  };
+
+  stubFetch(JSON.stringify(strategy));
+
+  const provider = new OllamaStrategyProvider(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await provider.generateStrategy(context);
+
+  assert.deepEqual(result.flightOptions, []);
+  assert.deepEqual(result.hotelOptions, []);
+});
+
+test("model-supplied fake option arrays cannot enter the returned strategy", async () => {
+  restoreEnv();
+
+  const context = makeContext();
+
+  const strategy = makeValidStrategy();
+
+  // The model attempts to inject fabricated options via fields the provider
+  // must never read.
+  (strategy as unknown as Record<string, unknown>).flightOptions = [
+    {
+      id: "fake-flight",
+      sourceId: "fake-src",
+      programName: "Fake Airline",
+      redemptionType: "flight",
+      pricingBasis: "one_way",
+      itineraryLabel: "FAKE ROUTE",
+      pointsRequired: 1,
+      cashFees: null,
+      seats: null,
+      cabin: null,
+      transferFromProgramId: null,
+      transferRatio: null,
+      centsPerPoint: null,
+      availabilityStatus: "unknown",
+    },
+  ];
+  (strategy as unknown as Record<string, unknown>).hotelOptions = [
+    {
+      id: "fake-hotel",
+      sourceId: "fake-src",
+      programName: "Fake Hotel",
+      redemptionType: "hotel",
+      pricingBasis: "per_night",
+      itineraryLabel: "FAKE STAY",
+      pointsRequired: 1,
+      cashFees: null,
+      seats: null,
+      cabin: null,
+      transferFromProgramId: null,
+      transferRatio: null,
+      centsPerPoint: null,
+      availabilityStatus: "unknown",
+    },
+  ];
+
+  stubFetch(JSON.stringify(strategy));
+
+  const provider = new OllamaStrategyProvider(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await provider.generateStrategy(context);
+
+  // Only the validated context option may appear; fake ids must not.
+  assert.equal(result.flightOptions.length, 1);
+  assert.equal(result.flightOptions[0].id, "award-1");
+  assert.equal(result.hotelOptions.length, 0);
+  assert.equal(
+    result.flightOptions.some((o) => o.id === "fake-flight"),
+    false
+  );
+});
+
+test("existing narrative fields remain unchanged", async () => {
+  restoreEnv();
+
+  const context = makeContext({
+    awardOptions: [validFlightOption, validHotelOption],
+  });
+
+  const strategy = makeValidStrategy();
+
+  stubFetch(JSON.stringify(strategy));
+
+  const provider = new OllamaStrategyProvider(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await provider.generateStrategy(context);
+
+  assert.equal(result.headline, "Book with Air France");
+  assert.equal(result.summary, "You have enough points today.");
+  assert.equal(result.feasibility, "on_track");
+  assert.equal(result.pointsGap, 0);
+  assert.equal(result.recommendedAwardOptionId, "award-1");
+  assert.equal(result.recommendedCardOfferId, null);
+  assert.equal(result.actions.length, 1);
+  assert.equal(result.alternatives.length, 1);
+  assert.deepEqual(result.assumptions, ["Balances are current as of the as-of date."]);
+  assert.deepEqual(result.warnings, ["Award availability can change."]);
+  assert.deepEqual(result.followUpQuestions, []);
 });

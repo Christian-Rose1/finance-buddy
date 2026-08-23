@@ -2,10 +2,15 @@ import { redirect } from "next/navigation";
 import { Nav } from "@/components/nav";
 import { createServerClient } from "@/lib/supabase-server";
 import { getWalletCardsForUser } from "@/lib/wallet/repository";
-import { getCardProducts } from "@/lib/rewards/catalogRepository";
+import {
+  getCardProducts,
+  getRewardPrograms,
+} from "@/lib/rewards/catalogRepository";
 import { getWalletBenefitsWithProducts } from "@/lib/wallet/benefitsRepository";
+import { getRewardAccountsForUser } from "@/lib/goals/rewardAccountsRepository";
 import { WalletCardList } from "@/components/wallet-card-list";
 import { WalletCardForm } from "@/components/wallet-card-form";
+import { RewardAccountManager } from "@/components/reward-account-manager";
 import type { WalletBenefitDisplay } from "@/lib/wallet/benefitsRepository";
 import { Wallet } from "lucide-react";
 
@@ -18,9 +23,11 @@ async function loadWalletData() {
   }
 
   try {
-    const [cards, products] = await Promise.all([
+    const [cards, products, rewardAccounts, rewardPrograms] = await Promise.all([
       getWalletCardsForUser(userData.user.id),
       getCardProducts({ activeOnly: true }),
+      getRewardAccountsForUser(userData.user.id, supabase),
+      getRewardPrograms(supabase),
     ]);
 
     // Load persisted benefit state for each card, rehydrated with its shared
@@ -36,19 +43,35 @@ async function loadWalletData() {
       benefitsByCard[result.cardId] = result.benefits;
     }
 
-    return { cards, products, benefitsByCard, error: null };
+    return {
+      cards,
+      products,
+      benefitsByCard,
+      rewardAccounts,
+      rewardPrograms,
+      error: null,
+    };
   } catch {
     return {
       cards: [],
       products: [],
       benefitsByCard: {},
+      rewardAccounts: [],
+      rewardPrograms: [],
       error: "Unable to load your wallet right now.",
     };
   }
 }
 
 export default async function WalletPage() {
-  const { cards, products, benefitsByCard, error } = await loadWalletData();
+  const {
+    cards,
+    products,
+    benefitsByCard,
+    rewardAccounts,
+    rewardPrograms,
+    error,
+  } = await loadWalletData();
 
   return (
     <main className="min-h-screen bg-transparent text-slate-100">
@@ -84,6 +107,21 @@ export default async function WalletPage() {
           <div className="mt-5">
             <WalletCardForm mode="create" />
           </div>
+        </section>
+
+        <section className="mb-6">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-white">
+              Points & miles balances
+              <span className="ml-2 rounded-full bg-white/10 px-2 py-0.5 text-sm font-normal text-slate-400">
+                {rewardAccounts.length}
+              </span>
+            </h2>
+          </div>
+          <RewardAccountManager
+            accounts={rewardAccounts}
+            programs={rewardPrograms}
+          />
         </section>
 
         <section>

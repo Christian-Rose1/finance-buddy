@@ -2,7 +2,12 @@ import { redirect } from "next/navigation";
 import { Nav } from "@/components/nav";
 import { createServerClient } from "@/lib/supabase-server";
 import { getGoalsForUser } from "@/lib/goals/repository";
+import {
+  getLatestStrategiesForGoals,
+  type SavedGoalStrategy,
+} from "@/lib/goals/strategyRepository";
 import { GoalForm } from "@/components/goal-form";
+import { GoalStrategyPanel } from "@/components/goal-strategy-panel";
 import { Target } from "lucide-react";
 
 async function loadGoalsData() {
@@ -15,17 +20,34 @@ async function loadGoalsData() {
 
   try {
     const goals = await getGoalsForUser(userData.user.id);
-    return { goals, error: null };
+
+    let savedStrategies: Record<string, SavedGoalStrategy> = {};
+    let strategyWarning: string | null = null;
+    try {
+      savedStrategies = await getLatestStrategiesForGoals(
+        goals.map((goal) => goal.id),
+        userData.user.id,
+        supabase
+      );
+    } catch (err) {
+      strategyWarning =
+        "Your goals loaded, but saved strategies could not be loaded.";
+    }
+
+    return { goals, savedStrategies, strategyWarning, error: null };
   } catch (err) {
     return {
       goals: [],
+      savedStrategies: {} as Record<string, SavedGoalStrategy>,
+      strategyWarning: null,
       error: "Unable to load your goals right now.",
     };
   }
 }
 
 export default async function GoalsPage() {
-  const { goals, error } = await loadGoalsData();
+  const { goals, error, savedStrategies, strategyWarning } =
+    await loadGoalsData();
 
   return (
     <main className="min-h-screen bg-transparent text-slate-100">
@@ -49,6 +71,12 @@ export default async function GoalsPage() {
           <div className="mb-6 rounded-2xl border border-rose-400/20 bg-rose-400/10 p-4 text-sm text-rose-200">
             <p className="font-medium">Something went wrong</p>
             <p className="mt-1 text-rose-100/80">{error}</p>
+          </div>
+        ) : null}
+
+        {strategyWarning ? (
+          <div className="mb-6 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-4 text-sm text-amber-200">
+            <p>{strategyWarning}</p>
           </div>
         ) : null}
 
@@ -96,12 +124,10 @@ export default async function GoalsPage() {
                     </div>
                   </div>
 
-                  <div className="mt-6 border-t border-white/5 pt-4">
-                    <p className="text-sm font-medium text-slate-300">Strategy not calculated yet.</p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      Calculations will appear here once the planning engine is active.
-                    </p>
-                  </div>
+                  <GoalStrategyPanel
+                    goalId={goal.id}
+                    initialStrategy={savedStrategies[goal.id]?.strategy ?? null}
+                  />
                 </div>
               ))
             )}

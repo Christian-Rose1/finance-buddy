@@ -23,15 +23,41 @@ export interface StrategyAwardOption {
   id: string;
   sourceId: string;
   programName: string;
-  itineraryLabel: string;
+  redemptionType: "flight" | "hotel";
+  pricingBasis:
+    | "one_way"
+    | "round_trip"
+    | "per_night"
+    | "total_stay"
+    | "unknown";
+  itineraryLabel: string | null;
   pointsRequired: number;
-  cashFees: number;
-  seats: number;
-  cabin: string;
+  cashFees: number | null;
+  seats: number | null;
+  cabin: string | null;
   transferFromProgramId: string | null;
   transferRatio: number | null;
   centsPerPoint: number | null;
   availabilityStatus: "available" | "unavailable" | "unknown";
+  travelerCountCovered?: number | null;
+  nightCountCovered?: number | null;
+  coverageStatus?:
+    | "source_explicit"
+    | "standard_assumption"
+    | "unknown";
+  goalMatch?:
+    | "exact"
+    | "partial"
+    | "general"
+    | "different_destination";
+  goalMismatchReasons?: Array<
+    | "origin"
+    | "destination"
+    | "dates"
+    | "traveler_count"
+    | "cabin"
+    | "property"
+  >;
 }
 
 export interface StrategyCardOffer {
@@ -83,6 +109,50 @@ export interface StrategyAlternative {
   sourceIds: string[];
 }
 
+export interface StrategyPointsInventoryItem {
+  accountId: string;
+  rewardProgramId: string;
+  programName: string | null;
+  ownerLabel: string;
+  ownerType: "self" | "companion";
+  balance: number;
+  balanceAsOf: string;
+  origin: "manual" | "evidence" | "connected";
+  verificationStatus: "unverified" | "verified";
+}
+
+export interface StrategyPointsAllocation {
+  accountId: string;
+  rewardProgramId: string;
+  programName: string | null;
+  ownerLabel: string;
+  fundingMethod: "transfer_source" | "direct_program";
+  availablePoints: number;
+  plannedPoints: number;
+  remainingPoints: number;
+  pointsGap: number;
+}
+
+export interface StrategyAllocationScenario {
+  id: string;
+  kind: "flight_first" | "hotel_first" | "balanced" | "fallback";
+  title: string;
+  status:
+    | "feasible"
+    | "gap"
+    | "conditional"
+    | "insufficient_information";
+  flightOptionId: string | null;
+  hotelOptionId: string | null;
+  flightPointsRequired: number | null;
+  hotelPointsRequired: number | null;
+  travelerCount: number;
+  tripNights: number | null;
+  allocations: StrategyPointsAllocation[];
+  assumptions: string[];
+  warnings: string[];
+}
+
 export interface PersonalizedStrategy {
   headline: string;
   summary: string;
@@ -90,15 +160,30 @@ export interface PersonalizedStrategy {
   pointsGap: number | null;
   recommendedAwardOptionId: string | null;
   recommendedCardOfferId: string | null;
+  flightOptions: StrategyAwardOption[];
+  hotelOptions: StrategyAwardOption[];
   actions: StrategyAction[];
   alternatives: StrategyAlternative[];
   assumptions: string[];
   warnings: string[];
   followUpQuestions: string[];
+  pointsInventory: StrategyPointsInventoryItem[];
+  allocationScenarios: StrategyAllocationScenario[];
 }
+
+/**
+ * The strategy-model-generated narrative portion of a PersonalizedStrategy.
+ * The model never produces pointsInventory or allocationScenarios; these are
+ * assembled deterministically by the planner from reward accounts, the
+ * reward-program catalog, and award options.
+ */
+export type PersonalizedStrategyNarrative = Omit<
+  PersonalizedStrategy,
+  "pointsInventory" | "allocationScenarios"
+>;
 
 export interface StrategyProvider {
   generateStrategy(
     context: PersonalizedStrategyContext
-  ): Promise<PersonalizedStrategy>;
+  ): Promise<PersonalizedStrategyNarrative>;
 }
