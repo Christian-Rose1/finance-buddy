@@ -4,9 +4,11 @@ import assert from "node:assert/strict";
 import type { Goal, RewardAccount } from "./types";
 import { OllamaStrategyProvider, StrategyProviderError } from "./ollamaStrategyProvider";
 import type {
-  PersonalizedStrategy,
+  PersonalizedStrategyNarrative,
   PersonalizedStrategyContext,
+  SanitizedStrategyPrompt,
 } from "./strategyTypes";
+import { buildSanitizedStrategyPayload } from "./sanitizedStrategyPayload";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -87,6 +89,10 @@ const validHotelOption = {
   availabilityStatus: "unknown" as const,
 };
 
+const catalogRewardPrograms = [
+  { id: "program-1", name: "Chase Ultimate Rewards" },
+];
+
 function makeContext(overrides: Partial<PersonalizedStrategyContext> = {}): PersonalizedStrategyContext {
   return {
     goal,
@@ -137,7 +143,16 @@ function makeContext(overrides: Partial<PersonalizedStrategyContext> = {}): Pers
   };
 }
 
-function makeValidStrategy(): PersonalizedStrategy {
+function makeSanitizedPrompt(
+  overrides: Partial<PersonalizedStrategyContext> = {}
+): SanitizedStrategyPrompt {
+  return buildSanitizedStrategyPayload(
+    makeContext(overrides),
+    catalogRewardPrograms
+  );
+}
+
+function makeValidStrategy(): PersonalizedStrategyNarrative {
   return {
     headline: "Book with Air France",
     summary: "You have enough points today.",
@@ -190,10 +205,10 @@ function stubFetch(
   globalThis.fetch = mockFetch as typeof fetch;
 }
 
-test("personalized context is sent to Ollama", async () => {
+test("sanitized prompt is sent to Ollama", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -208,7 +223,7 @@ test("personalized context is sent to Ollama", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   assert.ok(capturedBody, "fetch body should be captured");
 
@@ -219,15 +234,15 @@ test("personalized context is sent to Ollama", async () => {
   assert.equal(body.messages[0].role, "system");
   assert.equal(body.messages[1].role, "user");
 
-  const sentContext = JSON.parse(body.messages[1].content);
+  const sentPrompt = JSON.parse(body.messages[1].content);
 
-  assert.deepEqual(sentContext.goal, context.goal);
-  assert.equal(
-    sentContext.awardOptions[0].id,
-    "award-1"
-  );
-  assert.equal(sentContext.cardOffers[0].id, "offer-1");
-  assert.equal(sentContext.monthlySpendingByCategory.length, 2);
+  // Verify the sent payload is sanitized (no internal IDs).
+  assert.ok(!("id" in sentPrompt.goal), "goal.id must not be sent");
+  assert.ok(!("userId" in sentPrompt.goal), "goal.userId must not be sent");
+  assert.equal(sentPrompt.goal.title, "Trip to Europe");
+  assert.equal(sentPrompt.awardOptions[0].id, "award-1");
+  assert.equal(sentPrompt.cardOffers[0].id, "offer-1");
+  assert.equal(sentPrompt.monthlySpendingByCategory.length, 2);
 
   assert.equal(result.headline, strategy.headline);
 });
@@ -235,7 +250,7 @@ test("personalized context is sent to Ollama", async () => {
 test("valid JSON maps successfully", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -246,7 +261,7 @@ test("valid JSON maps successfully", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   assert.deepEqual(result, strategy);
 });
@@ -254,7 +269,7 @@ test("valid JSON maps successfully", async () => {
 test("malformed JSON is rejected", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   stubFetch("this is not json");
 
@@ -264,7 +279,7 @@ test("malformed JSON is rejected", async () => {
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match((error as Error).message, /did not return valid JSON/);
@@ -276,7 +291,7 @@ test("malformed JSON is rejected", async () => {
 test("invented award option ID is rejected", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -290,7 +305,7 @@ test("invented award option ID is rejected", async () => {
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match(
@@ -309,7 +324,7 @@ test("invented award option ID is rejected", async () => {
 test("invented card offer ID is rejected", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -323,7 +338,7 @@ test("invented card offer ID is rejected", async () => {
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match(
@@ -342,7 +357,7 @@ test("invented card offer ID is rejected", async () => {
 test("unknown source ID is rejected", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -356,7 +371,7 @@ test("unknown source ID is rejected", async () => {
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match((error as Error).message, /nonexistent-source/);
@@ -372,7 +387,7 @@ test("unknown source ID is rejected", async () => {
 test("card recommendation is rejected when allowNewCards is false", async () => {
   restoreEnv();
 
-  const context = makeContext({
+  const prompt = makeSanitizedPrompt({
     goal: {
       ...goal,
       allowNewCards: false,
@@ -391,7 +406,7 @@ test("card recommendation is rejected when allowNewCards is false", async () => 
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match(
@@ -442,7 +457,7 @@ test("missing configuration is rejected", async () => {
 test("invalid feasibility is rejected", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -456,7 +471,7 @@ test("invalid feasibility is rejected", async () => {
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match((error as Error).message, /invalid feasibility/);
@@ -468,7 +483,7 @@ test("invalid feasibility is rejected", async () => {
 test("negative pointsGap is rejected", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -482,7 +497,7 @@ test("negative pointsGap is rejected", async () => {
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match((error as Error).message, /negative pointsGap/);
@@ -494,7 +509,7 @@ test("negative pointsGap is rejected", async () => {
 test("missing required fields are rejected", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   stubFetch(
     JSON.stringify({
@@ -508,7 +523,7 @@ test("missing required fields are rejected", async () => {
   );
 
   await assert.rejects(
-    () => provider.generateStrategy(context),
+    () => provider.generateStrategy(prompt),
     (error: unknown) => {
       assert.ok(error instanceof StrategyProviderError);
       assert.match((error as Error).message, /missing required string field "summary"/);
@@ -517,12 +532,12 @@ test("missing required fields are rejected", async () => {
   );
 });
 
-test("input context is not mutated", async () => {
+test("input prompt is not mutated", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
-  const before = JSON.stringify(context);
+  const before = JSON.stringify(prompt);
 
   const strategy = makeValidStrategy();
 
@@ -533,9 +548,9 @@ test("input context is not mutated", async () => {
     "test-model"
   );
 
-  await provider.generateStrategy(context);
+  await provider.generateStrategy(prompt);
 
-  const after = JSON.stringify(context);
+  const after = JSON.stringify(prompt);
 
   assert.equal(after, before);
 });
@@ -543,7 +558,7 @@ test("input context is not mutated", async () => {
 test("one validated flight is returned in flightOptions", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -554,7 +569,7 @@ test("one validated flight is returned in flightOptions", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   assert.equal(result.flightOptions.length, 1);
   assert.equal(result.flightOptions[0].id, "award-1");
@@ -564,7 +579,7 @@ test("one validated flight is returned in flightOptions", async () => {
 test("one validated hotel is returned in hotelOptions", async () => {
   restoreEnv();
 
-  const context = makeContext({
+  const prompt = makeSanitizedPrompt({
     awardOptions: [validFlightOption, validHotelOption],
   });
 
@@ -577,7 +592,7 @@ test("one validated hotel is returned in hotelOptions", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   assert.equal(result.hotelOptions.length, 1);
   assert.equal(result.hotelOptions[0].id, "award-2");
@@ -587,7 +602,7 @@ test("one validated hotel is returned in hotelOptions", async () => {
 test("duplicate IDs are deduplicated", async () => {
   restoreEnv();
 
-  const context = makeContext({
+  const prompt = makeSanitizedPrompt({
     awardOptions: [
       validFlightOption,
       validFlightOption,
@@ -605,7 +620,7 @@ test("duplicate IDs are deduplicated", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   assert.equal(result.flightOptions.length, 1);
   assert.equal(result.hotelOptions.length, 1);
@@ -617,7 +632,7 @@ test("original order is preserved when deduplicating", async () => {
   const flightB = { ...validFlightOption, id: "flight-b", pointsRequired: 101 };
   const flightA = { ...validFlightOption, id: "flight-a", pointsRequired: 102 };
 
-  const context = makeContext({
+  const prompt = makeSanitizedPrompt({
     awardOptions: [flightB, validFlightOption, flightA, validFlightOption],
   });
 
@@ -630,7 +645,7 @@ test("original order is preserved when deduplicating", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   // First-seen order: flight-b, then award-1, then flight-a. Duplicates removed.
   assert.deepEqual(
@@ -642,7 +657,7 @@ test("original order is preserved when deduplicating", async () => {
 test("empty context options produce two empty arrays", async () => {
   restoreEnv();
 
-  const context = makeContext({ awardOptions: [] });
+  const prompt = makeSanitizedPrompt({ awardOptions: [] });
 
   // No award option exists in the context, so the strategy must not
   // reference one (the provider's existing validation enforces this).
@@ -658,7 +673,7 @@ test("empty context options produce two empty arrays", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   assert.deepEqual(result.flightOptions, []);
   assert.deepEqual(result.hotelOptions, []);
@@ -667,7 +682,7 @@ test("empty context options produce two empty arrays", async () => {
 test("model-supplied fake option arrays cannot enter the returned strategy", async () => {
   restoreEnv();
 
-  const context = makeContext();
+  const prompt = makeSanitizedPrompt();
 
   const strategy = makeValidStrategy();
 
@@ -717,7 +732,7 @@ test("model-supplied fake option arrays cannot enter the returned strategy", asy
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   // Only the validated context option may appear; fake ids must not.
   assert.equal(result.flightOptions.length, 1);
@@ -732,7 +747,7 @@ test("model-supplied fake option arrays cannot enter the returned strategy", asy
 test("existing narrative fields remain unchanged", async () => {
   restoreEnv();
 
-  const context = makeContext({
+  const prompt = makeSanitizedPrompt({
     awardOptions: [validFlightOption, validHotelOption],
   });
 
@@ -745,7 +760,7 @@ test("existing narrative fields remain unchanged", async () => {
     "test-model"
   );
 
-  const result = await provider.generateStrategy(context);
+  const result = await provider.generateStrategy(prompt);
 
   assert.equal(result.headline, "Book with Air France");
   assert.equal(result.summary, "You have enough points today.");

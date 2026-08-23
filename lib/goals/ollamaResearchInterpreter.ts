@@ -125,6 +125,142 @@ const FOCUS_INSTRUCTIONS: Record<ResearchFocus, string> = {
     "    * General U.S.-to-Europe benchmark → general, []\n" +
     "    * U.S.-to-London source for a Paris query → different_destination, [\"destination\"]\n" +
     "    * Generic Hyatt category price with no Paris property → general or partial with [\"property\"]",
+  flight_options:
+    "Research focus is flight_options: extract only sourced flight award options.\n" +
+    "- Every returned option must have redemptionType=\"flight\".\n" +
+    "- Do not return hotel options.\n" +
+    "- cardOffers must be [].\n" +
+    "- Emit an award option whenever one cited source supports:\n" +
+    "  a recognizable program name and an exact points price.\n" +
+    "- An award option does NOT require the cited source to match the research\n" +
+    "  query's exact origin, destination, dates, traveler count, cabin, or hotel\n" +
+    "  property. Do not omit a sourced award benchmark merely because it does\n" +
+    "  not match every detail in the research query.\n" +
+    "- Valid planning benchmarks include general U.S.-to-Europe flight pricing,\n" +
+    "  regional route pricing, airline-program award-chart pricing, hotel-program\n" +
+    "  or destination hotel points-per-night pricing, and total-stay pricing when\n" +
+    "  explicitly supported by the source.\n" +
+    "- For a non-exact benchmark: set availabilityStatus=\"unknown\"; set\n" +
+    "  itineraryLabel to describe ONLY the scope the source supports (never\n" +
+    "  rewrite it as the customer's exact route, dates, or hotel); include an\n" +
+    "  assumption or warning disclosing the mismatch.\n" +
+    "- Set pricingBasis ONLY to what the cited source establishes:\n" +
+    "  - flight options may use \"one_way\", \"round_trip\", or \"unknown\".\n" +
+    "  - Use \"unknown\" when the source does not establish the basis.\n" +
+    "- Never infer round-trip pricing from a one-way price.\n" +
+    "- Missing itinerary, fees, seats, cabin, transfer details, or valuation\n" +
+    "  must be null and must NOT cause the option to be omitted.\n" +
+    "- For public award-charts/examples, use availabilityStatus=\"unknown\".\n" +
+    "- Do not require transfer evidence to emit the base award option.\n" +
+    "- A clear shortened program name may map to the unique supplied catalog\n" +
+    "  name containing that name, such as \"Flying Blue\" mapping to\n" +
+    "  \"Air France-KLM Flying Blue\". Never make an ambiguous mapping.\n" +
+    "- Identify how many travelers the cited points figure covers:\n" +
+    "  - travelerCountCovered (number|null): travelers covered by the points price.\n" +
+    "  - nightCountCovered must be null.\n" +
+    "  - coverageStatus: \"source_explicit\" | \"standard_assumption\" | \"unknown\".\n" +
+    "  - Use \"source_explicit\" only when the source establishes the quantity.\n" +
+    "  - Use \"standard_assumption\" for a single-traveler flight benchmark when\n" +
+    "    the source presents a normal per-ticket award price but does not state a\n" +
+    "    group quantity (travelerCountCovered=1, nightCountCovered=null).\n" +
+    "  - Use \"unknown\" with null counts when coverage cannot safely be determined.\n" +
+    "  - Never assume a group price applies to one traveler.\n" +
+    "- Every award option MUST include a goalMatch and a goalMismatchReasons array\n" +
+    "  classifying how well the cited source content matches the research query's\n" +
+    "  travel criteria (origin, destination, dates, traveler count, cabin, and hotel\n" +
+    "  property/scope).\n" +
+    "  - goalMatch: \"exact\" | \"partial\" | \"general\" | \"different_destination\".\n" +
+    "  - goalMismatchReasons: array of \"origin\" | \"destination\" | \"dates\" |\n" +
+    "    \"traveler_count\" | \"cabin\" | \"property\".\n" +
+    "  - \"exact\": the cited source scope matches the requested route/destination\n" +
+    "    and relevant trip characteristics. goalMismatchReasons must be [].\n" +
+    "    Classification must reflect the cited source content, NOT merely the\n" +
+    "    research query wording.\n" +
+    "  - \"partial\": the source matches an important part of the goal but not\n" +
+    "    every detail. Include the specific mismatch reasons.\n" +
+    "  - \"general\": broad program/region benchmark with no contradictory\n" +
+    "    destination. Include no mismatch reasons, or only reasons that do not\n" +
+    "    contradict the goal (e.g., missing dates for a general benchmark).\n" +
+    "  - \"different_destination\": the source explicitly concerns a different\n" +
+    "    destination than the research query. goalMismatchReasons MUST include\n" +
+    "    \"destination\".\n" +
+    "  - different-destination options may still be preserved as fallbacks, but\n" +
+    "    they must not be presented as primary matches.\n" +
+    "  - Missing exact dates normally prevents an exact date match.\n" +
+    "  - General benchmarks should not be omitted merely for being general.\n" +
+    "  - Do not include duplicate reasons. Use each reason at most once.\n" +
+    "  - Example classifications:\n" +
+    "    * Denver-to-Paris source for a Denver-to-Paris query → exact, []\n" +
+    "    * General U.S.-to-Paris source → partial, [\"origin\"]\n" +
+    "    * General U.S.-to-Europe benchmark → general, []\n" +
+    "    * U.S.-to-London source for a Paris query → different_destination, [\"destination\"]",
+  hotel_options:
+    "Research focus is hotel_options: extract only sourced hotel award options.\n" +
+    "- Every returned option must have redemptionType=\"hotel\".\n" +
+    "- Do not return flight options.\n" +
+    "- cardOffers must be [].\n" +
+    "- Emit an award option whenever one cited source supports:\n" +
+    "  a recognizable program name and an exact points price.\n" +
+    "- An award option does NOT require the cited source to match the research\n" +
+    "  query's exact origin, destination, dates, traveler count, cabin, or hotel\n" +
+    "  property. Do not omit a sourced award benchmark merely because it does\n" +
+    "  not match every detail in the research query.\n" +
+    "- Valid planning benchmarks include hotel-program or destination hotel\n" +
+    "  points-per-night pricing, and total-stay pricing when explicitly supported\n" +
+    "  by the source.\n" +
+    "- For a non-exact benchmark: set availabilityStatus=\"unknown\"; set\n" +
+    "  itineraryLabel to describe ONLY the scope the source supports (never\n" +
+    "  rewrite it as the customer's exact route, dates, or hotel); include an\n" +
+    "  assumption or warning disclosing the mismatch.\n" +
+    "- Set pricingBasis ONLY to what the cited source establishes:\n" +
+    "  - hotel options may use \"per_night\", \"total_stay\", or \"unknown\".\n" +
+    "  - Use \"unknown\" when the source does not establish the basis.\n" +
+    "- Never infer total-stay pricing from a per-night price.\n" +
+    "- Missing itinerary, fees, seats, cabin, transfer details, or valuation\n" +
+    "  must be null and must NOT cause the option to be omitted.\n" +
+    "- For public award-charts/examples, use availabilityStatus=\"unknown\".\n" +
+    "- Do not require transfer evidence to emit the base award option.\n" +
+    "- A clear shortened program name may map to the unique supplied catalog\n" +
+    "  name containing that name, such as \"Hyatt\" mapping to\n" +
+    "  \"World of Hyatt\". Never make an ambiguous mapping.\n" +
+    "- Identify how many nights the cited points figure covers:\n" +
+    "  - nightCountCovered (number|null): nights covered by the points price.\n" +
+    "  - travelerCountCovered must be null.\n" +
+    "  - coverageStatus: \"source_explicit\" | \"standard_assumption\" | \"unknown\".\n" +
+    "  - Use \"source_explicit\" only when the source establishes the quantity.\n" +
+    "  - Use \"standard_assumption\" with one night for per-night hotel pricing\n" +
+    "    (travelerCountCovered=null, nightCountCovered=1).\n" +
+    "  - Use \"unknown\" with null counts when coverage cannot safely be determined.\n" +
+    "  - Never assume a per-night hotel price covers the entire stay.\n" +
+    "- Every award option MUST include a goalMatch and a goalMismatchReasons array\n" +
+    "  classifying how well the cited source content matches the research query's\n" +
+    "  travel criteria (origin, destination, dates, traveler count, cabin, and hotel\n" +
+    "  property/scope).\n" +
+    "  - goalMatch: \"exact\" | \"partial\" | \"general\" | \"different_destination\".\n" +
+    "  - goalMismatchReasons: array of \"origin\" | \"destination\" | \"dates\" |\n" +
+    "    \"traveler_count\" | \"cabin\" | \"property\".\n" +
+    "  - \"exact\": the cited source scope matches the requested destination\n" +
+    "    and relevant trip characteristics. goalMismatchReasons must be [].\n" +
+    "    Classification must reflect the cited source content, NOT merely the\n" +
+    "    research query wording.\n" +
+    "  - \"partial\": the source matches an important part of the goal but not\n" +
+    "    every detail. Include the specific mismatch reasons.\n" +
+    "  - \"general\": broad program/region benchmark with no contradictory\n" +
+    "    destination. Include no mismatch reasons, or only reasons that do not\n" +
+    "    contradict the goal (e.g., missing dates for a general benchmark).\n" +
+    "  - \"different_destination\": the source explicitly concerns a different\n" +
+    "    destination than the research query. goalMismatchReasons MUST include\n" +
+    "    \"destination\".\n" +
+    "  - different-destination options may still be preserved as fallbacks, but\n" +
+    "    they must not be presented as primary matches.\n" +
+    "  - Missing exact dates normally prevents an exact date match.\n" +
+    "  - General benchmarks should not be omitted merely for being general.\n" +
+    "  - Do not include duplicate reasons. Use each reason at most once.\n" +
+    "  - Example classifications:\n" +
+    "    * Paris Hyatt source for a Paris query → exact, []\n" +
+    "    * General Paris hotel source → partial, [\"property\"]\n" +
+    "    * General Europe hotel benchmark → general, []\n" +
+    "    * London hotel source for a Paris query → different_destination, [\"destination\"]",
   card_offers:
     "Research focus is card_offers: extract actual credit-card offers only; awardOptions must be []; a rewards-program name is not a card name.",
 };
@@ -1113,6 +1249,43 @@ function validateInterpretedOutput(
     );
   }
 
+  // Focused award-option type restrictions
+  if (ctx.focus === "flight_options") {
+    if (cardOffers.length > 0) {
+      throw new ResearchInterpreterError(
+        `Focus is flight_options but ${cardOffers.length} card offer(s) were returned.`,
+        "ollama",
+        ctx.model
+      );
+    }
+    const hotelOptions = awardOptions.filter((o) => o.redemptionType === "hotel");
+    if (hotelOptions.length > 0) {
+      throw new ResearchInterpreterError(
+        `Focus is flight_options but ${hotelOptions.length} hotel award option(s) were returned.`,
+        "ollama",
+        ctx.model
+      );
+    }
+  }
+
+  if (ctx.focus === "hotel_options") {
+    if (cardOffers.length > 0) {
+      throw new ResearchInterpreterError(
+        `Focus is hotel_options but ${cardOffers.length} card offer(s) were returned.`,
+        "ollama",
+        ctx.model
+      );
+    }
+    const flightOptions = awardOptions.filter((o) => o.redemptionType === "flight");
+    if (flightOptions.length > 0) {
+      throw new ResearchInterpreterError(
+        `Focus is hotel_options but ${flightOptions.length} flight award option(s) were returned.`,
+        "ollama",
+        ctx.model
+      );
+    }
+  }
+
   return {
     awardOptions,
     cardOffers,
@@ -1226,6 +1399,13 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
 
     if (process.env.STRATEGY_DEBUG === "1") {
       console.info(`[strategy-research-debug:${input.focus}]`, raw);
+    }
+
+    if (process.env.STRATEGY_DEBUG === "1" && input.focus === "hotel_options") {
+      console.log(
+        "[strategy-hotel-interpreter-raw]",
+        JSON.stringify({ focus: "hotel_options", rawContent: raw })
+      );
     }
 
     return validateResearchModelContent(raw, input, this.model);

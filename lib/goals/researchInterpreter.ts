@@ -19,7 +19,7 @@ export interface ResearchRewardProgram {
   name: string;
 }
 
-export type ResearchFocus = "award_options" | "card_offers";
+export type ResearchFocus = "award_options" | "card_offers" | "flight_options" | "hotel_options";
 
 export interface InterpretResearchInput {
   goal: Goal;

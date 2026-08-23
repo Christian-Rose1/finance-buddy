@@ -4177,3 +4177,312 @@ test("London benchmark preserved as different_destination for Paris research que
   assert.deepStrictEqual(opt.goalMismatchReasons, ["destination"]);
   assert.equal(opt.itineraryLabel, "London benchmark");
 });
+
+test("flight_options accepts a valid flight", async () => {
+  restoreEnv();
+
+  const input = makeInput({
+    focus: "flight_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Award source",
+          "http://example.com/award",
+          "Test Program has award for 100 points.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "test-program", name: "Test Program" }],
+  });
+
+  stubFetch(makeAwardOptionContent("flight", "one_way"));
+
+  const interpreter = new OllamaResearchInterpreter(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await interpreter.interpret(input);
+  assert.equal(result.awardOptions.length, 1);
+  assert.equal(result.awardOptions[0].redemptionType, "flight");
+  assert.equal(result.cardOffers.length, 0);
+});
+
+test("flight_options rejects a valid hotel", async () => {
+  restoreEnv();
+
+  const input = makeInput({
+    focus: "flight_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Award source",
+          "http://example.com/award",
+          "Test Program has award for 100 points.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "test-program", name: "Test Program" }],
+  });
+
+  stubFetch(makeAwardOptionContent("hotel", "per_night"));
+
+  const interpreter = new OllamaResearchInterpreter(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  await assert.rejects(
+    () => interpreter.interpret(input),
+    (error: unknown) => {
+      assert.ok(error instanceof ResearchInterpreterError);
+      assert.match((error as Error).message, /flight_options but .* hotel award option/);
+      return true;
+    }
+  );
+});
+
+test("hotel_options accepts a valid hotel", async () => {
+  restoreEnv();
+
+  const input = makeInput({
+    focus: "hotel_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Award source",
+          "http://example.com/award",
+          "Test Program has award for 100 points.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "test-program", name: "Test Program" }],
+  });
+
+  stubFetch(makeAwardOptionContent("hotel", "per_night"));
+
+  const interpreter = new OllamaResearchInterpreter(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const result = await interpreter.interpret(input);
+  assert.equal(result.awardOptions.length, 1);
+  assert.equal(result.awardOptions[0].redemptionType, "hotel");
+  assert.equal(result.cardOffers.length, 0);
+});
+
+test("hotel_options rejects a valid flight", async () => {
+  restoreEnv();
+
+  const input = makeInput({
+    focus: "hotel_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Award source",
+          "http://example.com/award",
+          "Test Program has award for 100 points.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "test-program", name: "Test Program" }],
+  });
+
+  stubFetch(makeAwardOptionContent("flight", "one_way"));
+
+  const interpreter = new OllamaResearchInterpreter(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  await assert.rejects(
+    () => interpreter.interpret(input),
+    (error: unknown) => {
+      assert.ok(error instanceof ResearchInterpreterError);
+      assert.match((error as Error).message, /hotel_options but .* flight award option/);
+      return true;
+    }
+  );
+});
+
+test("flight_options rejects nonempty cardOffers", async () => {
+  restoreEnv();
+
+  const input = makeInput({
+    focus: "flight_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Card source",
+          "http://example.com/card",
+          "Earn 50000 points after spending 3000 dollars in 3 months. Annual fee 95.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "program-1", name: "Program One" }],
+  });
+
+  const cardOfferJson = JSON.stringify({
+    awardOptions: [],
+    cardOffers: [
+      {
+        id: "card-1",
+        sourceId: "http://example.com/card",
+        cardName: "Test Card",
+        issuer: "Test Bank",
+        welcomeBonusPoints: 50000,
+        spendingRequirement: 3000,
+        spendingDeadlineMonths: 3,
+        annualFee: 95,
+        destinationProgramId: "program-1",
+      },
+    ],
+    assumptions: [],
+    warnings: [],
+  });
+
+  stubFetch(cardOfferJson);
+
+  const interpreter = new OllamaResearchInterpreter(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  await assert.rejects(
+    () => interpreter.interpret(input),
+    (error: unknown) => {
+      assert.ok(error instanceof ResearchInterpreterError);
+      assert.match((error as Error).message, /flight_options but .* card offer/);
+      return true;
+    }
+  );
+});
+
+test("hotel_options rejects nonempty cardOffers", async () => {
+  restoreEnv();
+
+  const input = makeInput({
+    focus: "hotel_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Card source",
+          "http://example.com/card",
+          "Earn 50000 points after spending 3000 dollars in 3 months. Annual fee 95.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "program-1", name: "Program One" }],
+  });
+
+  const cardOfferJson = JSON.stringify({
+    awardOptions: [],
+    cardOffers: [
+      {
+        id: "card-1",
+        sourceId: "http://example.com/card",
+        cardName: "Test Card",
+        issuer: "Test Bank",
+        welcomeBonusPoints: 50000,
+        spendingRequirement: 3000,
+        spendingDeadlineMonths: 3,
+        annualFee: 95,
+        destinationProgramId: "program-1",
+      },
+    ],
+    assumptions: [],
+    warnings: [],
+  });
+
+  stubFetch(cardOfferJson);
+
+  const interpreter = new OllamaResearchInterpreter(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  await assert.rejects(
+    () => interpreter.interpret(input),
+    (error: unknown) => {
+      assert.ok(error instanceof ResearchInterpreterError);
+      assert.match((error as Error).message, /hotel_options but .* card offer/);
+      return true;
+    }
+  );
+});
+
+test("legacy award_options still accepts both flight and hotel fixtures", async () => {
+  restoreEnv();
+
+  // Flight fixture
+  const inputFlight = makeInput({
+    focus: "award_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Award source",
+          "http://example.com/award",
+          "Test Program has award for 100 points.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "test-program", name: "Test Program" }],
+  });
+
+  stubFetch(makeAwardOptionContent("flight", "one_way"));
+
+  const interpreter = new OllamaResearchInterpreter(
+    "http://localhost:11434",
+    "test-model"
+  );
+
+  const flightResult = await interpreter.interpret(inputFlight);
+  assert.equal(flightResult.awardOptions.length, 1);
+  assert.equal(flightResult.awardOptions[0].redemptionType, "flight");
+
+  // Hotel fixture
+  const inputHotel = makeInput({
+    focus: "award_options",
+    research: [
+      makeResearchResponse("query-1", [
+        makeResearchResult(
+          "Award source",
+          "http://example.com/award",
+          "Test Program has award for 100 points.",
+          0.9,
+          null,
+          "official"
+        ),
+      ]),
+    ],
+    rewardPrograms: [{ id: "test-program", name: "Test Program" }],
+  });
+
+  stubFetch(makeAwardOptionContent("hotel", "per_night"));
+
+  const hotelResult = await interpreter.interpret(inputHotel);
+  assert.equal(hotelResult.awardOptions.length, 1);
+  assert.equal(hotelResult.awardOptions[0].redemptionType, "hotel");
+});
