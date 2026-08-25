@@ -321,7 +321,7 @@ test("invented award option ID is rejected", async () => {
   );
 });
 
-test("invented card offer ID is rejected", async () => {
+test("invented card offer ID is cleared with a warning (not rejected)", async () => {
   restoreEnv();
 
   const prompt = makeSanitizedPrompt();
@@ -337,21 +337,9 @@ test("invented card offer ID is rejected", async () => {
     "test-model"
   );
 
-  await assert.rejects(
-    () => provider.generateStrategy(prompt),
-    (error: unknown) => {
-      assert.ok(error instanceof StrategyProviderError);
-      assert.match(
-        (error as Error).message,
-        /fabricated-offer-id/
-      );
-      assert.match(
-        (error as Error).message,
-        /not present in context\.cardOffers/
-      );
-      return true;
-    }
-  );
+  const result = await provider.generateStrategy(prompt);
+  assert.equal(result.recommendedCardOfferId, null);
+  assert.ok(result.warnings.some((w) => /fabricated-offer-id/.test(w)));
 });
 
 test("unknown source ID is rejected", async () => {
@@ -377,14 +365,14 @@ test("unknown source ID is rejected", async () => {
       assert.match((error as Error).message, /nonexistent-source/);
       assert.match(
         (error as Error).message,
-        /not present in context\.sources/
+        /not present in context\\.sources/
       );
       return true;
     }
   );
 });
 
-test("card recommendation is rejected when allowNewCards is false", async () => {
+test("card recommendation is cleared when allowNewCards is false", async () => {
   restoreEnv();
 
   const prompt = makeSanitizedPrompt({
@@ -405,17 +393,9 @@ test("card recommendation is rejected when allowNewCards is false", async () => 
     "test-model"
   );
 
-  await assert.rejects(
-    () => provider.generateStrategy(prompt),
-    (error: unknown) => {
-      assert.ok(error instanceof StrategyProviderError);
-      assert.match(
-        (error as Error).message,
-        /allowNewCards is false/
-      );
-      return true;
-    }
-  );
+  const result = await provider.generateStrategy(prompt);
+  assert.equal(result.recommendedCardOfferId, null);
+  assert.ok(result.warnings.some((w) => /allowNewCards is false/.test(w)));
 });
 
 test("missing configuration is rejected", async () => {

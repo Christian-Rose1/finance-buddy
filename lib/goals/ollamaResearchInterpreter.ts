@@ -200,7 +200,9 @@ const FOCUS_INSTRUCTIONS: Record<ResearchFocus, string> = {
     "- Do not return flight options.\n" +
     "- cardOffers must be [].\n" +
     "- Emit an award option whenever one cited source supports:\n" +
-    "  a recognizable program name and an exact points price.\n" +
+    "  a recognizable program name and a stated points price for the stay.\n" +
+    "  For a hotel per-night category range (e.g. \"35,000–45,000 points per\n" +
+    "  night\"), the lower bound is an acceptable stated points price.\n" +
     "- An award option does NOT require the cited source to match the research\n" +
     "  query's exact origin, destination, dates, traveler count, cabin, or hotel\n" +
     "  property. Do not omit a sourced award benchmark merely because it does\n" +
@@ -208,6 +210,19 @@ const FOCUS_INSTRUCTIONS: Record<ResearchFocus, string> = {
     "- Valid planning benchmarks include hotel-program or destination hotel\n" +
     "  points-per-night pricing, and total-stay pricing when explicitly supported\n" +
     "  by the source.\n" +
+    "- For hotel per_night options, if the source provides a category range\n" +
+    "  (e.g. \"Category 1-4 properties cost 8,000–15,000 points per night\"),\n" +
+    "  you MAY emit an option using the lower bound as pointsRequired with\n" +
+    "  coverageStatus \"source_explicit\", travelerCountCovered=null,\n" +
+    "  nightCountCovered=1, and a warning stating the full range. Never use\n" +
+    "  a value outside the cited range.\n" +
+    "- Always use NATIVE hotel-program points for pointsRequired (e.g. World of\n" +
+    "  Hyatt category prices). NEVER multiply by transfer ratios or compute\n" +
+    "  adjusted values. If a source mentions a transfer-ratio change, note it as\n" +
+    "  a warning but keep pointsRequired as the verbatim hotel-program number.\n" +
+    "- Never compute total_stay by multiplying a per-night price by nights.\n" +
+    "- Use coverageStatus \"source_explicit\" for hotel pricing only when the\n" +
+    "  source explicitly states the night count the points price covers.\n" +
     "- For a non-exact benchmark: set availabilityStatus=\"unknown\"; set\n" +
     "  itineraryLabel to describe ONLY the scope the source supports (never\n" +
     "  rewrite it as the customer's exact route, dates, or hotel); include an\n" +
@@ -263,6 +278,21 @@ const FOCUS_INSTRUCTIONS: Record<ResearchFocus, string> = {
     "    * London hotel source for a Paris query → different_destination, [\"destination\"]",
   card_offers:
     "Research focus is card_offers: extract actual credit-card offers only; awardOptions must be []; a rewards-program name is not a card name.",
+  temporal_insights:
+    "Research focus is temporal_insights: extract time-sensitive planning facts only.\n" +
+    "- awardOptions must be [] and cardOffers must be [].\n" +
+    "- Extract booking-window rules (e.g., 'United releases award space 337 days out'),\n" +
+    "  transfer-bonus promotions with dates, and award-program change/devaluation news\n" +
+    "  with dates — but ONLY when explicitly supported by the cited source content.\n" +
+    "- Express each temporal fact as a warning string that names the source context\n" +
+    "  and includes any dates mentioned in the source.\n" +
+    "- If a source describes a booking window, the warning should state the program\n" +
+    "  name and the window length exactly as written.\n" +
+    "- If a source describes a transfer bonus, the warning should name the programs\n" +
+    "  and the bonus dates exactly as written.\n" +
+    "- Do not infer future availability or promotion dates. Do not compute dates.\n" +
+    "- If no temporal facts are supported, return empty warnings and assumptions arrays.\n" +
+    "- Every warning MUST reference only facts verbatim from the cited source content.",
 };
 
 const INTERPRET_PROMPT = `You are a strict research interpreter. You convert supplied
@@ -576,6 +606,30 @@ function assertNumberSupported(
   return num;
 }
 
+/**
+ * Returns true when the source content contains a hotel category range
+ * (e.g. "Category 1-4 properties cost 8,000-15,000 points per night")
+ * where at least one numeric boundary is present in the source.
+ * This is used as a fallback for hotel per_night pricing when the exact
+ * points value is not verbatim in the source but a category range is.
+ */
+function hotelCategoryRangeSupported(
+  value: number,
+  sourceContent: string
+): boolean {
+  // Match patterns like "8,000-15,000", "8,000 to 15,000", or "8,000–15,000"
+  const rangePattern = /(\d[\d,]*)\s*(?:-|to|–)\s*(\d[\d,]*)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = rangePattern.exec(sourceContent)) !== null) {
+    const lo = Number(match[1].replace(/,/g, ""));
+    const hi = Number(match[2].replace(/,/g, ""));
+    if (Number.isFinite(lo) && Number.isFinite(hi) && value >= lo && value <= hi) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function assertOptionalNumberSupported(
   value: unknown,
   field: string,
@@ -738,7 +792,17 @@ function validateCoverage(
           model
         );
       }
-      if (!numberIsSupportedBySource(nightCountCovered, sourceContent)) {
+      // Per-night hotel pricing semantically establishes a single night per
+      // the cited rate even when the digit "1" does not literally appear in
+      // the source text (sources say "per night" far more often than "1 night").
+      // This is the ONLY hotel source_explicit compatibility relaxation;
+      // exact verbatim digits are still required in every other case.
+      const perNightSingleNightRate =
+        pricingBasis === "per_night" && nightCountCovered === 1;
+      if (
+        !perNightSingleNightRate &&
+        !numberIsSupportedBySource(nightCountCovered, sourceContent)
+      ) {
         throw new ResearchInterpreterError(
           `Award option "${id}" nightCountCovered "${nightCountCovered}" is not supported by the cited source content.`,
           "ollama",
@@ -988,12 +1052,32 @@ function validateAwardOption(
     );
   }
 
-  const pointsRequired = assertNumberSupported(
+  // For hotel per_night options, allow category-range pricing as a fallback:
+  // if the exact points value is not verbatim in the source but the source
+  // contains a numeric range (e.g. "8,000–15,000 points per night") that
+  // includes the value, accept it. All other options still require exact match.
+  const pointsRequiredNum = requireFiniteNonNegativeNumber(
     obj.pointsRequired,
     "awardOptions[].pointsRequired",
-    sourceContent,
     ctx.model
   );
+  const pointsRequired: number = (() => {
+    if (numberIsSupportedBySource(pointsRequiredNum, sourceContent)) {
+      return pointsRequiredNum;
+    }
+    if (
+      redemptionTypeRaw === "hotel" &&
+      pricingBasisRaw === "per_night" &&
+      hotelCategoryRangeSupported(pointsRequiredNum, sourceContent)
+    ) {
+      return pointsRequiredNum;
+    }
+    throw new ResearchInterpreterError(
+      `Model output field "awardOptions[].pointsRequired" value "${pointsRequiredNum}" is not supported by the cited source content.`,
+      "ollama",
+      ctx.model
+    );
+  })();
   const cashFees = assertOptionalNumberSupported(
     obj.cashFees,
     "awardOptions[].cashFees",
@@ -1196,6 +1280,26 @@ function validateCardOffer(
   };
 }
 
+/**
+ * Returns true when an award-option validation error is a *trust-boundary*
+ * failure (a numeric/coverage value that is not supported by the cited source
+ * content, or a live-availability claim) rather than a *structural* contract
+ * violation (invalid redemptionType, invalid pricingBasis, type/basis
+ * mismatches, invalid/ill-formed coverage fields, or references to unknown
+ * sources/programs).
+ *
+ * Only trust-boundary errors are safe to drop per-option in the tolerant
+ * per-option validation loop: a single structurally-malformed option signals
+ * the model failed to follow the output contract and must still reject the
+ * whole stage.
+ */
+function isDropableAwardError(message: string): boolean {
+  return (
+    /is not supported by the cited source content\.$/.test(message) ||
+    /Model output claims live availability/.test(message)
+  );
+}
+
 function validateInterpretedOutput(
   parsed: unknown,
   ctx: ValidationContext
@@ -1227,9 +1331,62 @@ function validateInterpretedOutput(
   );
   const warnings = requireStringArray(root.warnings, "warnings", ctx.model);
 
-  const awardOptions = awardOptionsRaw.map((raw) =>
-    validateAwardOption(raw, ctx)
-  );
+  // Tolerant per-option award validation. Research stages like hotel can
+  // receive many candidates; one invalid candidate (e.g. claims live
+  // "available", an unsupported price, or an unsupported coverage count) should
+  // not discard every option and reject the whole stage. The invalid option is
+  // dropped and a warning names it; every option that does validate is kept.
+  // This preserves the "only validated facts" trust boundary — an invalid
+  // option is never surfaced — while letting valid options survive a bad peer.
+  //
+  // Only TRUST-BOUNDARY errors (a value not supported by the cited source, or
+  // a live-availability claim) are droppable. STRUCTURAL errors (invalid
+  // redemptionType, invalid pricingBasis, flight/hotel/pricingBasis
+  // mismatches, invalid coverageStatus, null counts that violate the status
+  // contract, references to unknown sources/programs) still propagate and
+  // reject the whole stage, because they indicate the model fundamentally
+  // misunderstood the output contract rather than merely over-claimed a fact.
+  const awardOptions: StrategyAwardOption[] = [];
+  const awardRejections: string[] = [];
+  for (const raw of awardOptionsRaw) {
+    // Pre-extract the redemptionType so per-option tolerance can be scoped to
+    // hotels only (flights always retain strict whole-stage rejection — they
+    // are never dropped). If the type is missing or structural, fall back to
+    // whole-stage rejection by letting validateAwardOption throw.
+    let rawRedemptionType: string | null = null;
+    try {
+      const obj =
+        raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+      const rt = obj?.redemptionType;
+      if (typeof rt === "string") rawRedemptionType = rt;
+    } catch {
+      /* fall through to validation below */
+    }
+
+    try {
+      awardOptions.push(validateAwardOption(raw, ctx));
+    } catch (err) {
+      // Only hotel options are eligible for per-option tolerance: a single
+      // hotel source often yields several candidate prices, and a single bad
+      // price must not discard the entire hotel stage. Flight options (and any
+      // structural error) still propagate as a whole-stage rejection.
+      const isHotel = rawRedemptionType === "hotel";
+      if (
+        isHotel &&
+        err instanceof ResearchInterpreterError &&
+        isDropableAwardError(err.message)
+      ) {
+        awardRejections.push(
+          `Dropped an unverifiable award option: ${err.message}`
+        );
+      } else {
+        throw err;
+      }
+    }
+  }
+  if (awardRejections.length > 0) {
+    warnings.push(...awardRejections);
+  }
 
   const cardOffers = cardOffersRaw.map((raw) => validateCardOffer(raw, ctx));
 
@@ -1280,6 +1437,23 @@ function validateInterpretedOutput(
     if (flightOptions.length > 0) {
       throw new ResearchInterpreterError(
         `Focus is hotel_options but ${flightOptions.length} flight award option(s) were returned.`,
+        "ollama",
+        ctx.model
+      );
+    }
+  }
+
+  if (ctx.focus === "temporal_insights") {
+    if (awardOptions.length > 0) {
+      throw new ResearchInterpreterError(
+        `Focus is temporal_insights but ${awardOptions.length} award option(s) were returned.`,
+        "ollama",
+        ctx.model
+      );
+    }
+    if (cardOffers.length > 0) {
+      throw new ResearchInterpreterError(
+        `Focus is temporal_insights but ${cardOffers.length} card offer(s) were returned.`,
         "ollama",
         ctx.model
       );

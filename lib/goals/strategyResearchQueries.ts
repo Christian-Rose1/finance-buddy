@@ -1,5 +1,3 @@
-import type { PersonalizedStrategyContext } from "./strategyTypes";
-
 /**
  * A reward program the customer actually owns. Structurally identical to the
  * planner's StrategyRewardProgram; defined here to avoid a circular import
@@ -17,6 +15,22 @@ export interface StrategyResearchQueries {
 }
 
 /**
+ * The goal fields required to build template research queries. The full
+ * Goal type satisfies this shape, and so does the sanitized
+ * ResearchPlannerInput.goal — so both callers can share one builder without
+ * exposing id/userId/status to the planner path.
+ */
+export interface ResearchQueriesGoalInput {
+  origin: string[];
+  destinations: string[];
+  earliestDeparture: string | null;
+  latestReturn: string | null;
+  travelerCount: number;
+  cabinPreference: string;
+  allowNewCards: boolean;
+}
+
+/**
  * Builds a small, bounded set of research queries from the goal and the
  * reward programs the customer actually owns.
  *
@@ -29,7 +43,7 @@ export interface StrategyResearchQueries {
  * counts, award prices, or transfer-partner names — they only ask for options.
  */
 export function buildStrategyResearchQueries(
-  goal: PersonalizedStrategyContext["goal"],
+  goal: ResearchQueriesGoalInput,
   customerRewardPrograms: StrategyRewardProgram[]
 ): StrategyResearchQueries {
   const {

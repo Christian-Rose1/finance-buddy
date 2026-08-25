@@ -22,6 +22,33 @@ import {
 } from "./strategyProviderCore";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_RATE_LIMIT_ATTEMPTS = 2;
+const DEFAULT_RATE_LIMIT_RETRY_DELAY_MS = 1_000;
+const MAX_RATE_LIMIT_RETRY_DELAY_MS = 5_000;
+
+function retryAfterDelayMs(retryAfter: string | null): number | null {
+  if (!retryAfter) {
+    return DEFAULT_RATE_LIMIT_RETRY_DELAY_MS;
+  }
+
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    const delayMs = Math.ceil(seconds * 1_000);
+    return delayMs <= MAX_RATE_LIMIT_RETRY_DELAY_MS ? delayMs : null;
+  }
+
+  const dateMs = Date.parse(retryAfter);
+  if (Number.isNaN(dateMs)) {
+    return DEFAULT_RATE_LIMIT_RETRY_DELAY_MS;
+  }
+
+  const delayMs = Math.max(0, dateMs - Date.now());
+  return delayMs <= MAX_RATE_LIMIT_RETRY_DELAY_MS ? delayMs : null;
+}
+
+function waitForRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 export { StrategyProviderError };
 
@@ -75,60 +102,79 @@ export class OpenRouterStrategyProvider implements StrategyProvider {
   async generateStrategy(
     prompt: SanitizedStrategyPrompt
   ): Promise<PersonalizedStrategyNarrative> {
-    const controller = new AbortController();
-
-    const timeoutId = setTimeout(
-      () => controller.abort(),
-      DEFAULT_TIMEOUT_MS
-    );
-
-    let response: Response;
-
-    try {
-      response = await fetch(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.apiKey}`,
-          },
-          signal: controller.signal,
-          body: JSON.stringify({
-            model: this.model,
-            messages: [
-              {
-                role: "system",
-                content: STRATEGY_PROMPT,
-              },
-              {
-                role: "user",
-                content: JSON.stringify(prompt),
-              },
-            ],
-            temperature: 0,
-            max_tokens: 8192,
-          }),
-        }
+    let response: Response | null = null;
+    for (let attempt = 1; attempt <= MAX_RATE_LIMIT_ATTEMPTS; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(
+        () => controller.abort(),
+        DEFAULT_TIMEOUT_MS
       );
-    } catch (error) {
-      if (controller.signal.aborted) {
+
+      try {
+        response = await fetch(
+          "https://openrouter.ai/api/v1/chat/completions",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            signal: controller.signal,
+            body: JSON.stringify({
+              model: this.model,
+              messages: [
+                {
+                  role: "system",
+                  content: STRATEGY_PROMPT,
+                },
+                {
+                  role: "user",
+                  content: JSON.stringify(prompt),
+                },
+              ],
+              temperature: 0,
+              max_tokens: 8192,
+            }),
+          }
+        );
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new StrategyProviderError(
+            `OpenRouter strategy request timed out after ${DEFAULT_TIMEOUT_MS}ms.`,
+            "openrouter",
+            this.model
+          );
+        }
+
         throw new StrategyProviderError(
-          `OpenRouter strategy request timed out after ${DEFAULT_TIMEOUT_MS}ms.`,
+          `Failed to reach OpenRouter. ${
+            error instanceof Error ? error.message : String(error)
+          }`,
           "openrouter",
           this.model
         );
+      } finally {
+        clearTimeout(timeoutId);
       }
 
+      if (response.status !== 429 || attempt === MAX_RATE_LIMIT_ATTEMPTS) {
+        break;
+      }
+
+      const delayMs = retryAfterDelayMs(response.headers.get("Retry-After"));
+      if (delayMs === null) {
+        break;
+      }
+
+      await waitForRetry(delayMs);
+    }
+
+    if (!response) {
       throw new StrategyProviderError(
-        `Failed to reach OpenRouter. ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        "OpenRouter strategy request did not return a response.",
         "openrouter",
         this.model
       );
-    } finally {
-      clearTimeout(timeoutId);
     }
 
     if (!response.ok) {

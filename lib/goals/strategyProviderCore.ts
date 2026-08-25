@@ -475,7 +475,7 @@ export function validateStrategyOutput(
       ? null
       : root.recommendedAwardOptionId;
 
-  const recommendedAwardOptionId =
+  let recommendedAwardOptionId =
     recommendedAwardOptionIdRaw === null
       ? null
       : requireString(
@@ -485,18 +485,17 @@ export function validateStrategyOutput(
           model
         );
 
+  const finalizationWarnings: string[] = [];
   if (recommendedAwardOptionId !== null) {
     if (
       !context.awardOptions.some(
-        (option: StrategyAwardOption) =>
-          option.id === recommendedAwardOptionId
+        (option: StrategyAwardOption) => option.id === recommendedAwardOptionId
       )
     ) {
-      throw new StrategyProviderError(
-        `Model recommended award option "${recommendedAwardOptionId}" is not present in context.awardOptions.`,
-        provider,
-        model
+      finalizationWarnings.push(
+        `The recommended award option "${recommendedAwardOptionId}" could not be verified and was cleared.`
       );
+      recommendedAwardOptionId = null;
     }
   }
 
@@ -505,7 +504,7 @@ export function validateStrategyOutput(
       ? null
       : root.recommendedCardOfferId;
 
-  const recommendedCardOfferId =
+  let recommendedCardOfferId =
     recommendedCardOfferIdRaw === null
       ? null
       : requireString(
@@ -517,24 +516,19 @@ export function validateStrategyOutput(
 
   if (recommendedCardOfferId !== null) {
     if (!context.goal.allowNewCards) {
-      throw new StrategyProviderError(
-        "Model recommended a new card but goal.allowNewCards is false.",
-        provider,
-        model
+      finalizationWarnings.push(
+        "The recommended card offer could not be verified because goal.allowNewCards is false; the recommendation was cleared."
       );
-    }
-
-    if (
+      recommendedCardOfferId = null;
+    } else if (
       !context.cardOffers.some(
-        (offer: StrategyCardOffer) =>
-          offer.id === recommendedCardOfferId
+        (offer: StrategyCardOffer) => offer.id === recommendedCardOfferId
       )
     ) {
-      throw new StrategyProviderError(
-        `Model recommended card offer "${recommendedCardOfferId}" is not present in context.cardOffers.`,
-        provider,
-        model
+      finalizationWarnings.push(
+        `The recommended card offer "${recommendedCardOfferId}" could not be verified and was cleared.`
       );
+      recommendedCardOfferId = null;
     }
   }
 
@@ -546,6 +540,9 @@ export function validateStrategyOutput(
   );
 
   const warnings = requireStringArrayField(root, "warnings", provider, model);
+  if (finalizationWarnings.length > 0) {
+    warnings.unshift(...finalizationWarnings);
+  }
 
   const followUpQuestions = requireStringArrayField(
     root,

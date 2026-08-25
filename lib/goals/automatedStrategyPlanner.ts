@@ -12,10 +12,79 @@ import { createResearchInterpreter } from "./researchInterpreterFactory";
 import { createStrategyProvider } from "./strategyProviderFactory";
 import { buildStrategyResearchQueries } from "./strategyResearchQueries";
 import { buildSanitizedStrategyPayload } from "./sanitizedStrategyPayload";
+import { createResearchPlanner } from "./researchPlanner";
+import { buildResearchPlannerInput } from "./researchPlannerInputBuilder";
+import type { ResearchPlan, ResearchPlanQuery } from "./researchPlannerTypes";
 
 export interface StrategyRewardProgram {
   id: string;
   name: string;
+}
+
+/**
+ * Executes a set of planned research queries with Tavily, grouped by their
+ * planned category. Returns one ResearchResponse per query, in plan order.
+ */
+async function executePlannedQueries(
+  queries: ResearchPlanQuery[],
+  tavily: TavilyResearchProvider
+): Promise<Awaited<ReturnType<TavilyResearchProvider["search"]>>[]> {
+  return Promise.all(
+    queries.map((q) =>
+      tavily.search({
+        query: q.query,
+        includeDomains: [...q.includeDomains],
+        searchDepth: q.searchDepth,
+      })
+    )
+  );
+}
+
+/**
+ * Builds a research plan for the goal, using the AI planner when configured
+ * and falling back to the deterministic template plan on any planner error.
+ * Never throws for planner failures.
+ */
+async function resolveResearchPlan(
+  context: PersonalizedStrategyContext,
+  customerRewardPrograms: StrategyRewardProgram[],
+  catalogRewardPrograms: StrategyRewardProgram[]
+): Promise<ResearchPlan> {
+  const planner = createResearchPlanner();
+  const plannerInput = buildResearchPlannerInput(context, [
+    ...catalogRewardPrograms,
+  ]);
+
+  try {
+    const plan = await planner.generateResearchPlan(plannerInput);
+
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.log(
+        "[strategy-research-plan]",
+        JSON.stringify({
+          queryCount: plan.queries.length,
+          categories: plan.queries.map((q) => q.category),
+          reasoning: plan.reasoning,
+        })
+      );
+    }
+
+    return plan;
+  } catch (err) {
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.log(
+        "[strategy-research-plan-fallback]",
+        JSON.stringify({
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
+    }
+
+    // Fallback: deterministic template plan. Import lazily to avoid a
+    // circular dependency at module load time.
+    const { buildFallbackResearchPlan } = await import("./researchPlannerCore");
+    return buildFallbackResearchPlan(plannerInput);
+  }
 }
 
 /**
@@ -34,57 +103,77 @@ export async function generateAutomatedStrategy(
 ): Promise<PersonalizedStrategy> {
   const goal = context.goal;
 
-  // 1. Build a small, bounded set of goal-specific research queries:
-  // at most 1 flight query, 1 hotel query, and 1 card-offer query
-  // (card query only when allowNewCards=true). Total <= 3 Tavily searches.
-  const { flightQueries, hotelQueries, cardQueries } = buildStrategyResearchQueries(
-    goal,
-    customerRewardPrograms
+  // 1. Build a personalized research plan. When OPENROUTER_API_KEY is set
+  // the AI research planner generates targeted queries from the full user
+  // context; otherwise (or on any planner error) the deterministic template
+  // plan is used. The plan is bounded (max 8 queries) and every query's
+  // domains are validated against the trusted-domain whitelist.
+  const researchPlan = await resolveResearchPlan(
+    context,
+    customerRewardPrograms,
+    catalogRewardPrograms
   );
 
-  // 2. Search the three categories independently with TavilyResearchProvider
-  // using trusted domains. All Tavily searches may run concurrently.
+  // 2. Group planned queries by category and execute all Tavily searches
+  // concurrently. Temporal and value queries are fetched here too so that
+  // later phases can interpret them; for now they are merged into the
+  // flight/hotel/card interpretation inputs by category affinity.
   const tavily = new TavilyResearchProvider();
-  const flightResearchPromises = flightQueries.map((q) =>
-    tavily.search({
-      query: q,
-      includeDomains: [...TRUSTED_DOMAINS],
-    })
+
+  const flightPlanQueries = researchPlan.queries.filter(
+    (q) => q.category === "flight"
   );
-  const hotelResearchPromises = hotelQueries.map((q) =>
-    tavily.search({
-      query: q,
-      includeDomains: [...TRUSTED_DOMAINS],
-    })
+  const hotelPlanQueries = researchPlan.queries.filter(
+    (q) => q.category === "hotel"
   );
-  const cardResearchPromises = cardQueries.map((q) =>
-    tavily.search({
-      query: q,
-      includeDomains: [...TRUSTED_DOMAINS],
-    })
+  const cardPlanQueries = researchPlan.queries.filter(
+    (q) => q.category === "card"
+  );
+  const temporalValuePlanQueries = researchPlan.queries.filter(
+    (q) => q.category === "temporal" || q.category === "value"
   );
 
   const [
     flightResearchResponses,
     hotelResearchResponses,
     cardResearchResponses,
+    temporalValueResearchResponses,
   ] = await Promise.all([
-    Promise.all(flightResearchPromises),
-    Promise.all(hotelResearchPromises),
-    Promise.all(cardResearchPromises),
+    executePlannedQueries(flightPlanQueries, tavily),
+    executePlannedQueries(hotelPlanQueries, tavily),
+    executePlannedQueries(cardPlanQueries, tavily),
+    executePlannedQueries(temporalValuePlanQueries, tavily),
   ]);
 
   if (process.env.STRATEGY_DEBUG === "1") {
-    for (let i = 0; i < hotelQueries.length; i++) {
+    console.log(
+      "[strategy-flight-tavily-summary]",
+      JSON.stringify({
+        queryCount: flightPlanQueries.length,
+        resultCounts: flightResearchResponses.map(
+          (r) => r?.results?.length ?? 0
+        ),
+      })
+    );
+    for (let i = 0; i < hotelPlanQueries.length; i++) {
       console.log(
         "[strategy-hotel-tavily-response]",
         JSON.stringify({
-          query: hotelQueries[i],
+          query: hotelPlanQueries[i].query,
           resultCount: hotelResearchResponses[i]?.results?.length ?? 0,
           results: hotelResearchResponses[i]?.results ?? [],
         })
       );
     }
+    console.log(
+      "[strategy-temporal-value-tavily-summary]",
+      JSON.stringify({
+        queryCount: temporalValuePlanQueries.length,
+        resultCounts: temporalValueResearchResponses.map(
+          (r) => r?.results?.length ?? 0
+        ),
+      })
+    );
   }
 
   // 3. Interpret sequentially: flight first, then hotel, then optional card
@@ -96,6 +185,7 @@ export async function generateAutomatedStrategy(
   // 3a. Flight interpretation (best-effort)
   let flightInterpreted: Awaited<ReturnType<typeof interpreter.interpret>> | null = null;
   let flightRejected = false;
+  let flightRejectionError: string | null = null;
   try {
     flightInterpreted = await interpreter.interpret({
       goal,
@@ -106,14 +196,32 @@ export async function generateAutomatedStrategy(
   } catch (err) {
     if (err instanceof ResearchInterpreterError) {
       flightRejected = true;
+      flightRejectionError = err.message;
     } else {
       throw err;
     }
   }
 
+  if (process.env.STRATEGY_DEBUG === "1") {
+    console.log(
+      "[strategy-flight-interpreter-result]",
+      JSON.stringify({
+        rejected: flightRejected,
+        rejectionError: flightRejectionError,
+        optionCount: flightInterpreted
+          ? flightInterpreted.awardOptions.length
+          : 0,
+        warningCount: flightInterpreted
+          ? flightInterpreted.warnings.length
+          : 0,
+      })
+    );
+  }
+
   // 3b. Hotel interpretation (best-effort)
   let hotelInterpreted: Awaited<ReturnType<typeof interpreter.interpret>> | null = null;
   let hotelRejected = false;
+  let hotelRejectionError: string | null = null;
   try {
     hotelInterpreted = await interpreter.interpret({
       goal,
@@ -130,15 +238,35 @@ export async function generateAutomatedStrategy(
         );
       }
       hotelRejected = true;
+      hotelRejectionError = err.message;
     } else {
       throw err;
     }
   }
 
+  if (process.env.STRATEGY_DEBUG === "1") {
+    console.log(
+      "[strategy-hotel-interpreter-result]",
+      JSON.stringify({
+        rejected: hotelRejected,
+        rejectionError: hotelRejectionError,
+        optionCount: hotelInterpreted
+          ? hotelInterpreted.awardOptions.length
+          : 0,
+        optionIds: hotelInterpreted
+          ? hotelInterpreted.awardOptions.map((o) => o.id)
+          : [],
+        warningCount: hotelInterpreted
+          ? hotelInterpreted.warnings.length
+          : 0,
+      })
+    );
+  }
+
   // 3c. Card interpretation (best-effort, only when queries were sent)
   let cardInterpreted: Awaited<ReturnType<typeof interpreter.interpret>> | null = null;
   let cardRejected = false;
-  if (cardQueries.length > 0) {
+  if (cardPlanQueries.length > 0) {
     try {
       cardInterpreted = await interpreter.interpret({
         goal,
@@ -155,8 +283,48 @@ export async function generateAutomatedStrategy(
     }
   }
 
+  if (process.env.STRATEGY_DEBUG === "1") {
+    console.log(
+      "[strategy-card-interpreter-result]",
+      JSON.stringify({
+        queriesSent: cardPlanQueries.length > 0,
+        rejected: cardRejected,
+        offerCount: cardInterpreted ? cardInterpreted.cardOffers.length : 0,
+      })
+    );
+  }
+
+  // 3d. Temporal/value interpretation (best-effort).
+  // Temporal insights feed into warnings; value insights also feed into
+  // warnings for now (Phase 4). Both categories are interpreted together
+  // under the temporal_insights focus since they share the same shape.
+  let temporalValueInterpreted: InterpretedResearch | null = null;
+  let temporalValueRejected = false;
+  if (temporalValueResearchResponses.length > 0) {
+    const hasResults = temporalValueResearchResponses.some(
+      (r) => (r?.results?.length ?? 0) > 0
+    );
+    if (hasResults) {
+      try {
+        temporalValueInterpreted = await interpreter.interpret({
+          goal,
+          rewardPrograms: catalogRewardPrograms,
+          research: temporalValueResearchResponses,
+          focus: "temporal_insights",
+        });
+      } catch (err) {
+        if (err instanceof ResearchInterpreterError) {
+          temporalValueRejected = true;
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+
   // 4. Merge only successfully validated results.
   // awardOptions = validated flight options followed by validated hotel options.
+  // Temporal/value insights contribute sources, assumptions, and warnings only.
   // Append the appropriate safe omission warning for each rejected stage.
   const interpreted = {
     awardOptions: [
@@ -168,16 +336,19 @@ export async function generateAutomatedStrategy(
       ...(flightInterpreted ? flightInterpreted.sources : []),
       ...(hotelInterpreted ? hotelInterpreted.sources : []),
       ...(cardInterpreted ? cardInterpreted.sources : []),
+      ...(temporalValueInterpreted ? temporalValueInterpreted.sources : []),
     ],
     assumptions: [
       ...(flightInterpreted ? flightInterpreted.assumptions : []),
       ...(hotelInterpreted ? hotelInterpreted.assumptions : []),
       ...(cardInterpreted ? cardInterpreted.assumptions : []),
+      ...(temporalValueInterpreted ? temporalValueInterpreted.assumptions : []),
     ],
     warnings: [
       ...(flightInterpreted ? flightInterpreted.warnings : []),
       ...(hotelInterpreted ? hotelInterpreted.warnings : []),
       ...(cardInterpreted ? cardInterpreted.warnings : []),
+      ...(temporalValueInterpreted ? temporalValueInterpreted.warnings : []),
       ...(flightRejected
         ? [
             "Flight recommendations were omitted because the researched flight details could not be fully validated.",
@@ -191,6 +362,11 @@ export async function generateAutomatedStrategy(
       ...(cardRejected
         ? [
             "Card-offer recommendations were omitted because the researched offer details could not be fully validated.",
+          ]
+        : []),
+      ...(temporalValueRejected
+        ? [
+            "Temporal and value insights were omitted because the researched details could not be fully validated.",
           ]
         : []),
     ],
@@ -274,26 +450,41 @@ export async function generateFlightResearchStage(
   customerRewardPrograms: StrategyRewardProgram[],
   catalogRewardPrograms: StrategyRewardProgram[]
 ): Promise<InterpretedResearch> {
-  const { flightQueries } = buildStrategyResearchQueries(
-    context.goal,
-    customerRewardPrograms
-  );
-
+  // Use the research plan when available; fall back to template queries on
+  // any planner error so this stage never fails because of planning.
+  let flightResponses: Awaited<ReturnType<TavilyResearchProvider["search"]>>[];
   const tavily = new TavilyResearchProvider();
-  const flightResearchResponses = await Promise.all(
-    flightQueries.map((q) =>
-      tavily.search({
-        query: q,
-        includeDomains: [...TRUSTED_DOMAINS],
-      })
-    )
-  );
+
+  try {
+    const plan = await resolveResearchPlan(
+      context,
+      customerRewardPrograms,
+      catalogRewardPrograms
+    );
+    const flightPlanQueries = plan.queries.filter(
+      (q) => q.category === "flight"
+    );
+    flightResponses = await executePlannedQueries(flightPlanQueries, tavily);
+  } catch {
+    const { flightQueries } = buildStrategyResearchQueries(
+      context.goal,
+      customerRewardPrograms
+    );
+    flightResponses = await Promise.all(
+      flightQueries.map((q) =>
+        tavily.search({
+          query: q,
+          includeDomains: [...TRUSTED_DOMAINS],
+        })
+      )
+    );
+  }
 
   const interpreter = createResearchInterpreter();
   return interpreter.interpret({
     goal: context.goal,
     rewardPrograms: catalogRewardPrograms,
-    research: flightResearchResponses,
+    research: flightResponses,
     focus: "flight_options",
   });
 }
@@ -311,29 +502,47 @@ export async function generateHotelResearchStage(
   customerRewardPrograms: StrategyRewardProgram[],
   catalogRewardPrograms: StrategyRewardProgram[]
 ): Promise<InterpretedResearch> {
-  const { hotelQueries } = buildStrategyResearchQueries(
-    context.goal,
-    customerRewardPrograms
-  );
-
+  // Use the research plan when available; fall back to template queries on
+  // any planner error so this stage never fails because of planning.
+  let hotelResponses: Awaited<ReturnType<TavilyResearchProvider["search"]>>[];
+  let executedQueries: string[];
   const tavily = new TavilyResearchProvider();
-  const hotelResearchResponses = await Promise.all(
-    hotelQueries.map((q) =>
-      tavily.search({
-        query: q,
-        includeDomains: [...TRUSTED_DOMAINS],
-      })
-    )
-  );
+
+  try {
+    const plan = await resolveResearchPlan(
+      context,
+      customerRewardPrograms,
+      catalogRewardPrograms
+    );
+    const hotelPlanQueries = plan.queries.filter(
+      (q) => q.category === "hotel"
+    );
+    hotelResponses = await executePlannedQueries(hotelPlanQueries, tavily);
+    executedQueries = hotelPlanQueries.map((q) => q.query);
+  } catch {
+    const { hotelQueries } = buildStrategyResearchQueries(
+      context.goal,
+      customerRewardPrograms
+    );
+    hotelResponses = await Promise.all(
+      hotelQueries.map((q) =>
+        tavily.search({
+          query: q,
+          includeDomains: [...TRUSTED_DOMAINS],
+        })
+      )
+    );
+    executedQueries = hotelQueries;
+  }
 
   if (process.env.STRATEGY_DEBUG === "1") {
-    for (let i = 0; i < hotelQueries.length; i++) {
+    for (let i = 0; i < executedQueries.length; i++) {
       console.log(
         "[strategy-hotel-tavily-response]",
         JSON.stringify({
-          query: hotelQueries[i],
-          resultCount: hotelResearchResponses[i]?.results?.length ?? 0,
-          results: hotelResearchResponses[i]?.results ?? [],
+          query: executedQueries[i],
+          resultCount: hotelResponses[i]?.results?.length ?? 0,
+          results: hotelResponses[i]?.results ?? [],
         })
       );
     }
@@ -343,7 +552,7 @@ export async function generateHotelResearchStage(
   return interpreter.interpret({
     goal: context.goal,
     rewardPrograms: catalogRewardPrograms,
-    research: hotelResearchResponses,
+    research: hotelResponses,
     focus: "hotel_options",
   });
 }
@@ -377,24 +586,30 @@ export async function generateAutomatedStrategyFromResearchStages(
   const goal = context.goal;
 
   // 1. Build only the optional card-offer query. No flight/hotel queries.
-  const { cardQueries } = buildStrategyResearchQueries(
-    goal,
-    customerRewardPrograms
-  );
+  // Use the research plan's card queries when available; fall back to the
+  // template card query on any planner error.
+  let cardPlanQueries: ResearchPlanQuery[] = [];
+  try {
+    const plan = await resolveResearchPlan(
+      context,
+      customerRewardPrograms,
+      catalogRewardPrograms
+    );
+    cardPlanQueries = plan.queries.filter((q) => q.category === "card");
+  } catch {
+    cardPlanQueries = [];
+  }
+
+  const tavilyForCardFallback = new TavilyResearchProvider();
 
   // 2. Card-offer research (best-effort, only when a card query exists).
   // No card query → no search, no interpretation, no warning.
   let cardInterpreted: InterpretedResearch | null = null;
   let cardRejected = false;
-  if (cardQueries.length > 0) {
-    const tavily = new TavilyResearchProvider();
-    const cardResearchResponses = await Promise.all(
-      cardQueries.map((q) =>
-        tavily.search({
-          query: q,
-          includeDomains: [...TRUSTED_DOMAINS],
-        })
-      )
+  if (cardPlanQueries.length > 0) {
+    const cardResearchResponses = await executePlannedQueries(
+      cardPlanQueries,
+      tavilyForCardFallback
     );
 
     const interpreter = createResearchInterpreter();
@@ -410,6 +625,38 @@ export async function generateAutomatedStrategyFromResearchStages(
         cardRejected = true;
       } else {
         throw err;
+      }
+    }
+  } else if (goal.allowNewCards) {
+    // Fallback: template card query.
+    const { cardQueries } = buildStrategyResearchQueries(
+      goal,
+      customerRewardPrograms
+    );
+    if (cardQueries.length > 0) {
+      const cardResearchResponses = await Promise.all(
+        cardQueries.map((q) =>
+          tavilyForCardFallback.search({
+            query: q,
+            includeDomains: [...TRUSTED_DOMAINS],
+          })
+        )
+      );
+
+      const interpreter = createResearchInterpreter();
+      try {
+        cardInterpreted = await interpreter.interpret({
+          goal,
+          rewardPrograms: catalogRewardPrograms,
+          research: cardResearchResponses,
+          focus: "card_offers",
+        });
+      } catch (err) {
+        if (err instanceof ResearchInterpreterError) {
+          cardRejected = true;
+        } else {
+          throw err;
+        }
       }
     }
   }

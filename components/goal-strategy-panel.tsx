@@ -423,6 +423,51 @@ export function GoalStrategyPanel({
     }
   }
 
+  /**
+   * Retry only the final strategy narrative for the existing signed run.
+   * Flight and hotel research remain server-side and are loaded again only
+   * after their signatures and ownership have been verified.
+   */
+  async function handleFinalizeRetry() {
+    if (isGenerating || !runId) return;
+
+    setIsGenerating(true);
+    setError(null);
+    setSaveMessage(null);
+    setCurrentStage("final");
+    setFinalStatus("loading");
+
+    try {
+      const finalResult = await finalizeGoalStrategyRunAction(goalId, runId);
+
+      if (finalResult.success) {
+        setStrategy(finalResult.strategy);
+        setIsSaved(finalResult.saved);
+        setSaveMessage(finalResult.saveMessage);
+        setFinalStatus("succeeded");
+        setFlightOptions([]);
+        setHotelOptions([]);
+      } else {
+        setFinalStatus("failed");
+        setError(finalResult.message);
+      }
+    } catch (err) {
+      if (process.env.NODE_ENV === "development") {
+        console.error(
+          "[strategy-client-error]",
+          err instanceof Error
+            ? `${err.name}: ${err.message}`
+            : "Unknown error"
+        );
+      }
+
+      setFinalStatus("failed");
+      setError("We couldn't build your strategy right now. Please try again in a moment.");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
   // ------------------------------------------------------------------
   // Derived values
   // ------------------------------------------------------------------
@@ -618,11 +663,17 @@ export function GoalStrategyPanel({
           <p className="mt-1 text-sm text-rose-100/80">{error}</p>
           <button
             type="button"
-            onClick={handleGenerate}
+            onClick={
+              finalStatus === "failed" && runId
+                ? handleFinalizeRetry
+                : handleGenerate
+            }
             disabled={isGenerating}
             className="mt-3 inline-flex items-center gap-2 rounded-lg border border-rose-400/30 px-3 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-400/10 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Try again
+            {finalStatus === "failed" && runId
+              ? "Try finalizing again"
+              : "Try again"}
           </button>
         </div>
       ) : null}

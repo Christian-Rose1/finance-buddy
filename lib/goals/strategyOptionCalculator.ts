@@ -104,7 +104,8 @@ function calculated(
  * Returns null for missing, invalid, zero, or reversed dates.
  */
 export function calculateTripNights(goal: Goal): number | null {
-  const { earliestDeparture, latestReturn } = goal;
+  const { earliestDeparture, latestReturn, minimumNights, maximumNights } =
+    goal;
 
   if (!earliestDeparture || !latestReturn) return null;
 
@@ -116,8 +117,29 @@ export function calculateTripNights(goal: Goal): number | null {
   const diffMs = ret - dep;
   if (diffMs <= 0) return null;
 
-  const nights = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  return nights > 0 ? nights : null;
+  const spanNights = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (spanNights <= 0) return null;
+
+  // Option C: respect the saved stay-length range. Use the declared minimum
+  // as the concrete default single-stay length; fall back to the maximum, then
+  // to the full earliestDeparture→latestReturn window span only when no range
+  // is declared. This stops the whole departure/return window from being
+  // treated as one long stay (which previously inflated tripNights and the
+  // hotel per-night math).
+  const declaredNights =
+    minimumNights !== null &&
+    minimumNights !== undefined &&
+    Number.isInteger(minimumNights) &&
+    minimumNights > 0
+      ? minimumNights
+      : maximumNights !== null &&
+          maximumNights !== undefined &&
+          Number.isInteger(maximumNights) &&
+          maximumNights > 0
+        ? maximumNights
+        : spanNights;
+
+  return declaredNights > 0 ? declaredNights : null;
 }
 
 // ---------------------------------------------------------------------------

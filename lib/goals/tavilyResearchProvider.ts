@@ -220,7 +220,7 @@ export class TavilyResearchProvider implements ResearchProvider {
         signal: controller.signal,
         body: JSON.stringify({
           query,
-          search_depth: "basic",
+          search_depth: input.searchDepth === "advanced" ? "advanced" : "basic",
           max_results: maxResults,
           include_domains: [...input.includeDomains],
           include_answer: false,

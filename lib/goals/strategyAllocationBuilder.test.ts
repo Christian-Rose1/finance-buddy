@@ -598,4 +598,21 @@ describe("buildStrategyAllocationScenarios", () => {
       assert.equal(s.tripNights, 9);
     }
   });
+it("scenarios use the declared minimumNights, not the full date-window span", () => {
+    const goal = makeGoal({
+      earliestDeparture: "2026-07-01",
+      latestReturn: "2026-07-28",
+      minimumNights: 8,
+      maximumNights: 16,
+    });
+    const flights = [makeFlightOption()];
+    const hotels = [makeHotelOption()];
+    const inventory = [makeInventoryItem()];
+
+    const scenarios = buildStrategyAllocationScenarios(goal, flights, hotels, inventory);
+    assert.ok(scenarios.length > 0);
+    for (const s of scenarios) {
+      assert.equal(s.tripNights, 8);
+    }
+  });
 });
