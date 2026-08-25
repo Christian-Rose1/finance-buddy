@@ -54,17 +54,16 @@ export interface ResearchPlan {
  * A reward program reference for planner input.
  */
 export interface PlannerRewardProgram {
+  /** Compatibility placeholder; never an internal identifier. */
   id: string;
   name: string;
 }
 
 /**
  * A reward account (sanitized) for planner input.
- * Contains balance and program reference but no userId, ownerKey, or internal IDs
- * beyond what the planner needs to reason about point sufficiency.
+ * Contains a public program name and balance but no database identifiers.
  */
 export interface PlannerRewardAccount {
-  rewardProgramId: string;
   programName: string | null;
   balance: number;
   ownerType: "self" | "companion";
@@ -100,8 +99,8 @@ export interface PlannerTransferPartner {
 
 /**
  * The complete input to the research planner.
- * All fields are sanitized — no userId, no database IDs that could identify
- * the user, no ownerKey, no ownerLabel, no balanceAsOf, no goal.status.
+ * All fields are sanitized — no userId, database IDs, ownerKey, ownerLabel,
+ * balanceAsOf, or goal.status.
  */
 export interface ResearchPlannerInput {
   /** The user's goal (sanitized subset). */
@@ -129,7 +128,7 @@ export interface ResearchPlannerInput {
   monthlySpendingByCategory: PlannerSpendingCategory[];
   /** Reward programs the user participates in. */
   customerRewardPrograms: PlannerRewardProgram[];
-  /** Transfer partner relationships from the catalog. */
+  /** Authoritative transfer-partner relationships, when available. */
   transferPartners: PlannerTransferPartner[];
   /** Current date (ISO string) for temporal reasoning. */
   currentDate: string;

@@ -31,7 +31,7 @@ function makeContext(): PersonalizedStrategyContext {
       {
         id: "acc-1",
         userId: "user-secret-id",
-        rewardProgramId: "prog-1",
+        rewardProgramId: "11111111-1111-4111-8111-111111111111",
         ownerKey: "owner-key-secret",
         ownerLabel: "Christian",
         ownerType: "self",
@@ -63,12 +63,24 @@ function makeContext(): PersonalizedStrategyContext {
 }
 
 const CATALOG = [
-  { id: "prog-1", name: "Chase Ultimate Rewards", family: "flexible_points" },
-  { id: "prog-2", name: "United MileagePlus", family: "airline_miles" },
-  { id: "prog-3", name: "World of Hyatt", family: "hotel_points" },
+  {
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "Chase Ultimate Rewards",
+    family: "flexible_points",
+  },
+  {
+    id: "22222222-2222-4222-8222-222222222222",
+    name: "United MileagePlus",
+    family: "airline_miles",
+  },
+  {
+    id: "33333333-3333-4333-8333-333333333333",
+    name: "World of Hyatt",
+    family: "hotel_points",
+  },
 ];
 
-test("planner input excludes userId, ownerKey, ownerLabel, and balanceAsOf", () => {
+test("planner input excludes userId, ownerKey, ownerLabel, balanceAsOf, and internal program IDs", () => {
   const input = buildResearchPlannerInput(makeContext(), CATALOG);
   const serialized = JSON.stringify(input);
 
@@ -77,6 +89,10 @@ test("planner input excludes userId, ownerKey, ownerLabel, and balanceAsOf", () 
   assert.ok(!serialized.includes("Christian"));
   assert.ok(!serialized.includes("balanceAsOf"));
   assert.ok(!serialized.includes("goal-1"));
+  assert.ok(!("rewardProgramId" in input.rewardAccounts[0]));
+  assert.ok(!serialized.includes("11111111-1111-4111-8111-111111111111"));
+  assert.ok(!serialized.includes("22222222-2222-4222-8222-222222222222"));
+  assert.ok(!serialized.includes("33333333-3333-4333-8333-333333333333"));
 });
 
 test("planner input includes balances and program names", () => {
@@ -89,13 +105,25 @@ test("planner input includes balances and program names", () => {
 
 test("planner input resolves program name from catalog", () => {
   const input = buildResearchPlannerInput(makeContext(), [
-    { id: "prog-1", name: "Resolved From Catalog", family: "flexible_points" },
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "Resolved From Catalog",
+      family: "flexible_points",
+    },
   ]);
 
   assert.equal(
     input.customerRewardPrograms.some((p) => p.name === "Resolved From Catalog"),
     true
   );
+});
+
+test("planner input does not infer transfer partners from unrelated catalog programs", () => {
+  const input = buildResearchPlannerInput(makeContext(), CATALOG);
+
+  assert.deepEqual(input.transferPartners, []);
+  assert.ok(!JSON.stringify(input).includes("United MileagePlus"));
+  assert.ok(!JSON.stringify(input).includes("World of Hyatt"));
 });
 
 test("planner input includes spending categories from context", () => {

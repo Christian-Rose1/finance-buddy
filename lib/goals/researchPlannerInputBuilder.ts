@@ -2,8 +2,7 @@
  * Builds the sanitized ResearchPlannerInput from the full personalized
  * strategy context plus catalog data.
  *
- * Sanitization boundary: userId, internal database IDs (except reward-program
- * IDs needed for transfer-partner mapping), ownerKey, ownerLabel,
+ * Sanitization boundary: userId, internal database IDs, ownerKey, ownerLabel,
  * balanceAsOf, and goal.status are never carried into the planner input.
  */
 
@@ -13,7 +12,6 @@ import type {
 import type {
   PlannerRewardAccount,
   PlannerSpendingCategory,
-  PlannerTransferPartner,
   PlannerWalletCard,
   ResearchPlannerInput,
 } from "./researchPlannerTypes";
@@ -47,18 +45,14 @@ export function buildResearchPlannerInput(
 ): ResearchPlannerInput {
   const goal = context.goal;
 
-  // Sanitize reward accounts: keep balance + program name, drop ownerKey,
-  // ownerLabel, balanceAsOf, and database IDs other than rewardProgramId.
+  // Resolve program names with internal catalog IDs server-side, then omit all
+  // identifiers from the cloud-bound account payload.
   const programNameById = new Map(
     catalogRewardPrograms.map((p) => [p.id, p.name])
-  );
-  const programFamilyById = new Map(
-    catalogRewardPrograms.map((p) => [p.id, p.family ?? "other"])
   );
 
   const rewardAccounts: PlannerRewardAccount[] = context.rewardAccounts.map(
     (acc) => ({
-      rewardProgramId: acc.rewardProgramId,
       programName: programNameById.get(acc.rewardProgramId) ?? null,
       balance: acc.balance,
       ownerType: acc.ownerType,
@@ -78,31 +72,16 @@ export function buildResearchPlannerInput(
       monthlyAverage: s.monthlyAverage,
     }));
 
-  // Transfer partners: for each reward program the customer owns, enumerate
-  // the catalog programs it can transfer to (family-filtered from catalog).
-  const ownedProgramIds = new Set(rewardAccounts.map((a) => a.rewardProgramId));
   const ownedProgramNames = new Set(
     rewardAccounts
       .map((a) => a.programName)
       .filter((n): n is string => n !== null)
   );
 
-  const transferPartners: PlannerTransferPartner[] = [];
-  for (const ownedName of ownedProgramNames) {
-    for (const partner of catalogRewardPrograms) {
-      if (ownedProgramIds.has(partner.id)) continue; // skip self
-      const family = programFamilyById.get(partner.id) ?? "other";
-      const partnerFamily: PlannerTransferPartner["partnerFamily"] =
-        family === "airline_miles" || family === "hotel_points"
-          ? (family as PlannerTransferPartner["partnerFamily"])
-          : "other";
-      transferPartners.push({
-        sourceProgramName: ownedName,
-        partnerProgramName: partner.name,
-        partnerFamily,
-      });
-    }
-  }
+  // The planner input has no authoritative transfer-relationship source.
+  // Catalog membership, program family, cards, and program names are not
+  // evidence of a transfer relationship, so omit all such relationships.
+  const transferPartners = [];
 
   return {
     goal: {
