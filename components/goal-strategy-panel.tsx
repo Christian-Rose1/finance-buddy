@@ -46,7 +46,6 @@ import {
 import type {
   PersonalizedStrategy,
   StrategyAwardOption,
-  StrategyFeasibility,
   StrategyAllocationScenario,
   StrategyPointsAllocation,
 } from "@/lib/goals/strategyTypes";
@@ -63,28 +62,6 @@ type StepState = "waiting" | "in-progress" | "complete" | "could-not-complete";
 // ---------------------------------------------------------------------------
 // Presentation helpers
 // ---------------------------------------------------------------------------
-
-const FEASIBILITY_PRESENTATION: Record<
-  StrategyFeasibility,
-  { label: string; classes: string }
-> = {
-  on_track: {
-    label: "On track",
-    classes: "border-emerald-400/30 bg-emerald-400/10 text-emerald-300",
-  },
-  gap_remaining: {
-    label: "Points gap remaining",
-    classes: "border-amber-400/30 bg-amber-400/10 text-amber-300",
-  },
-  depends_on_new_card: {
-    label: "Depends on a new card",
-    classes: "border-sky-400/30 bg-sky-400/10 text-sky-300",
-  },
-  insufficient_information: {
-    label: "More information needed",
-    classes: "border-slate-400/30 bg-slate-400/10 text-slate-300",
-  },
-};
 
 function formatPoints(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
@@ -491,10 +468,6 @@ export function GoalStrategyPanel({
   // Derived values
   // ------------------------------------------------------------------
 
-  const feasibility = strategy
-    ? FEASIBILITY_PRESENTATION[strategy.feasibility]
-    : null;
-
   /** Progress section is visible from generation start until the final
    *  strategy successfully replaces the previous one. */
   const showProgress =
@@ -698,37 +671,16 @@ export function GoalStrategyPanel({
       ) : null}
 
       {/* ---- Strategy result ---- */}
-      {strategy && feasibility ? (
+      {strategy ? (
         <div className="mt-4 space-y-4">
           <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h4 className="text-base font-semibold text-white">
-                {strategy.headline}
-              </h4>
-              <span
-                className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${feasibility.classes}`}
-              >
-                {feasibility.label}
-              </span>
-            </div>
+            <h4 className="text-base font-semibold text-white">
+              {strategy.headline}
+            </h4>
             <p className="mt-2 text-sm leading-relaxed text-slate-300">
               {strategy.summary}
             </p>
           </div>
-
-          {strategy.pointsGap !== null ? (
-            <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-3">
-              <p className="text-xs font-medium uppercase tracking-wide text-amber-300">
-                Points gap
-              </p>
-              <p className="mt-1 text-lg font-semibold text-white">
-                {formatPoints(strategy.pointsGap)} points
-              </p>
-              <p className="mt-0.5 text-xs text-slate-500">
-                Estimated additional points needed to reach this goal.
-              </p>
-            </div>
-          ) : null}
 
           {strategy.pointsInventory.length === 0 ? (
             <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">

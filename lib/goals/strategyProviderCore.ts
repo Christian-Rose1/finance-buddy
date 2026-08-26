@@ -8,12 +8,14 @@
  */
 
 import type {
+  FollowUpDecisionTopic,
   StrategyAwardOption,
   StrategyCardOffer,
   StrategyFeasibility,
   StrategySource,
   PersonalizedStrategyNarrative,
 } from "./strategyTypes";
+import { FOLLOW_UP_DECISION_TOPICS } from "./strategyTypes";
 
 // ---------------------------------------------------------------------------
 // Error
@@ -77,18 +79,23 @@ Return ONLY valid JSON matching this exact contract:
   ],
   "assumptions": string[],
   "warnings": string[],
-  "followUpQuestions": string[]
+  "followUpTopics": ("flight_time_preference" | "layover_tolerance" | "hotel_neighborhood_preference" | "room_preference" | "cash_vs_points_preference")[]
 }
 
 Rules:
-- Personalize the plan using the supplied goal, balances, cards, and spending.
+- The supplied brief is authoritative server-built context. Treat its goal facts,
+  resolved trip nights, calculations, and allocation scenarios as fixed constraints.
+- Select followUpTopics only from the contract. Do not write question prose.
+- Do not substitute a city, route, date, cabin, traveler count, or stay length.
 - Compare the supplied award options and card offers against each other.
 - Never invent award availability, prices, transfer ratios, balances, cards,
   offers, deadlines, or sources.
+- Planning benchmarks are not live availability. Promotions, transfer ratios,
+  cash estimates, fees, and deadlines require supplied evidence or a "verify
+  before booking or transfer" warning; never present them as assumptions.
 - Named award recommendations may only reference supplied awardOptions.
 - Named card recommendations may only reference supplied cardOffers.
-- When required information is missing, return "insufficient_information" and
-  ask focused follow-up questions.
+- When an optional decision is needed, select its allowlisted followUpTopics value.
 - Distinguish assumptions and warnings.
 - Respect goal.allowNewCards:
   - If goal.allowNewCards is false, do not recommend a new card and set
@@ -114,6 +121,26 @@ export interface StrategyValidationContext {
   cardOffers: StrategyCardOffer[];
   sources: StrategySource[];
   goal: { allowNewCards: boolean };
+  referenceMap?: {
+    awardOptions: StrategyAwardOption[];
+    cardOffers: StrategyCardOffer[];
+    sources: StrategySource[];
+  };
+  unavailableFollowUpTopics?: ReadonlySet<FollowUpDecisionTopic>;
+}
+
+const FOLLOW_UP_QUESTION_TEXT: Record<FollowUpDecisionTopic, string> = {
+  flight_time_preference: "Do you prefer a morning, afternoon, or evening departure?",
+  layover_tolerance: "What is the longest layover you would accept?",
+  hotel_neighborhood_preference: "Do you have a preferred hotel neighborhood or area?",
+  room_preference: "Do you need a specific room type or bedding arrangement?",
+  cash_vs_points_preference: "Would you rather minimize cash cost or preserve points?",
+};
+
+export function unavailableFollowUpTopics(prompt: { goal: { optimizationPriority: string } }): ReadonlySet<FollowUpDecisionTopic> {
+  return prompt.goal.optimizationPriority === "lowest_cash"
+    ? new Set<FollowUpDecisionTopic>(["cash_vs_points_preference"])
+    : new Set();
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +389,7 @@ export function validateAction(
   );
 
   for (const sourceId of sourceIds) {
-    if (!context.sources.some((s) => s.id === sourceId)) {
+    if (!context.sources.some((s) => s.id === sourceId) && !context.referenceMap?.sources.some((s) => s.id === sourceId)) {
       throw new StrategyProviderError(
         `Action source ID "${sourceId}" is not present in context.sources.`,
         provider,
@@ -371,12 +398,15 @@ export function validateAction(
     }
   }
 
+  const mappedSourceIds = sourceIds.map((sourceId) =>
+    context.referenceMap?.sources.find((_, index) => `source-${index + 1}` === sourceId)?.id ?? sourceId
+  );
   return {
     priority: priorityRaw,
     title,
     explanation,
     deadline,
-    sourceIds,
+    sourceIds: mappedSourceIds,
   };
 }
 
@@ -414,7 +444,7 @@ export function validateAlternative(
   );
 
   for (const sourceId of sourceIds) {
-    if (!context.sources.some((s) => s.id === sourceId)) {
+    if (!context.sources.some((s) => s.id === sourceId) && !context.referenceMap?.sources.some((s) => s.id === sourceId)) {
       throw new StrategyProviderError(
         `Alternative source ID "${sourceId}" is not present in context.sources.`,
         provider,
@@ -423,10 +453,13 @@ export function validateAlternative(
     }
   }
 
+  const mappedSourceIds = sourceIds.map((sourceId) =>
+    context.referenceMap?.sources.find((_, index) => `source-${index + 1}` === sourceId)?.id ?? sourceId
+  );
   return {
     title,
     tradeoff,
-    sourceIds,
+    sourceIds: mappedSourceIds,
   };
 }
 
@@ -460,15 +493,19 @@ export function validateStrategyOutput(
     );
   }
 
-  const pointsGap = optionalFiniteNumber(root.pointsGap, provider, model);
+  // Retain structural validation for the legacy field, but never allow a
+  // model-authored aggregate to become a customer funding claim. Deterministic
+  // allocation scenarios carry the authoritative per-account gaps.
+  const modelPointsGap = optionalFiniteNumber(root.pointsGap, provider, model);
 
-  if (pointsGap !== null && pointsGap < 0) {
+  if (modelPointsGap !== null && modelPointsGap < 0) {
     throw new StrategyProviderError(
-      `Model output has negative pointsGap "${pointsGap}".`,
+      `Model output has negative pointsGap "${modelPointsGap}".`,
       provider,
       model
     );
   }
+  const pointsGap = null;
 
   const recommendedAwardOptionIdRaw =
     root.recommendedAwardOptionId === undefined
@@ -490,12 +527,16 @@ export function validateStrategyOutput(
     if (
       !context.awardOptions.some(
         (option: StrategyAwardOption) => option.id === recommendedAwardOptionId
-      )
+      ) && !context.referenceMap?.awardOptions.some((option) => option.id === recommendedAwardOptionId)
     ) {
       finalizationWarnings.push(
         `The recommended award option "${recommendedAwardOptionId}" could not be verified and was cleared.`
       );
       recommendedAwardOptionId = null;
+    }
+    if (recommendedAwardOptionId !== null && context.referenceMap) {
+      const index = context.awardOptions.findIndex((option) => option.id === recommendedAwardOptionId);
+      if (index >= 0) recommendedAwardOptionId = context.referenceMap.awardOptions[index]?.id ?? null;
     }
   }
 
@@ -523,12 +564,16 @@ export function validateStrategyOutput(
     } else if (
       !context.cardOffers.some(
         (offer: StrategyCardOffer) => offer.id === recommendedCardOfferId
-      )
+      ) && !context.referenceMap?.cardOffers.some((offer) => offer.id === recommendedCardOfferId)
     ) {
       finalizationWarnings.push(
         `The recommended card offer "${recommendedCardOfferId}" could not be verified and was cleared.`
       );
       recommendedCardOfferId = null;
+    }
+    if (recommendedCardOfferId !== null && context.referenceMap) {
+      const index = context.cardOffers.findIndex((offer) => offer.id === recommendedCardOfferId);
+      if (index >= 0) recommendedCardOfferId = context.referenceMap.cardOffers[index]?.id ?? null;
     }
   }
 
@@ -544,12 +589,36 @@ export function validateStrategyOutput(
     warnings.unshift(...finalizationWarnings);
   }
 
-  const followUpQuestions = requireStringArrayField(
-    root,
-    "followUpQuestions",
-    provider,
-    model
-  );
+  const rawFollowUpTopics = root.followUpTopics;
+  const followUpTopics = Array.isArray(rawFollowUpTopics) ? rawFollowUpTopics : [];
+  const followUpQuestions: string[] = [];
+  let droppedFollowUpTopic =
+    (rawFollowUpTopics !== undefined && !Array.isArray(rawFollowUpTopics)) ||
+    root.followUpQuestions !== undefined;
+  const selectedTopics = new Set<FollowUpDecisionTopic>();
+  for (const rawTopic of followUpTopics) {
+    if (typeof rawTopic !== "string" || !FOLLOW_UP_DECISION_TOPICS.includes(rawTopic as FollowUpDecisionTopic)) {
+      droppedFollowUpTopic = true;
+      continue;
+    }
+    const topic = rawTopic as FollowUpDecisionTopic;
+    if (selectedTopics.has(topic) || context.unavailableFollowUpTopics?.has(topic)) {
+      droppedFollowUpTopic = true;
+      continue;
+    }
+    selectedTopics.add(topic);
+    followUpQuestions.push(FOLLOW_UP_QUESTION_TEXT[topic]);
+  }
+  if (droppedFollowUpTopic) {
+    // Optional model fields are not customer financial warnings. Keep their
+    // rejection observable only in development, without logging model prose
+    // or topic values.
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.info("[strategy-follow-up-topic-dropped]", {
+        category: "invalid_optional_follow_up_topic",
+      });
+    }
+  }
 
   const rawActions = root.actions;
 
@@ -586,11 +655,12 @@ export function validateStrategyOutput(
   // flightOptions/hotelOptions fields are ignored entirely. This guarantees
   // the model cannot invent an option, remove a validated option, or alter
   // its price, source, program, type, or pricing basis.
+  const serverAwardOptions = context.referenceMap?.awardOptions ?? context.awardOptions;
   const flightOptions = deduplicateByOptionId(
-    context.awardOptions.filter((option) => option.redemptionType === "flight")
+    serverAwardOptions.filter((option) => option.redemptionType === "flight")
   );
   const hotelOptions = deduplicateByOptionId(
-    context.awardOptions.filter((option) => option.redemptionType === "hotel")
+    serverAwardOptions.filter((option) => option.redemptionType === "hotel")
   );
 
   return {

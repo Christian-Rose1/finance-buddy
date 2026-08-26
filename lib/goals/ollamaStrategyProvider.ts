@@ -6,6 +6,7 @@ import type {
 import {
   StrategyProviderError,
   STRATEGY_PROMPT,
+  unavailableFollowUpTopics,
   parseModelResponse,
   validateStrategyOutput,
   type StrategyValidationContext,
@@ -168,12 +169,14 @@ export class OllamaStrategyProvider implements StrategyProvider {
 
     const parsed = parseModelResponse(rawText, "ollama", this.model);
 
-    const validationContext: StrategyValidationContext = {
+      const validationContext: StrategyValidationContext = {
       awardOptions: prompt.awardOptions,
       cardOffers: prompt.cardOffers,
       sources: prompt.sources,
-      goal: { allowNewCards: prompt.goal.allowNewCards },
-    };
+        goal: { allowNewCards: prompt.goal.allowNewCards },
+        referenceMap: prompt.referenceMap,
+        unavailableFollowUpTopics: unavailableFollowUpTopics(prompt),
+      };
 
     return validateStrategyOutput(
       parsed,

@@ -380,7 +380,19 @@ export function buildResearchSystemPrompt(focus: ResearchFocus): string {
 export function buildPublicResearchPayload(input: InterpretResearchInput): string {
   return JSON.stringify({
     focus: input.focus,
-    rewardPrograms: input.rewardPrograms,
+    // The interpreter needs only public program names. Internal catalog IDs
+    // remain server-side for validation and are never cloud-bound.
+    rewardPrograms: input.rewardPrograms.map((program) => ({ name: program.name })),
+    goal: {
+      origin: input.goal.origin,
+      destinations: input.goal.destinations,
+      earliestDeparture: input.goal.earliestDeparture,
+      latestReturn: input.goal.latestReturn,
+      minimumNights: input.goal.minimumNights,
+      maximumNights: input.goal.maximumNights,
+      travelerCount: input.goal.travelerCount,
+      cabinPreference: input.goal.cabinPreference,
+    },
     research: input.research,
   });
 }

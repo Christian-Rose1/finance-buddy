@@ -219,17 +219,19 @@ test("successful request posts to OpenRouter and validates content", async () =>
   const userPayload = JSON.parse(body.messages[1].content);
   assert.equal(userPayload.focus, "award_options");
   assert.deepEqual(userPayload.rewardPrograms, [
-    { id: "af-flying-blue", name: "Air France Flying Blue" },
+    { name: "Air France Flying Blue" },
   ]);
+  assert.equal(userPayload.goal.travelerCount, 2);
+  assert.equal(userPayload.goal.minimumNights, 10);
   assert.equal(userPayload.research.length, 1);
   assert.equal(userPayload.research[0].query, "query-1");
 
   const serializedUser = JSON.stringify(userPayload);
   assert.ok(!serializedUser.includes("UNIQUE_HONEYMOON_VENICE_2027"));
-  assert.ok(!serializedUser.includes("UNIQUE_ORIGIN_AIRPORT"));
-  assert.ok(!serializedUser.includes("UNIQUE_DEST_AIRPORT"));
-  assert.ok(!serializedUser.includes("2027-07-01"));
-  assert.ok(!serializedUser.includes("2027-07-15"));
+  assert.ok(serializedUser.includes("UNIQUE_ORIGIN_AIRPORT"));
+  assert.ok(serializedUser.includes("UNIQUE_DEST_AIRPORT"));
+  assert.ok(serializedUser.includes("2027-07-01"));
+  assert.ok(serializedUser.includes("2027-07-15"));
 
   assert.equal(result.awardOptions.length, 1);
   assert.equal(result.awardOptions[0].programName, "Air France Flying Blue");

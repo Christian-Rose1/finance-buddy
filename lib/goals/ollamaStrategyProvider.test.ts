@@ -157,7 +157,7 @@ function makeValidStrategy(): PersonalizedStrategyNarrative {
     headline: "Book with Air France",
     summary: "You have enough points today.",
     feasibility: "on_track",
-    pointsGap: 0,
+    pointsGap: 42_000,
     recommendedAwardOptionId: "award-1",
     recommendedCardOfferId: null,
     flightOptions: [validFlightOption],
@@ -241,13 +241,13 @@ test("sanitized prompt is sent to Ollama", async () => {
   assert.ok(!("userId" in sentPrompt.goal), "goal.userId must not be sent");
   assert.equal(sentPrompt.goal.title, "Trip to Europe");
   assert.equal(sentPrompt.awardOptions[0].id, "award-1");
-  assert.equal(sentPrompt.cardOffers[0].id, "offer-1");
+  assert.equal(sentPrompt.cardOffers[0].id, "card-1");
   assert.equal(sentPrompt.monthlySpendingByCategory.length, 2);
 
   assert.equal(result.headline, strategy.headline);
 });
 
-test("valid JSON maps successfully", async () => {
+test("valid JSON maps successfully while normalizing model pointsGap away", async () => {
   restoreEnv();
 
   const prompt = makeSanitizedPrompt();
@@ -263,7 +263,7 @@ test("valid JSON maps successfully", async () => {
 
   const result = await provider.generateStrategy(prompt);
 
-  assert.deepEqual(result, strategy);
+  assert.deepEqual(result, { ...strategy, pointsGap: null });
 });
 
 test("malformed JSON is rejected", async () => {
@@ -712,7 +712,7 @@ test("model-supplied fake option arrays cannot enter the returned strategy", asy
   );
 });
 
-test("existing narrative fields remain unchanged", async () => {
+test("existing narrative fields remain unchanged except model pointsGap is normalized away", async () => {
   restoreEnv();
 
   const prompt = makeSanitizedPrompt({
@@ -733,7 +733,7 @@ test("existing narrative fields remain unchanged", async () => {
   assert.equal(result.headline, "Book with Air France");
   assert.equal(result.summary, "You have enough points today.");
   assert.equal(result.feasibility, "on_track");
-  assert.equal(result.pointsGap, 0);
+  assert.equal(result.pointsGap, null);
   assert.equal(result.recommendedAwardOptionId, "award-1");
   assert.equal(result.recommendedCardOfferId, null);
   assert.equal(result.actions.length, 1);

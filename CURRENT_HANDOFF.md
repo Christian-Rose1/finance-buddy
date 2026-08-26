@@ -1,6 +1,102 @@
 # Finance Buddy Current Handoff
 
-Updated: 2026-08-25, America/New_York
+Updated: 2026-08-26, America/New_York
+
+## 2026-08-26 Grounded Strategy Brief v1 checkpoint
+
+Implemented locally; no live provider, browser, database, migration, commit, or
+push was performed. Preserve the existing uncommitted OpenRouter reliability
+diff alongside this milestone.
+
+- Final narrative generation now receives a server-built `brief` with the saved
+  goal constraints, resolved trip nights, verified/unverified point summaries,
+  deterministic option requirements, and allocation-scenario summaries.
+- Model-visible award/card/source identifiers are opaque ordered references;
+  the real identifiers stay in a non-enumerable server-side map and are restored
+  only while validating the returned narrative.
+- Research interpretation now receives the minimal saved route/date/traveler/
+  cabin/night constraints and name-only reward programs. It still uses the
+  server-side full input for source, numeric, program, and relevance validation.
+- Final follow-up questions are now selected through a constrained server-side
+  decision-topic contract rather than free-form model prose. Existing non-live
+  availability and sourced-numeric validation remains in force.
+- `Goal` has no separately stored explicit date-flexibility field. Do not infer
+  one from its window; adding it remains a product/schema decision.
+
+Verified locally on 2026-08-26:
+
+- `npm test` passed: 622 tests, 0 failed.
+- `npm run build` passed, with the existing Next.js `<img>` warning in
+  `components/receipt-upload-panel.tsx`.
+- `npx tsc --noEmit` and `git diff --check` passed.
+
+The bounded authenticated Euro Trip acceptance run below verified that the
+current provider flow completes and saves successfully. This does not make
+research planning benchmarks live availability or prove exact route/date fit.
+
+## 2026-08-26 Grounded Strategy Brief F1/F2 correction
+
+The final narrative contract no longer accepts model-authored follow-up question
+prose. The model may select only these decision topics: `flight_time_preference`,
+`layover_tolerance`, `hotel_neighborhood_preference`, `room_preference`, and
+`cash_vs_points_preference`. Server validation materializes the customer-facing
+question text and silently drops unknown, duplicate, unavailable, malformed,
+or legacy optional topic fields without changing customer warnings. Under
+`STRATEGY_DEBUG=1`, the drop emits only a fixed safe diagnostic category. It
+does not use keyword, substring, or word-boundary matching. Legacy
+`followUpQuestions` output is ignored safely, so it cannot invalidate an
+otherwise complete strategy.
+
+The prompt builder now excludes any award option or card offer whose source is
+not in the validated source map before opaque references are created. The
+former `source-unknown` placeholder is gone; excluded records are represented
+only by a safe brief warning and cannot become dangling model citations.
+
+Verified locally: focused tests passed; `npm test` passed (622 tests, 0 failed);
+`npm run build`, `npx tsc --noEmit`, and `git diff --check` passed. No live
+provider/browser/database/migration call, commit, or push was performed.
+
+## 2026-08-26 Deterministic relevance and points-gap provenance correction
+
+Verified locally; no live provider, browser, database, migration, commit, or
+push was performed.
+
+- Model-produced `exact` and `partial` relevance labels now rank as `general`.
+  They cannot improve deterministic allocation priority until source-bound
+  structured route/date evidence exists. `different_destination` remains only
+  a conservative non-primary/conditional downgrade, and customer wording calls
+  it a conditional planning alternative rather than a proven route mismatch.
+- Model-authored top-level `pointsGap` is structurally validated then normalized
+  to `null`; the top-level estimated-gap card and model feasibility badge are
+  no longer rendered. Deterministic scenario statuses and per-allocation gaps
+  are the customer-visible funding information.
+- Existing traveler/night calculations, verified self-owned funding rules,
+  source validation, HMAC staging, and privacy boundaries remain unchanged.
+
+Verified locally: focused tests passed; `npm test` passed (622 tests, 0 failed);
+`npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. A future
+source-bound structured route/date schema is still required to determine an
+exact or partial match truthfully.
+
+## 2026-08-26 bounded Euro Trip acceptance run
+
+The user manually ran the signed-in Euro Trip flow through the authenticated
+browser UI after agent browser control was unavailable. The reported result is
+verified user-observed runtime evidence:
+
+- Flight research completed in about 73 seconds.
+- Hotel research completed in about 94 seconds; both hotel Tavily searches
+  returned five results.
+- Final strategy generation completed in about 174 seconds, within the
+  deliberately bounded 245-second final-provider limit.
+- No safe runtime timeout, parsing, or validation error was reported.
+- Flight, hotel, and final strategy generation completed; the strategy saved
+  and remained present after the user refreshed the page.
+
+No finalization-only retry was required. Do not repeat this expensive live run
+without a new, evidence-based reason. This verifies the current staged flow,
+bounded finalization, save, and refresh persistence. It does not prove live
+award availability or source-bound exact route/date matching.
 
 ## Read this first
 

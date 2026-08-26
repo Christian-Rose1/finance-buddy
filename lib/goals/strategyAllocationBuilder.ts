@@ -25,7 +25,13 @@ import {
 type GoalMatch = "exact" | "partial" | "general" | "different_destination";
 
 function getGoalMatch(option: StrategyAwardOption): GoalMatch {
-  return option.goalMatch ?? "general";
+  // goalMatch is currently classified by the research model, not derived from
+  // source-bound structured route/date facts. It must not promote an option
+  // above a general planning benchmark. Keep different_destination as a
+  // conservative downgrade only: it can never improve deterministic ranking.
+  return option.goalMatch === "different_destination"
+    ? "different_destination"
+    : "general";
 }
 
 function goalMatchPriority(match: GoalMatch): number {
@@ -518,7 +524,7 @@ function buildFallback(
     const warnings = [...calc.warnings];
     if (isDiffDest) {
       warnings.push(
-        `Option "${option.itineraryLabel ?? option.programName}" does not match the requested destination`,
+        "This is a conditional planning alternative. Verify that it fits your route and dates before relying on it.",
       );
     }
 

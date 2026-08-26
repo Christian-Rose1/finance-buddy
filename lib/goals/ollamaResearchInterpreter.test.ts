@@ -1791,7 +1791,7 @@ test("availabilityStatus=available rejected", async () => {
   );
 });
 
-test("buildPublicResearchPayload includes public fields and excludes the goal", () => {
+test("buildPublicResearchPayload includes minimal goal constraints without identifiers", () => {
   const input = makeInput({
     goal: {
       ...goal,
@@ -1811,16 +1811,20 @@ test("buildPublicResearchPayload includes public fields and excludes the goal", 
   const payload = JSON.parse(buildPublicResearchPayload(input));
 
   assert.deepEqual(payload.focus, "award_options");
-  assert.deepEqual(payload.rewardPrograms, rewardPrograms);
+  assert.deepEqual(
+    payload.rewardPrograms,
+    rewardPrograms.map((program) => ({ name: program.name }))
+  );
   assert.equal(payload.research.length, 1);
   assert.equal(payload.research[0].query, "query-1");
 
   const serialized = JSON.stringify(payload);
   assert.ok(!serialized.includes("UNIQUE_HONEYMOON_VENICE_2027"));
-  assert.ok(!serialized.includes("UNIQUE_ORIGIN_AIRPORT"));
-  assert.ok(!serialized.includes("UNIQUE_DEST_AIRPORT"));
-  assert.ok(!serialized.includes("2027-07-01"));
-  assert.ok(!serialized.includes("2027-07-15"));
+  assert.ok(serialized.includes("UNIQUE_ORIGIN_AIRPORT"));
+  assert.ok(serialized.includes("UNIQUE_DEST_AIRPORT"));
+  assert.ok(serialized.includes("2027-07-01"));
+  assert.ok(serialized.includes("2027-07-15"));
+  assert.ok(!serialized.includes(rewardPrograms[0].id));
 });
 
 test("shared validator accepts the existing valid partial award fixture", async () => {

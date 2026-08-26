@@ -182,6 +182,16 @@ export type PersonalizedStrategyNarrative = Omit<
   "pointsInventory" | "allocationScenarios"
 >;
 
+export const FOLLOW_UP_DECISION_TOPICS = [
+  "flight_time_preference",
+  "layover_tolerance",
+  "hotel_neighborhood_preference",
+  "room_preference",
+  "cash_vs_points_preference",
+] as const;
+
+export type FollowUpDecisionTopic = (typeof FOLLOW_UP_DECISION_TOPICS)[number];
+
 // ---------------------------------------------------------------------------
 // Sanitized cloud-safe prompt types
 // ---------------------------------------------------------------------------
@@ -217,6 +227,44 @@ export interface SanitizedWalletCard {
   rewardCurrency: string;
 }
 
+/** Server-built, cloud-safe facts that narrative prose must treat as fixed. */
+export interface GroundedStrategyBrief {
+  goal: SanitizedGoal & { resolvedTripNights: number | null };
+  pointsSummary: Array<{
+    programName: string | null;
+    ownerType: "self" | "companion";
+    verifiedPoints: number;
+    unverifiedPoints: number;
+  }>;
+  optionRequirements: Array<{
+    optionReference: string;
+    redemptionType: "flight" | "hotel";
+    pointsRequired: number | null;
+    status: "calculated" | "insufficient_information";
+    assumptions: string[];
+    warnings: string[];
+  }>;
+  allocationScenarios: Array<{
+    kind: StrategyAllocationScenario["kind"];
+    status: StrategyAllocationScenario["status"];
+    flightPointsRequired: number | null;
+    hotelPointsRequired: number | null;
+    travelerCount: number;
+    tripNights: number | null;
+    assumptions: string[];
+    warnings: string[];
+  }>;
+  sanitizationWarnings: string[];
+}
+
+/** Kept non-enumerable by the payload builder; never serialized to a provider. */
+export interface StrategyPromptReferenceMap {
+  awardOptions: StrategyAwardOption[];
+  cardOffers: StrategyCardOffer[];
+  sources: StrategySource[];
+  excludedSourceBoundRecords: boolean;
+}
+
 export interface SanitizedStrategyPrompt {
   goal: SanitizedGoal;
   pointsInventory: SanitizedPointsInventoryItem[];
@@ -226,6 +274,8 @@ export interface SanitizedStrategyPrompt {
   cardOffers: StrategyCardOffer[];
   sources: StrategySource[];
   generatedAt: string;
+  brief: GroundedStrategyBrief;
+  referenceMap: StrategyPromptReferenceMap;
 }
 
 // ---------------------------------------------------------------------------

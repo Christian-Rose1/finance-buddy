@@ -14,6 +14,13 @@ import type {
   SanitizedPointsInventoryItem,
   SanitizedWalletCard,
 } from "./strategyTypes";
+import { buildPointsInventory } from "./pointsInventoryBuilder";
+import { buildStrategyAllocationScenarios } from "./strategyAllocationBuilder";
+import {
+  calculateFlightPointsRequired,
+  calculateHotelPointsRequired,
+  calculateTripNights,
+} from "./strategyOptionCalculator";
 
 // Re-export for convenience
 export type {
@@ -96,14 +103,94 @@ export function buildSanitizedStrategyPayload(
       rewardCurrency: card.rewardCurrency,
     }));
 
-  return {
+  const validSources = context.sources.filter((source) => source.id.trim().length > 0);
+  const validSourceIds = new Set(validSources.map((source) => source.id));
+  const validAwardOptions = context.awardOptions.filter((option) => validSourceIds.has(option.sourceId));
+  const validCardOffers = context.cardOffers.filter((offer) => validSourceIds.has(offer.sourceId));
+  const excludedSourceBoundRecords =
+    validAwardOptions.length !== context.awardOptions.length ||
+    validCardOffers.length !== context.cardOffers.length;
+  const pointsInventory = buildPointsInventory(context.rewardAccounts, catalogRewardPrograms);
+  const allocationScenarios = buildStrategyAllocationScenarios(
+    context.goal,
+    validAwardOptions.filter((option) => option.redemptionType === "flight"),
+    validAwardOptions.filter((option) => option.redemptionType === "hotel"),
+    pointsInventory
+  );
+  const sourceReferences = new Map(validSources.map((source, index) => [source.id, `source-${index + 1}`]));
+  const awardReferences = new Map(validAwardOptions.map((option, index) => [option.id, `award-${index + 1}`]));
+  const cardReferences = new Map(validCardOffers.map((offer, index) => [offer.id, `card-${index +1}`]));
+  const publicSources = validSources.map((source) => ({
+    ...source,
+    id: sourceReferences.get(source.id)!,
+  }));
+  const publicAwardOptions = validAwardOptions.map((option) => ({
+    ...option,
+    id: awardReferences.get(option.id)!,
+    sourceId: sourceReferences.get(option.sourceId)!,
+    transferFromProgramId: null,
+  }));
+  const publicCardOffers = validCardOffers.map((offer) => ({
+    ...offer,
+    id: cardReferences.get(offer.id)!,
+    sourceId: sourceReferences.get(offer.sourceId)!,
+    destinationProgramId: null,
+  }));
+  const pointsSummary = new Map<string, { programName: string | null; ownerType: "self" | "companion"; verifiedPoints: number; unverifiedPoints: number }>();
+  for (const item of sanitizedPointsInventory) {
+    const key = `${item.programName ?? "unknown"}:${item.ownerType}`;
+    const summary = pointsSummary.get(key) ?? { programName: item.programName, ownerType: item.ownerType, verifiedPoints: 0, unverifiedPoints: 0 };
+    if (item.verificationStatus === "verified") summary.verifiedPoints += item.balance;
+    else summary.unverifiedPoints += item.balance;
+    pointsSummary.set(key, summary);
+  }
+  const optionRequirements = validAwardOptions.map((option) => {
+    const calculation = option.redemptionType === "flight"
+      ? calculateFlightPointsRequired(option, context.goal)
+      : calculateHotelPointsRequired(option, context.goal);
+    return {
+      optionReference: awardReferences.get(option.id)!,
+      redemptionType: option.redemptionType,
+      pointsRequired: calculation.status === "calculated" ? calculation.pointsRequired : null,
+      status: calculation.status,
+      assumptions: calculation.assumptions,
+      warnings: calculation.warnings,
+    };
+  });
+  const prompt: SanitizedStrategyPrompt = {
     goal: sanitizedGoal,
     pointsInventory: sanitizedPointsInventory,
     walletCards: sanitizedWalletCards,
     monthlySpendingByCategory: context.monthlySpendingByCategory,
-    awardOptions: context.awardOptions,
-    cardOffers: context.cardOffers,
-    sources: context.sources,
+    awardOptions: publicAwardOptions,
+    cardOffers: publicCardOffers,
+    sources: publicSources,
     generatedAt: context.generatedAt,
+    brief: {
+      goal: { ...sanitizedGoal, resolvedTripNights: calculateTripNights(context.goal) },
+      pointsSummary: [...pointsSummary.values()],
+      optionRequirements,
+      allocationScenarios: allocationScenarios.map((scenario) => ({
+        kind: scenario.kind,
+        status: scenario.status,
+        flightPointsRequired: scenario.flightPointsRequired,
+        hotelPointsRequired: scenario.hotelPointsRequired,
+        travelerCount: scenario.travelerCount,
+        tripNights: scenario.tripNights,
+        assumptions: scenario.assumptions,
+        warnings: scenario.warnings,
+      })),
+      sanitizationWarnings: excludedSourceBoundRecords
+        ? ["Some research records were omitted because their source could not be resolved."]
+        : [],
+    },
+    referenceMap: {
+      awardOptions: validAwardOptions,
+      cardOffers: validCardOffers,
+      sources: validSources,
+      excludedSourceBoundRecords,
+    },
   };
+  Object.defineProperty(prompt, "referenceMap", { enumerable: false, value: prompt.referenceMap });
+  return prompt;
 }

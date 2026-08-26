@@ -34,6 +34,30 @@ const prompt: SanitizedStrategyPrompt = {
   cardOffers: [],
   sources: [],
   generatedAt: "2026-08-25T00:00:00.000Z",
+  brief: {
+    goal: {
+      type: "travel",
+      title: "Paris trip",
+      origin: ["DEN"],
+      destinations: ["CDG"],
+      earliestDeparture: null,
+      latestReturn: null,
+      minimumNights: null,
+      maximumNights: null,
+      travelerCount: 1,
+      cabinPreference: "economy",
+      optimizationPriority: "balanced",
+      maximumCashBudget: null,
+      currency: "USD",
+      allowNewCards: false,
+      resolvedTripNights: null,
+    },
+    pointsSummary: [],
+    optionRequirements: [],
+    allocationScenarios: [],
+    sanitizationWarnings: [],
+  },
+  referenceMap: { awardOptions: [], cardOffers: [], sources: [], excludedSourceBoundRecords: false },
 };
 
 const validNarrative = {
@@ -363,6 +387,176 @@ test("preserves the abort timeout and does not retry an aborted request", async 
       /timed out after 120000ms/
     );
     assert.equal(calls, 1);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("keeps the abort timeout active while consuming the response body", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async (_input, init) => {
+      calls += 1;
+      const signal = init?.signal;
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        body: null,
+        text: () =>
+          new Promise<string>((_resolve, reject) => {
+            if (signal?.aborted) {
+              reject(new Error("body read was aborted"));
+              return;
+            }
+            signal?.addEventListener("abort", () => {
+              reject(new Error("body read was aborted"));
+            });
+          }),
+      } as unknown as Response;
+    }) as typeof fetch,
+    { abortRequestTimeout: true }
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+
+    await assert.rejects(
+      () => provider.generateStrategy(prompt),
+      /timed out after 120000ms/
+    );
+    assert.equal(calls, 1);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("sets no-store for the OpenRouter POST", async () => {
+  let requestCache: RequestCache | undefined;
+  const runtime = installMockedRuntime(
+    (async (_input, init) => {
+      requestCache = init?.cache;
+      return validResponse();
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    await provider.generateStrategy(prompt);
+
+    assert.equal(requestCache, "no-store");
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("cancels a retryable HTTP response body before retrying", async () => {
+  let calls = 0;
+  let cancellations = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(
+          new ReadableStream({
+            cancel() {
+              cancellations += 1;
+            },
+          }),
+          {
+            status: 503,
+            headers: { "Retry-After": "0" },
+          }
+        );
+      }
+      return validResponse();
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    await provider.generateStrategy(prompt);
+
+    assert.equal(calls, 2);
+    assert.equal(cancellations, 1);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("accepts an unambiguous OpenRouter text content array", async () => {
+  const runtime = installMockedRuntime(
+    (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: [
+                  { type: "text", text: JSON.stringify(validNarrative) },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      )) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    const result = await provider.generateStrategy(prompt);
+
+    assert.equal(result.headline, validNarrative.headline);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("retries empty model content only once", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "" } }] }),
+        { status: 200 }
+      );
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+
+    await assert.rejects(
+      () => provider.generateStrategy(prompt),
+      /OpenRouter returned an invalid model response/
+    );
+    assert.equal(calls, 2);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("retries an invalid outer OpenRouter response envelope only once", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ id: "missing-choices" }), {
+        status: 200,
+      });
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+
+    await assert.rejects(
+      () => provider.generateStrategy(prompt),
+      /OpenRouter returned an invalid model response/
+    );
+    assert.equal(calls, 2);
   } finally {
     runtime.restore();
   }

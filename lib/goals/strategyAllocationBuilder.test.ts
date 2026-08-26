@@ -357,9 +357,10 @@ describe("buildStrategyAllocationScenarios", () => {
     assert.equal(ff.status, "insufficient_information");
   });
 
-  it("exact/partial/general ranking order", () => {
+  it("model exact and partial labels cannot outrank an otherwise equivalent general option", () => {
     const goal = makeGoal({ travelerCount: 2 });
-    // exact is calculable+fundable, partial is calculable+fundable, general is calculable+fundable
+    // All are equally calculable and fundable. Their labels are model-produced
+    // rather than source-bound structured evidence, so source order wins.
     const flights: StrategyAwardOption[] = [
       makeFlightOption({
         id: "flight-general",
@@ -388,8 +389,7 @@ describe("buildStrategyAllocationScenarios", () => {
 
     const scenarios = buildStrategyAllocationScenarios(goal, flights, hotels, inventory);
     const ff = findScenario(scenarios, "flight_first");
-    // Should pick exact over partial over general
-    assert.equal(ff.flightOptionId, "flight-exact");
+    assert.equal(ff.flightOptionId, "flight-general");
   });
 
   it("different-destination option is excluded from primary scenarios", () => {
@@ -457,8 +457,12 @@ describe("buildStrategyAllocationScenarios", () => {
     assert.equal(fb.flightOptionId, "flight-london");
     assert.equal(fb.status, "conditional");
     assert.ok(
-      fb.warnings.some((w) => w.includes("does not match the requested destination")),
-      "Expected destination mismatch warning",
+      fb.warnings.some((w) => w.includes("conditional planning alternative")),
+      "Expected conditional planning warning",
+    );
+    assert.ok(
+      !fb.warnings.some((w) => w.includes("does not match the requested destination")),
+      "Model classification must not be rendered as a proven mismatch",
     );
   });
 

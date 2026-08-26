@@ -7,6 +7,7 @@ import {
   buildSanitizedStrategyPayload,
   type SanitizedStrategyPrompt,
 } from "./sanitizedStrategyPayload";
+import { validateStrategyOutput } from "./strategyProviderCore";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -373,14 +374,109 @@ test("wallet cards preserve name, issuer, rewardCurrency but not id or cardProdu
   assert.equal(card2.rewardCurrency, "membership_rewards");
 });
 
-test("monthly spending, award options, card offers, sources pass through unchanged", () => {
+test("model payload uses opaque references while server reference map retains validated facts", () => {
   const context = makeContext();
   const result = buildSanitizedStrategyPayload(context, catalogRewardPrograms);
 
   assert.deepEqual(result.monthlySpendingByCategory, context.monthlySpendingByCategory);
-  assert.deepEqual(result.awardOptions, context.awardOptions);
-  assert.deepEqual(result.cardOffers, context.cardOffers);
-  assert.deepEqual(result.sources, context.sources);
+  assert.equal(result.awardOptions[0]?.id, "award-1");
+  assert.equal(result.cardOffers[0]?.id, "card-1");
+  assert.equal(result.sources[0]?.id, "source-1");
+  assert.deepEqual(result.referenceMap.awardOptions, context.awardOptions);
+  assert.deepEqual(result.referenceMap.cardOffers, context.cardOffers);
+  assert.deepEqual(result.referenceMap.sources, context.sources);
+  const serialized = JSON.stringify(result);
+  assert.ok(!serialized.includes('"id":"offer-1"'));
+  assert.ok(!serialized.includes('"id":"src-1"'));
+  assert.ok(!serialized.includes("program-chase-ur"));
+});
+
+test("grounded brief retains saved two-traveler goal facts and deterministic facts", () => {
+  const context = makeContext({
+    goal: { ...goal, minimumNights: 8, maximumNights: 16 },
+  });
+  const result = buildSanitizedStrategyPayload(context, catalogRewardPrograms);
+
+  assert.equal(result.brief.goal.travelerCount, 2);
+  assert.equal(result.brief.goal.resolvedTripNights, 8);
+  assert.equal(result.brief.goal.minimumNights, 8);
+  assert.equal(result.brief.goal.maximumNights, 16);
+  assert.equal(result.brief.pointsSummary[0]?.verifiedPoints, 120000);
+  assert.ok(Array.isArray(result.brief.allocationScenarios));
+});
+
+test("records with unresolved sources are excluded before opaque references are built", () => {
+  const context = makeContext({
+    awardOptions: [{ ...makeContext().awardOptions[0], sourceId: "missing-award-source" }],
+    cardOffers: [{ ...makeContext().cardOffers[0], sourceId: "missing-card-source" }],
+  });
+  const result = buildSanitizedStrategyPayload(context, catalogRewardPrograms);
+
+  assert.deepEqual(result.awardOptions, []);
+  assert.deepEqual(result.cardOffers, []);
+  assert.deepEqual(result.referenceMap.awardOptions, []);
+  assert.deepEqual(result.referenceMap.cardOffers, []);
+  assert.equal(result.referenceMap.excludedSourceBoundRecords, true);
+  assert.ok(result.brief.sanitizationWarnings.length > 0);
+  assert.ok(!JSON.stringify(result).includes("source-unknown"));
+});
+
+test("source-less research records are excluded while valid sibling records remain grounded", () => {
+  const baseContext = makeContext();
+  const sourceLessAward = {
+    ...baseContext.awardOptions[0],
+    id: "award-missing-source",
+    sourceId: "missing-award-source",
+    itineraryLabel: "Unmapped award option",
+  };
+  const sourceLessOffer = {
+    ...baseContext.cardOffers[0],
+    id: "offer-missing-source",
+    sourceId: "missing-card-source",
+    cardName: "Unmapped card offer",
+  };
+  const result = buildSanitizedStrategyPayload({
+    ...baseContext,
+    awardOptions: [...baseContext.awardOptions, sourceLessAward],
+    cardOffers: [...baseContext.cardOffers, sourceLessOffer],
+  }, catalogRewardPrograms);
+
+  assert.equal(result.awardOptions.length, 1);
+  assert.equal(result.cardOffers.length, 1);
+  assert.equal(result.referenceMap.awardOptions.length, 1);
+  assert.equal(result.referenceMap.cardOffers.length, 1);
+  assert.equal(result.brief.optionRequirements.length, 1);
+  assert.ok(result.brief.allocationScenarios.length > 0);
+  const cloudPayload = JSON.stringify(result);
+  assert.ok(!cloudPayload.includes("award-missing-source"));
+  assert.ok(!cloudPayload.includes("offer-missing-source"));
+  assert.ok(!cloudPayload.includes("Unmapped award option"));
+  assert.ok(!cloudPayload.includes("Unmapped card offer"));
+  assert.ok(!cloudPayload.includes("source-unknown"));
+
+  const finalStrategy = validateStrategyOutput({
+    headline: "Grounded plan",
+    summary: "Use the validated option.",
+    feasibility: "insufficient_information",
+    pointsGap: null,
+    recommendedAwardOptionId: null,
+    recommendedCardOfferId: null,
+    actions: [],
+    alternatives: [],
+    assumptions: [],
+    warnings: [],
+    followUpTopics: [],
+  }, {
+    awardOptions: result.awardOptions,
+    cardOffers: result.cardOffers,
+    sources: result.sources,
+    goal: { allowNewCards: true },
+    referenceMap: result.referenceMap,
+  }, "test", "test-model");
+  assert.deepEqual(finalStrategy.flightOptions, baseContext.awardOptions);
+  assert.deepEqual(finalStrategy.hotelOptions, []);
+  assert.ok(!JSON.stringify(finalStrategy).includes("award-missing-source"));
+  assert.ok(!JSON.stringify(finalStrategy).includes("offer-missing-source"));
 });
 
 test("generatedAt is preserved", () => {
