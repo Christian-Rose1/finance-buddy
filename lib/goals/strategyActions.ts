@@ -42,6 +42,7 @@ import type {
   StrategyAwardOption,
   StrategySource,
 } from "./strategyTypes";
+import { toClientSafeResearch, toClientSafeStrategy } from "./travelEvidence";
 
 export type GenerateGoalStrategyResult =
   | {
@@ -141,7 +142,7 @@ export async function generateGoalStrategyAction(
         context.generatedAt,
         supabase
       );
-      return { success: true, strategy, saved: true, saveMessage: null };
+      return { success: true, strategy: toClientSafeStrategy(strategy), saved: true, saveMessage: null };
     } catch (saveError) {
       const safeSaveMessage =
         saveError instanceof Error
@@ -152,7 +153,7 @@ export async function generateGoalStrategyAction(
       }
       return {
         success: true,
-        strategy,
+        strategy: toClientSafeStrategy(strategy),
         saved: false,
         saveMessage:
           "Your strategy was generated but couldn't be saved. Your previously saved strategy, if any, was not changed.",
@@ -243,8 +244,8 @@ export async function generateGoalFlightStageAction(
       expiresAt,
       stage: "flight",
       stageStatus: "succeeded",
-      options: envelope.interpreted.awardOptions,
-      sources: envelope.interpreted.sources,
+      options: toClientSafeResearch(envelope.interpreted.awardOptions),
+      sources: [],
       assumptions: envelope.interpreted.assumptions,
       warnings: envelope.interpreted.warnings,
       message: null,
@@ -329,8 +330,8 @@ export async function generateGoalHotelStageAction(
       expiresAt: run.expiresAt,
       stage: "hotel",
       stageStatus: "succeeded",
-      options: envelope.interpreted.awardOptions,
-      sources: envelope.interpreted.sources,
+      options: toClientSafeResearch(envelope.interpreted.awardOptions),
+      sources: [],
       assumptions: envelope.interpreted.assumptions,
       warnings: envelope.interpreted.warnings,
       message: null,
@@ -572,7 +573,7 @@ export async function finalizeGoalStrategyRunAction(
         logFinalCleanupError(cleanupError);
       }
 
-      return { success: true, strategy, saved: true, saveMessage: null };
+      return { success: true, strategy: toClientSafeStrategy(strategy), saved: true, saveMessage: null };
     } catch (error) {
       await bestEffortMarkFinalFailed(runId, goalId, userId, supabase);
       return finalizeGenericFailure(error);

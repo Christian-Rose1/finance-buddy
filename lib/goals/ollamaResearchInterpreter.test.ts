@@ -1817,6 +1817,7 @@ test("buildPublicResearchPayload includes minimal goal constraints without ident
   );
   assert.equal(payload.research.length, 1);
   assert.equal(payload.research[0].query, "query-1");
+  assert.equal(payload.research[0].results[0].id, "source-1");
 
   const serialized = JSON.stringify(payload);
   assert.ok(!serialized.includes("UNIQUE_HONEYMOON_VENICE_2027"));
@@ -1825,6 +1826,23 @@ test("buildPublicResearchPayload includes minimal goal constraints without ident
   assert.ok(serialized.includes("2027-07-01"));
   assert.ok(serialized.includes("2027-07-15"));
   assert.ok(!serialized.includes(rewardPrograms[0].id));
+  assert.ok(!serialized.includes("http://example.com"));
+});
+
+test("cloud-safe opaque source references resolve only on the server", () => {
+  const input = makeInput({
+    rewardPrograms: [{ id: "program-test", name: "Test Program" }],
+    research: [makeResearchResponse("query", [
+      makeResearchResult("Award", "https://official.example/award", "Test Program award costs 100 points"),
+    ])],
+  });
+  const result = validateResearchModelContent(
+    makeAwardOptionContent("flight", "round_trip", "award-1", "source-1"),
+    input,
+    "test-model",
+  );
+  assert.equal(result.awardOptions[0].sourceId, "https://official.example/award");
+  assert.equal(result.awardOptions[0].evidenceLevel, "planning_benchmark");
 });
 
 test("shared validator accepts the existing valid partial award fixture", async () => {

@@ -2,6 +2,56 @@
 
 Updated: 2026-08-26, America/New_York
 
+## 2026-08-26 Evidence Separation v1 boundary correction
+
+Implemented locally; no provider connection, account creation, API-key request,
+live search, browser, database, migration, commit, or push was performed.
+
+- Client strategy projection now maps action and alternative source IDs through
+  the same stable opaque `source-N` references used for flight and hotel
+  options. Persisted real source IDs remain server-side.
+- `currentCashOptions` now passes a strict projection before browser return.
+  Invalid, incomplete, URL-bearing, or invalid-time-order exact-cash candidates are
+  dropped; valid candidates are explicitly rebuilt with an opaque `cash-N` ID
+  and no provider/offer/database identity, signature, or raw payload fields.
+- Legacy planning benchmarks clear a matching `recommendedAwardOptionId`, and a
+  legacy `available` status becomes `unknown` before customer rendering.
+- Empty exact-cash UI now truthfully says no provider has been connected or
+  exact-cash search run.
+
+Verified locally: focused projection tests passed; `npm test` passed (631
+tests, 0 failed); `npx tsc --noEmit`, `npm run build`, and `git diff --check`
+passed. The existing Next.js `<img>` warning in
+`components/receipt-upload-panel.tsx` remains. No live browser/database/provider
+flow was verified.
+
+## 2026-08-26 Evidence Separation v1 checkpoint
+
+Implemented locally; no travel-provider account, key, term acceptance, live
+search, browser, database, migration, commit, or push was performed.
+
+- Research-interpreted flight and hotel options now explicitly normalize to
+  `planning_benchmark`; legacy saved and staged options default to that level.
+- Benchmark award options remain usable for deterministic points arithmetic,
+  but model-authored primary award recommendations are cleared and customer UI
+  calls their allocations "points planning scenarios" rather than plans or
+  bookable itineraries.
+- Exact-cash and customer-verified types are prepared with no fabricated data.
+  Exact cash requires server-side provider/offer identity, retrieval/expiry,
+  coverage, and money fields before a client-safe projection can render.
+- The client receives opaque source references rather than source URLs. The
+  cloud research payload now sends opaque source IDs while server validation
+  retains the private source map. Provider/offer IDs never enter the public
+  exact-cash projection or cloud strategy payload.
+- The panel now renders separate Current cash options, Customer-verified
+  options, and points-planning benchmark sections. The first two are empty
+  until a future approved provider/customer-verification implementation.
+
+Verified locally: focused tests passed; `npm test` passed (628 tests, 0
+failed); `npx tsc --noEmit`, `npm run build`, and `git diff --check` passed.
+The existing Next.js `<img>` warning in `components/receipt-upload-panel.tsx`
+remains. No live provider/browser/database behavior was verified.
+
 ## 2026-08-26 Grounded Strategy Brief v1 checkpoint
 
 Implemented locally; no live provider, browser, database, migration, commit, or

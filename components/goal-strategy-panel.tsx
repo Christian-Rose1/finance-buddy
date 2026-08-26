@@ -48,6 +48,8 @@ import type {
   StrategyAwardOption,
   StrategyAllocationScenario,
   StrategyPointsAllocation,
+  PublicExactCashCandidate,
+  CustomerVerifiedTravelOption,
 } from "@/lib/goals/strategyTypes";
 
 // ---------------------------------------------------------------------------
@@ -92,10 +94,10 @@ const PRICING_BASIS_LABELS: Record<string, string> = {
 };
 
 const SCENARIO_KIND_LABELS: Record<string, string> = {
-  balanced: "Balanced plan",
-  flight_first: "Flight-first plan",
-  hotel_first: "Hotel-first plan",
-  fallback: "Fallback plan",
+  balanced: "Balanced points planning scenario",
+  flight_first: "Flight-first points planning scenario",
+  hotel_first: "Hotel-first points planning scenario",
+  fallback: "Fallback points planning scenario",
 };
 
 const SCENARIO_KIND_ORDER: Record<string, number> = {
@@ -223,11 +225,37 @@ function AwardOptionCard({ option }: { option: StrategyAwardOption }) {
           <span>Seats: {option.seats}</span>
         ) : null}
       </p>
-      {option.sourceId ? (
-        <p className="mt-1 break-words text-xs text-slate-500">
-          Sources: {option.sourceId}
+      <p className="mt-1 text-xs text-amber-200/80">
+        Points planning estimate — not a bookable itinerary.
+      </p>
+    </li>
+  );
+}
+
+function CashOptionCard({ option }: { option: PublicExactCashCandidate }) {
+  return (
+    <li className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-medium text-white">{option.sourceLabel}</p>
+        <p className="text-sm font-semibold text-white">
+          {option.price.currency} {option.price.total.toFixed(2)}
         </p>
-      ) : null}
+      </div>
+      <p className="mt-1 text-xs text-slate-400">
+        Retrieved {formatBalanceAsOf(option.retrievedAt)} · expires {formatBalanceAsOf(option.expiresAt)}
+      </p>
+      <p className="mt-1 text-xs text-slate-400">
+        {option.coverage.travelerCount ?? 0} travelers · {option.coverage.roomCount ?? 0} rooms · {option.coverage.nightCount ?? 0} nights
+      </p>
+    </li>
+  );
+}
+
+function CustomerVerifiedCard({ option }: { option: CustomerVerifiedTravelOption }) {
+  return (
+    <li className="rounded-xl border border-sky-400/20 bg-sky-400/5 p-3">
+      <p className="text-sm font-medium text-white">{option.summary}</p>
+      <p className="mt-1 text-xs text-slate-400">Customer confirmed {formatBalanceAsOf(option.confirmedAt)}. Recheck before booking.</p>
     </li>
   );
 }
@@ -834,7 +862,10 @@ export function GoalStrategyPanel({
               <div>
                 <p className="flex items-center gap-2 text-sm font-medium text-slate-200">
                   <ArrowRightLeft className="h-4 w-4 text-sky-300" />
-                  Ways to use your points
+                  Points planning scenarios
+                </p>
+                <p className="mt-1 text-xs text-amber-200/80">
+                  Points requirements are planning estimates, not bookable itineraries or current availability.
                 </p>
 
                 <div className="mt-3 space-y-3">
@@ -1120,11 +1151,35 @@ export function GoalStrategyPanel({
             );
           })()}
 
+          <div>
+            <p className="flex items-center gap-2 text-sm font-medium text-slate-200">
+              <Plane className="h-4 w-4 text-emerald-300" />
+              Current cash options
+            </p>
+            {(strategy.currentCashOptions ?? []).length > 0 ? (
+              <ul className="mt-2 space-y-2">
+                {(strategy.currentCashOptions ?? []).map((option) => <CashOptionCard key={option.id} option={option} />)}
+              </ul>
+            ) : <p className="mt-1 text-xs text-slate-500">Finance Buddy has not yet connected or run an exact-cash search.</p>}
+          </div>
+
+          <div>
+            <p className="flex items-center gap-2 text-sm font-medium text-slate-200">
+              <CheckCircle2 className="h-4 w-4 text-sky-300" />
+              Customer-verified options
+            </p>
+            {(strategy.customerVerifiedOptions ?? []).length > 0 ? (
+              <ul className="mt-2 space-y-2">
+                {(strategy.customerVerifiedOptions ?? []).map((option) => <CustomerVerifiedCard key={option.id} option={option} />)}
+              </ul>
+            ) : <p className="mt-1 text-xs text-slate-500">No customer-verified options are recorded.</p>}
+          </div>
+
           {strategy.flightOptions.length > 0 ? (
             <div>
               <p className="flex items-center gap-2 text-sm font-medium text-slate-200">
                 <Plane className="h-4 w-4 text-sky-300" />
-                Flight options
+                Points planning scenarios / flight research benchmarks
               </p>
               <ul className="mt-2 space-y-2">
                 {strategy.flightOptions.map((option) => (
@@ -1132,9 +1187,7 @@ export function GoalStrategyPanel({
                 ))}
               </ul>
               <p className="mt-2 text-xs leading-relaxed text-slate-500">
-                Flight pricing and availability are planning estimates from web
-                research, not live availability. Unknown availability means it
-                is not confirmed.
+                These points requirements are research planning estimates, not bookable itineraries or current availability.
               </p>
             </div>
           ) : null}
@@ -1143,7 +1196,7 @@ export function GoalStrategyPanel({
             <div>
               <p className="flex items-center gap-2 text-sm font-medium text-slate-200">
                 <Bed className="h-4 w-4 text-sky-300" />
-                Hotel options
+                Points planning scenarios / hotel research benchmarks
               </p>
               <ul className="mt-2 space-y-2">
                 {strategy.hotelOptions.map((option) => (
@@ -1151,9 +1204,7 @@ export function GoalStrategyPanel({
                 ))}
               </ul>
               <p className="mt-2 text-xs leading-relaxed text-slate-500">
-                Hotel pricing and availability are planning estimates from web
-                research, not live availability. Unknown availability means it
-                is not confirmed.
+                These points requirements are research planning estimates, not bookable stays or current availability.
               </p>
             </div>
           ) : null}

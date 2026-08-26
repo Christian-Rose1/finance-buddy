@@ -247,7 +247,7 @@ test("sanitized prompt is sent to Ollama", async () => {
   assert.equal(result.headline, strategy.headline);
 });
 
-test("valid JSON maps successfully while normalizing model pointsGap away", async () => {
+test("valid JSON maps successfully while normalizing model pointsGap and benchmark recommendation away", async () => {
   restoreEnv();
 
   const prompt = makeSanitizedPrompt();
@@ -263,7 +263,7 @@ test("valid JSON maps successfully while normalizing model pointsGap away", asyn
 
   const result = await provider.generateStrategy(prompt);
 
-  assert.deepEqual(result, { ...strategy, pointsGap: null });
+  assert.deepEqual(result, { ...strategy, pointsGap: null, recommendedAwardOptionId: null });
 });
 
 test("malformed JSON is rejected", async () => {
@@ -712,7 +712,7 @@ test("model-supplied fake option arrays cannot enter the returned strategy", asy
   );
 });
 
-test("existing narrative fields remain unchanged except model pointsGap is normalized away", async () => {
+test("existing narrative fields remain unchanged except pointsGap and benchmark recommendation are normalized away", async () => {
   restoreEnv();
 
   const prompt = makeSanitizedPrompt({
@@ -734,7 +734,7 @@ test("existing narrative fields remain unchanged except model pointsGap is norma
   assert.equal(result.summary, "You have enough points today.");
   assert.equal(result.feasibility, "on_track");
   assert.equal(result.pointsGap, null);
-  assert.equal(result.recommendedAwardOptionId, "award-1");
+  assert.equal(result.recommendedAwardOptionId, null);
   assert.equal(result.recommendedCardOfferId, null);
   assert.equal(result.actions.length, 1);
   assert.equal(result.alternatives.length, 1);

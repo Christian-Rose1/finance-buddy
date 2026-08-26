@@ -195,7 +195,7 @@ function buildFlightFirst(
   const base = {
     id: "flight_first",
     kind: "flight_first" as const,
-    title: "Flight First",
+    title: "Flight-first points planning scenario",
     flightOptionId: null as string | null,
     hotelOptionId: null as string | null,
     flightPointsRequired: null as number | null,
@@ -262,7 +262,7 @@ function buildHotelFirst(
   const base = {
     id: "hotel_first",
     kind: "hotel_first" as const,
-    title: "Hotel First",
+    title: "Hotel-first points planning scenario",
     flightOptionId: null as string | null,
     hotelOptionId: null as string | null,
     flightPointsRequired: null as number | null,
@@ -330,7 +330,7 @@ function buildBalanced(
   const base = {
     id: "balanced",
     kind: "balanced" as const,
-    title: "Balanced",
+    title: "Balanced points planning scenario",
     flightOptionId: null as string | null,
     hotelOptionId: null as string | null,
     flightPointsRequired: null as number | null,
@@ -463,7 +463,7 @@ function buildFallback(
   const base = {
     id: "fallback",
     kind: "fallback" as const,
-    title: "Fallback",
+    title: "Fallback points planning scenario",
     flightOptionId: null as string | null,
     hotelOptionId: null as string | null,
     flightPointsRequired: null as number | null,

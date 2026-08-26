@@ -11,6 +11,7 @@
 import { createServerClient } from "@/lib/supabase-server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PersonalizedStrategy, StrategyFeasibility } from "./strategyTypes";
+import { toClientSafeStrategy } from "./travelEvidence";
 
 /** Current persisted strategy schema version. */
 const CURRENT_STRATEGY_SCHEMA_VERSION = 1;
@@ -39,7 +40,9 @@ function toSavedGoalStrategy(row: Record<string, unknown>): SavedGoalStrategy {
   return {
     goalId: row.goal_id as string,
     userId: row.user_id as string,
-    strategy: row.strategy_json as PersonalizedStrategy,
+    // Legacy saved options lack evidenceLevel. Client projection defaults
+    // them to planning benchmarks and strips source URLs.
+    strategy: toClientSafeStrategy(row.strategy_json as PersonalizedStrategy),
     schemaVersion: row.schema_version as 1,
     generatedAt: row.generated_at as string,
     createdAt: row.created_at as string,

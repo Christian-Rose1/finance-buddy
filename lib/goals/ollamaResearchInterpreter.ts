@@ -35,6 +35,8 @@ interface ValidationContext {
   goal: Goal;
   rewardPrograms: ResearchRewardProgram[];
   sourceMap: Map<string, SourceEntry>;
+  /** Opaque source references exposed to cloud interpreters, mapped server-side. */
+  publicSourceMap: Map<string, string>;
   model: string;
   focus: ResearchFocus;
 }
@@ -378,6 +380,7 @@ export function buildResearchSystemPrompt(focus: ResearchFocus): string {
 }
 
 export function buildPublicResearchPayload(input: InterpretResearchInput): string {
+  let sourceIndex = 0;
   return JSON.stringify({
     focus: input.focus,
     // The interpreter needs only public program names. Internal catalog IDs
@@ -393,7 +396,22 @@ export function buildPublicResearchPayload(input: InterpretResearchInput): strin
       travelerCount: input.goal.travelerCount,
       cabinPreference: input.goal.cabinPreference,
     },
-    research: input.research,
+    // URLs are source identity for server-side validation, not model-visible
+    // research content. The interpreter receives stable opaque references.
+    research: input.research.map((response) => ({
+      query: response.query,
+      searchedAt: response.searchedAt,
+      results: response.results.map((result) => {
+        sourceIndex += 1;
+        return {
+          id: `source-${sourceIndex}`,
+          label: result.title,
+          content: result.content,
+          publishedDate: result.publishedDate,
+          sourceTier: result.sourceTier,
+        };
+      }),
+    })),
   });
 }
 
@@ -439,12 +457,19 @@ function resolveCanonicalSourceId(
 ): string {
   const trimmed = rawSourceId.trim();
 
-  // a. Exact canonical source ID match.
+  // a. Opaque source reference supplied to a cloud interpreter.
+  const privateSourceId = ctx.publicSourceMap.get(trimmed);
+  if (privateSourceId) {
+    return privateSourceId;
+  }
+
+  // b. Exact canonical source ID match (used only by server-side tests and
+  // local interpreters; URLs are never present in cloud-bound payloads).
   if (ctx.sourceMap.has(trimmed)) {
     return trimmed;
   }
 
-  // b. Exact title match resolving to exactly one distinct canonical source ID.
+  // c. Exact title match resolving to exactly one distinct canonical source ID.
   const titleMatches = Array.from(ctx.sourceMap.values()).filter(
     (entry) => entry.result.title.trim() === trimmed
   );
@@ -1194,6 +1219,9 @@ function validateAwardOption(
     transferRatio,
     centsPerPoint,
     availabilityStatus: availabilityStatusRaw,
+    // Tavily/web interpretation is planning evidence only. It can never
+    // promote itself to provider inventory or customer verification.
+    evidenceLevel: "planning_benchmark",
     travelerCountCovered: coverage.travelerCountCovered,
     nightCountCovered: coverage.nightCountCovered,
     coverageStatus: coverage.coverageStatus,
@@ -1488,6 +1516,10 @@ export function validateResearchModelContent(
 ): InterpretedResearch {
   const entries = buildSources(input.research);
   const sourceMap = new Map(entries.map((e) => [e.source.id, e]));
+  const publicSourceMap = new Map(entries.map((entry, index) => [
+    `source-${index + 1}`,
+    entry.source.id,
+  ]));
 
   const parsed = parseModelResponse(rawContent, model);
 
@@ -1495,6 +1527,7 @@ export function validateResearchModelContent(
     goal: input.goal,
     rewardPrograms: input.rewardPrograms,
     sourceMap,
+    publicSourceMap,
     model,
     focus: input.focus,
   };

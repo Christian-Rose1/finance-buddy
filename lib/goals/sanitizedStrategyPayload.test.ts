@@ -375,11 +375,15 @@ test("wallet cards preserve name, issuer, rewardCurrency but not id or cardProdu
 });
 
 test("model payload uses opaque references while server reference map retains validated facts", () => {
-  const context = makeContext();
+  const baseContext = makeContext();
+  const context = makeContext({
+    awardOptions: [{ ...baseContext.awardOptions[0], id: "award-server-record-42" }],
+  });
   const result = buildSanitizedStrategyPayload(context, catalogRewardPrograms);
 
   assert.deepEqual(result.monthlySpendingByCategory, context.monthlySpendingByCategory);
   assert.equal(result.awardOptions[0]?.id, "award-1");
+  assert.notEqual(result.awardOptions[0]?.id, context.awardOptions[0]?.id);
   assert.equal(result.cardOffers[0]?.id, "card-1");
   assert.equal(result.sources[0]?.id, "source-1");
   assert.deepEqual(result.referenceMap.awardOptions, context.awardOptions);

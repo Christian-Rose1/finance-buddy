@@ -15,6 +15,7 @@ import type {
   StrategySource,
   PersonalizedStrategyNarrative,
 } from "./strategyTypes";
+import { evidenceLevelOf } from "./travelEvidence";
 import { FOLLOW_UP_DECISION_TOPICS } from "./strategyTypes";
 
 // ---------------------------------------------------------------------------
@@ -656,6 +657,18 @@ export function validateStrategyOutput(
   // the model cannot invent an option, remove a validated option, or alter
   // its price, source, program, type, or pricing basis.
   const serverAwardOptions = context.referenceMap?.awardOptions ?? context.awardOptions;
+  // A research benchmark can inform points planning, but it cannot be the
+  // model's primary exact-trip recommendation.
+  if (
+    recommendedAwardOptionId !== null &&
+    evidenceLevelOf(
+      serverAwardOptions.find((option) => option.id === recommendedAwardOptionId) ?? {
+        evidenceLevel: "planning_benchmark",
+      }
+    ) === "planning_benchmark"
+  ) {
+    recommendedAwardOptionId = null;
+  }
   const flightOptions = deduplicateByOptionId(
     serverAwardOptions.filter((option) => option.redemptionType === "flight")
   );

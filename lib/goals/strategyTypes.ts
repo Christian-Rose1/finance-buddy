@@ -39,6 +39,8 @@ export interface StrategyAwardOption {
   transferRatio: number | null;
   centsPerPoint: number | null;
   availabilityStatus: "available" | "unavailable" | "unknown";
+  /** Missing on legacy saved strategies; always defaults to planning_benchmark. */
+  evidenceLevel?: TravelEvidenceLevel;
   travelerCountCovered?: number | null;
   nightCountCovered?: number | null;
   coverageStatus?:
@@ -58,6 +60,52 @@ export interface StrategyAwardOption {
     | "cabin"
     | "property"
   >;
+}
+
+export type TravelEvidenceLevel =
+  | "exact_cash_offer"
+  | "customer_verified"
+  | "planning_benchmark";
+
+/** Server-only identity for a provider quote. Never put this shape in a client payload. */
+export interface ExactCashCandidate {
+  id: string;
+  kind: "flight" | "hotel";
+  evidenceLevel: "exact_cash_offer";
+  providerIdentity: string;
+  offerIdentity: string;
+  retrievedAt: string;
+  expiresAt: string;
+  search: {
+    origin: string[] | null;
+    destinations: string[];
+    departureDate: string | null;
+    returnDate: string | null;
+    travelerCount: number | null;
+    roomCount: number | null;
+    nightCount: number | null;
+  };
+  coverage: { travelerCount: number | null; roomCount: number | null; nightCount: number | null };
+  price: { currency: string; total: number; base: number | null; taxes: number | null; mandatoryFees: number | null };
+  cancellationTerms: string | null;
+  baggageTerms: string | null;
+  paymentTiming: string | null;
+  unknownFields: string[];
+}
+
+/** Client-safe projection: provider and offer identifiers remain server-side. */
+export type PublicExactCashCandidate = Omit<
+  ExactCashCandidate,
+  "providerIdentity" | "offerIdentity"
+> & { sourceLabel: string };
+
+export interface CustomerVerifiedTravelOption {
+  id: string;
+  evidenceLevel: "customer_verified";
+  kind: "flight" | "hotel";
+  confirmedAt: string;
+  summary: string;
+  unknownFields: string[];
 }
 
 export interface StrategyCardOffer {
@@ -169,6 +217,9 @@ export interface PersonalizedStrategy {
   followUpQuestions: string[];
   pointsInventory: StrategyPointsInventoryItem[];
   allocationScenarios: StrategyAllocationScenario[];
+  /** Empty until a future server-side provider adapter returns validated cash evidence. */
+  currentCashOptions?: PublicExactCashCandidate[];
+  customerVerifiedOptions?: CustomerVerifiedTravelOption[];
 }
 
 /**

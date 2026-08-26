@@ -124,6 +124,7 @@ describe("buildStrategyAllocationScenarios", () => {
     assert.equal(scenarios[1].kind, "hotel_first");
     assert.equal(scenarios[2].kind, "balanced");
     assert.equal(scenarios[3].kind, "fallback");
+    assert.match(scenarios[0].title, /points planning scenario/i);
   });
 
   it("2-traveler 30k round-trip flight requires 60k", () => {

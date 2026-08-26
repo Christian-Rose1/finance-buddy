@@ -184,6 +184,7 @@ const AWARD_OPTION_REQUIRED_KEYS = new Set([
 ]);
 
 const AWARD_OPTION_OPTIONAL_KEYS = new Set([
+  "evidenceLevel",
   "travelerCountCovered",
   "nightCountCovered",
   "coverageStatus",
@@ -230,6 +231,9 @@ function validateAwardOption(
   const transferRatio = validateNullOrNonNegativeFinite(raw.transferRatio);
   const centsPerPoint = validateNullOrNonNegativeFinite(raw.centsPerPoint);
   const availabilityStatus = validateStringEnum(raw.availabilityStatus, AVAILABILITY_STATUSES);
+  if ("evidenceLevel" in raw && raw.evidenceLevel !== "planning_benchmark") {
+    safeThrow();
+  }
 
   // Redemption type must match expected stage
   if (redemptionType !== expectedRedemptionType) {
@@ -402,6 +406,9 @@ function validateAwardOption(
     transferRatio,
     centsPerPoint,
     availabilityStatus,
+    // Signed research stages are created only from web research. Preserve
+    // backwards compatibility while making their evidence status explicit.
+    evidenceLevel: "planning_benchmark",
     travelerCountCovered: travelerCountCovered as number | null | undefined,
     nightCountCovered: nightCountCovered as number | null | undefined,
     coverageStatus: coverageStatus as
