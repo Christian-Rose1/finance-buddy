@@ -31,7 +31,6 @@ function makeInput(overrides: Partial<ResearchPlannerInput> = {}): ResearchPlann
     },
     rewardAccounts: [
       {
-        rewardProgramId: "prog-1",
         programName: "Chase Ultimate Rewards",
         balance: 80000,
         ownerType: "self",

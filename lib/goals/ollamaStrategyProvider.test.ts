@@ -288,7 +288,7 @@ test("malformed JSON is rejected", async () => {
   );
 });
 
-test("invented award option ID is rejected", async () => {
+test("invented award option ID is cleared with a warning (not rejected)", async () => {
   restoreEnv();
 
   const prompt = makeSanitizedPrompt();
@@ -304,21 +304,9 @@ test("invented award option ID is rejected", async () => {
     "test-model"
   );
 
-  await assert.rejects(
-    () => provider.generateStrategy(prompt),
-    (error: unknown) => {
-      assert.ok(error instanceof StrategyProviderError);
-      assert.match(
-        (error as Error).message,
-        /fabricated-award-id/
-      );
-      assert.match(
-        (error as Error).message,
-        /not present in context\.awardOptions/
-      );
-      return true;
-    }
-  );
+  const result = await provider.generateStrategy(prompt);
+  assert.equal(result.recommendedAwardOptionId, null);
+  assert.ok(result.warnings.some((w) => /fabricated-award-id/.test(w)));
 });
 
 test("invented card offer ID is cleared with a warning (not rejected)", async () => {
@@ -365,7 +353,7 @@ test("unknown source ID is rejected", async () => {
       assert.match((error as Error).message, /nonexistent-source/);
       assert.match(
         (error as Error).message,
-        /not present in context\\.sources/
+        /not present in context\.sources/
       );
       return true;
     }

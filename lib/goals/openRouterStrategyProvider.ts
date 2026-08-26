@@ -22,9 +22,10 @@ import {
 } from "./strategyProviderCore";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
-const MAX_RATE_LIMIT_ATTEMPTS = 2;
+const MAX_TOTAL_ATTEMPTS = 2;
 const DEFAULT_RATE_LIMIT_RETRY_DELAY_MS = 1_000;
 const MAX_RATE_LIMIT_RETRY_DELAY_MS = 5_000;
+const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 function retryAfterDelayMs(retryAfter: string | null): number | null {
   if (!retryAfter) {
@@ -102,13 +103,32 @@ export class OpenRouterStrategyProvider implements StrategyProvider {
   async generateStrategy(
     prompt: SanitizedStrategyPrompt
   ): Promise<PersonalizedStrategyNarrative> {
-    let response: Response | null = null;
-    for (let attempt = 1; attempt <= MAX_RATE_LIMIT_ATTEMPTS; attempt += 1) {
+    // Serialize once so every bounded retry sends exactly the same sanitized
+    // request. The full personalized context is never accepted here.
+    const requestBody = JSON.stringify({
+      model: this.model,
+      messages: [
+        {
+          role: "system",
+          content: STRATEGY_PROMPT,
+        },
+        {
+          role: "user",
+          content: JSON.stringify(prompt),
+        },
+      ],
+      temperature: 0,
+      max_tokens: 8192,
+    });
+
+    for (let attempt = 1; attempt <= MAX_TOTAL_ATTEMPTS; attempt += 1) {
       const controller = new AbortController();
       const timeoutId = setTimeout(
         () => controller.abort(),
         DEFAULT_TIMEOUT_MS
       );
+      let response: Response | null = null;
+      let networkFailure = false;
 
       try {
         response = await fetch(
@@ -120,24 +140,10 @@ export class OpenRouterStrategyProvider implements StrategyProvider {
               Authorization: `Bearer ${this.apiKey}`,
             },
             signal: controller.signal,
-            body: JSON.stringify({
-              model: this.model,
-              messages: [
-                {
-                  role: "system",
-                  content: STRATEGY_PROMPT,
-                },
-                {
-                  role: "user",
-                  content: JSON.stringify(prompt),
-                },
-              ],
-              temperature: 0,
-              max_tokens: 8192,
-            }),
+            body: requestBody,
           }
         );
-      } catch (error) {
+      } catch {
         if (controller.signal.aborted) {
           throw new StrategyProviderError(
             `OpenRouter strategy request timed out after ${DEFAULT_TIMEOUT_MS}ms.`,
@@ -146,122 +152,123 @@ export class OpenRouterStrategyProvider implements StrategyProvider {
           );
         }
 
-        throw new StrategyProviderError(
-          `Failed to reach OpenRouter. ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          "openrouter",
-          this.model
-        );
+        networkFailure = true;
       } finally {
         clearTimeout(timeoutId);
       }
 
-      if (response.status !== 429 || attempt === MAX_RATE_LIMIT_ATTEMPTS) {
-        break;
-      }
+      if (networkFailure) {
+        if (attempt < MAX_TOTAL_ATTEMPTS) {
+          await waitForRetry(DEFAULT_RATE_LIMIT_RETRY_DELAY_MS);
+          continue;
+        }
 
-      const delayMs = retryAfterDelayMs(response.headers.get("Retry-After"));
-      if (delayMs === null) {
-        break;
-      }
-
-      await waitForRetry(delayMs);
-    }
-
-    if (!response) {
-      throw new StrategyProviderError(
-        "OpenRouter strategy request did not return a response.",
-        "openrouter",
-        this.model
-      );
-    }
-
-    if (!response.ok) {
-      throw new StrategyProviderError(
-        `OpenRouter returned HTTP ${response.status}.`,
-        "openrouter",
-        this.model,
-        response.status
-      );
-    }
-
-    let payload: {
-      choices?: Array<{
-        message?: {
-          content?: unknown;
-        };
-        finish_reason?: unknown;
-      }>;
-    };
-
-    let rawBody = "";
-
-    try {
-      rawBody = await response.text();
-      payload = JSON.parse(rawBody);
-    } catch {
-      if (process.env.STRATEGY_DEBUG === "1") {
-        console.log(
-          "[strategy-raw-response-error]",
-          JSON.stringify({
-            provider: "openrouter",
-            model: this.model,
-            status: response.status,
-            rawBody,
-          })
+        throw new StrategyProviderError(
+          "Failed to reach OpenRouter.",
+          "openrouter",
+          this.model
         );
       }
 
-      throw new StrategyProviderError(
-        "OpenRouter returned a non-JSON response.",
-        "openrouter",
-        this.model,
-        response.status
-      );
+      if (!response) {
+        throw new StrategyProviderError(
+          "OpenRouter strategy request did not return a response.",
+          "openrouter",
+          this.model
+        );
+      }
+
+      if (!response.ok) {
+        if (
+          RETRYABLE_HTTP_STATUSES.has(response.status) &&
+          attempt < MAX_TOTAL_ATTEMPTS
+        ) {
+          const delayMs = retryAfterDelayMs(
+            response.headers.get("Retry-After")
+          );
+          if (delayMs !== null) {
+            await waitForRetry(delayMs);
+            continue;
+          }
+        }
+
+        throw new StrategyProviderError(
+          `OpenRouter returned HTTP ${response.status}.`,
+          "openrouter",
+          this.model,
+          response.status
+        );
+      }
+
+      let parsed: unknown;
+      try {
+        const rawBody = await response.text();
+        const payload: {
+          choices?: Array<{
+            message?: { content?: unknown };
+          }>;
+        } = JSON.parse(rawBody);
+        const rawText =
+          typeof payload.choices?.[0]?.message?.content === "string"
+            ? payload.choices[0].message.content.trim()
+            : "";
+
+        if (!rawText) {
+          throw new StrategyProviderError(
+            "OpenRouter response was missing the model text output.",
+            "openrouter",
+            this.model,
+            response.status
+          );
+        }
+
+        parsed = parseModelResponse(rawText, "openrouter", this.model);
+      } catch {
+        const outputError = new StrategyProviderError(
+          "OpenRouter returned an invalid model response.",
+          "openrouter",
+          this.model,
+          response.status
+        );
+
+        // A malformed model response is transient on free-model infrastructure.
+        // Retry once, without logging the response body or model output.
+        if (attempt < MAX_TOTAL_ATTEMPTS) {
+          await waitForRetry(DEFAULT_RATE_LIMIT_RETRY_DELAY_MS);
+          continue;
+        }
+
+        throw outputError;
+      }
+
+      const validationContext: StrategyValidationContext = {
+        awardOptions: prompt.awardOptions,
+        cardOffers: prompt.cardOffers,
+        sources: prompt.sources,
+        goal: { allowNewCards: prompt.goal.allowNewCards },
+      };
+
+      // Shared validation failures are not transport/provider transients.
+      // Do not retry a completed response that violates the strategy contract.
+      try {
+        return validateStrategyOutput(
+          parsed,
+          validationContext,
+          "openrouter",
+          this.model
+        );
+      } catch {
+        throw new StrategyProviderError(
+          "OpenRouter returned an invalid strategy output.",
+          "openrouter",
+          this.model,
+          response.status
+        );
+      }
     }
 
-    if (process.env.STRATEGY_DEBUG === "1") {
-      console.log(
-        "[strategy-raw-response]",
-        JSON.stringify({
-          provider: "openrouter",
-          model: this.model,
-          status: response.status,
-          finishReason: payload.choices?.[0]?.finish_reason,
-          body: payload,
-        })
-      );
-    }
-
-    const rawText =
-      typeof payload.choices?.[0]?.message?.content === "string"
-        ? payload.choices[0].message.content.trim()
-        : "";
-
-    if (!rawText) {
-      throw new StrategyProviderError(
-        "OpenRouter response was missing the model text output.",
-        "openrouter",
-        this.model,
-        response.status
-      );
-    }
-
-    const parsed = parseModelResponse(rawText, "openrouter", this.model);
-
-    // Build a validation context from the sanitized prompt (which already
-    // contains awardOptions, cardOffers, sources, and goal.allowNewCards).
-    const validationContext: StrategyValidationContext = {
-      awardOptions: prompt.awardOptions,
-      cardOffers: prompt.cardOffers,
-      sources: prompt.sources,
-      goal: { allowNewCards: prompt.goal.allowNewCards },
-    };
-
-    return validateStrategyOutput(
-      parsed,
-      validationContext,
+    throw new StrategyProviderError(
+      "OpenRouter strategy request did not return a response.",
       "openrouter",
       this.model
     );

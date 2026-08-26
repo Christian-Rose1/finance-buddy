@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { OpenRouterStrategyProvider } from "./openRouterStrategyProvider";
+import {
+  OpenRouterStrategyProvider,
+  StrategyProviderError,
+} from "./openRouterStrategyProvider";
 import type { SanitizedStrategyPrompt } from "./strategyTypes";
+
+const REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_RETRY_DELAY_MS = 1_000;
 
 const prompt: SanitizedStrategyPrompt = {
   goal: {
@@ -44,26 +50,336 @@ const validNarrative = {
   followUpQuestions: ["Which dates work best for your trip?"],
 };
 
-test("retries one OpenRouter 429 using a bounded Retry-After delay", async () => {
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
+function validResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(validNarrative) } }],
+    }),
+    { status: 200 }
+  );
+}
 
-  globalThis.fetch = (async () => {
-    calls += 1;
-    if (calls === 1) {
+function installMockedRuntime(
+  fetchImplementation: typeof fetch,
+  options: { abortRequestTimeout?: boolean } = {}
+) {
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const delays: number[] = [];
+  const callbacks = new Map<number, () => void>();
+  let nextTimerId = 1;
+
+  globalThis.fetch = fetchImplementation;
+  globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+    const timerId = nextTimerId;
+    nextTimerId += 1;
+    const delayMs = Number(delay ?? 0);
+    delays.push(delayMs);
+    callbacks.set(timerId, callback);
+
+    if (delayMs !== REQUEST_TIMEOUT_MS || options.abortRequestTimeout) {
+      queueMicrotask(() => {
+        const scheduledCallback = callbacks.get(timerId);
+        if (!scheduledCallback) {
+          return;
+        }
+
+        callbacks.delete(timerId);
+        scheduledCallback();
+      });
+    }
+
+    return timerId as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timerId: ReturnType<typeof setTimeout>) => {
+    callbacks.delete(Number(timerId));
+  }) as typeof clearTimeout;
+
+  return {
+    delays,
+    restore() {
+      globalThis.fetch = originalFetch;
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    },
+  };
+}
+
+test("retries HTTP 429 and preserves the exact sanitized request payload", async () => {
+  let calls = 0;
+  const requestBodies: string[] = [];
+  const runtime = installMockedRuntime(
+    (async (_input, init) => {
+      calls += 1;
+      requestBodies.push(String(init?.body));
+      if (calls === 1) {
+        return new Response(null, {
+          status: 429,
+          headers: { "Retry-After": "0" },
+        });
+      }
+
+      return validResponse();
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    const result = await provider.generateStrategy(prompt);
+
+    assert.equal(calls, 2);
+    assert.equal(result.headline, validNarrative.headline);
+    assert.deepEqual(requestBodies, [requestBodies[0], requestBodies[0]]);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("stops after the bounded number of HTTP 429 attempts", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
       return new Response(null, {
         status: 429,
         headers: { "Retry-After": "0" },
       });
-    }
+    }) as typeof fetch
+  );
 
-    return new Response(
-      JSON.stringify({
-        choices: [{ message: { content: JSON.stringify(validNarrative) } }],
-      }),
-      { status: 200 }
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+
+    await assert.rejects(
+      () => provider.generateStrategy(prompt),
+      /OpenRouter returned HTTP 429/
     );
-  }) as typeof fetch;
+    assert.equal(calls, 2);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("honors a valid Retry-After delay before retrying", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(null, {
+          status: 429,
+          headers: { "Retry-After": "2" },
+        });
+      }
+
+      return validResponse();
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    await provider.generateStrategy(prompt);
+
+    assert.equal(calls, 2);
+    assert.ok(runtime.delays.includes(2_000));
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("honors a valid HTTP-date Retry-After delay before retrying", async () => {
+  const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+  const originalDateNow = Date.now;
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(null, {
+          status: 429,
+          headers: {
+            "Retry-After": new Date(now + 2_000).toUTCString(),
+          },
+        });
+      }
+
+      return validResponse();
+    }) as typeof fetch
+  );
+
+  Date.now = () => now;
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    await provider.generateStrategy(prompt);
+
+    assert.equal(calls, 2);
+    assert.ok(runtime.delays.includes(2_000));
+  } finally {
+    Date.now = originalDateNow;
+    runtime.restore();
+  }
+});
+
+test("uses the bounded fallback delay for a malformed Retry-After value", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(null, {
+          status: 429,
+          headers: { "Retry-After": "not-a-delay" },
+        });
+      }
+
+      return validResponse();
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    await provider.generateStrategy(prompt);
+
+    assert.equal(calls, 2);
+    assert.ok(runtime.delays.includes(DEFAULT_RETRY_DELAY_MS));
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("does not retry when Retry-After exceeds the bounded delay cap", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      return new Response(null, {
+        status: 429,
+        headers: { "Retry-After": "60" },
+      });
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+
+    await assert.rejects(
+      () => provider.generateStrategy(prompt),
+      /OpenRouter returned HTTP 429/
+    );
+    assert.equal(calls, 1);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("retries a transient HTTP 503 response", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      return calls === 1 ? new Response(null, { status: 503 }) : validResponse();
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    const result = await provider.generateStrategy(prompt);
+
+    assert.equal(calls, 2);
+    assert.equal(result.headline, validNarrative.headline);
+    assert.ok(runtime.delays.includes(DEFAULT_RETRY_DELAY_MS));
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("does not retry permanent HTTP 4xx responses", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      return new Response(null, { status: 401 });
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+
+    await assert.rejects(
+      () => provider.generateStrategy(prompt),
+      /OpenRouter returned HTTP 401/
+    );
+    assert.equal(calls, 1);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("retries a network failure without exposing its cause", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("network details must not escape");
+      }
+
+      return validResponse();
+    }) as typeof fetch
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    const result = await provider.generateStrategy(prompt);
+
+    assert.equal(calls, 2);
+    assert.equal(result.headline, validNarrative.headline);
+    assert.ok(runtime.delays.includes(DEFAULT_RETRY_DELAY_MS));
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("preserves the abort timeout and does not retry an aborted request", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    ((_, init) => {
+      calls += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new Error("timeout cause must not escape"));
+        });
+      });
+    }) as typeof fetch,
+    { abortRequestTimeout: true }
+  );
+
+  try {
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+
+    await assert.rejects(
+      () => provider.generateStrategy(prompt),
+      /timed out after 120000ms/
+    );
+    assert.equal(calls, 1);
+  } finally {
+    runtime.restore();
+  }
+});
+
+test("retries malformed model JSON but not shared strategy-output validation", async () => {
+  let calls = 0;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      const content = calls === 1 ? "not valid JSON" : JSON.stringify(validNarrative);
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content } }] }),
+        { status: 200 }
+      );
+    }) as typeof fetch
+  );
 
   try {
     const provider = new OpenRouterStrategyProvider("test-key", "test-model");
@@ -72,31 +388,36 @@ test("retries one OpenRouter 429 using a bounded Retry-After delay", async () =>
     assert.equal(calls, 2);
     assert.equal(result.headline, validNarrative.headline);
   } finally {
-    globalThis.fetch = originalFetch;
+    runtime.restore();
   }
 });
 
-test("does not retry when Retry-After exceeds the retry cap", async () => {
-  const originalFetch = globalThis.fetch;
+test("does not retry a shared strategy-output validation failure", async () => {
   let calls = 0;
-
-  globalThis.fetch = (async () => {
-    calls += 1;
-    return new Response(null, {
-      status: 429,
-      headers: { "Retry-After": "60" },
-    });
-  }) as typeof fetch;
+  const runtime = installMockedRuntime(
+    (async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "{}" } }] }),
+        { status: 200 }
+      );
+    }) as typeof fetch
+  );
 
   try {
     const provider = new OpenRouterStrategyProvider("test-key", "test-model");
 
     await assert.rejects(
       () => provider.generateStrategy(prompt),
-      /OpenRouter returned HTTP 429/,
+      (error: unknown) => {
+        assert.ok(error instanceof StrategyProviderError);
+        assert.equal(error.message, "OpenRouter returned an invalid strategy output.");
+        assert.equal(error.details, undefined);
+        return true;
+      }
     );
     assert.equal(calls, 1);
   } finally {
-    globalThis.fetch = originalFetch;
+    runtime.restore();
   }
 });

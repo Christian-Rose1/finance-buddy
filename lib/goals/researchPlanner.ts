@@ -158,13 +158,6 @@ export class OpenRouterResearchPlanner implements ResearchPlanner {
       );
     }
 
-    if (process.env.STRATEGY_DEBUG === "1") {
-      console.info(
-        "[strategy-research-planner-raw]",
-        JSON.stringify({ model: this.model, content })
-      );
-    }
-
     let parsed: unknown;
     try {
       parsed = JSON.parse(extractJsonBlock(content));

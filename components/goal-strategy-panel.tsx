@@ -282,6 +282,7 @@ export function GoalStrategyPanel({
   const [hotelMessage, setHotelMessage] = useState<string | null>(null);
 
   const [finalStatus, setFinalStatus] = useState<ClientStageStatus>("idle");
+  const [canRetryFinalization, setCanRetryFinalization] = useState(false);
 
   // --- result state ---
   const [error, setError] = useState<string | null>(null);
@@ -290,6 +291,17 @@ export function GoalStrategyPanel({
   const [strategy, setStrategy] = useState<PersonalizedStrategy | null>(
     initialStrategy ?? null
   );
+
+  function clearCompletedRun() {
+    setRunId(null);
+    setFlightStatus("idle");
+    setFlightOptions([]);
+    setFlightMessage(null);
+    setHotelStatus("idle");
+    setHotelOptions([]);
+    setHotelMessage(null);
+    setCanRetryFinalization(false);
+  }
 
   // ------------------------------------------------------------------
   // Generate: staged flight → hotel → final
@@ -314,6 +326,7 @@ export function GoalStrategyPanel({
     setHotelOptions([]);
     setHotelMessage(null);
     setFinalStatus("idle");
+    setCanRetryFinalization(false);
 
     // Track the current stage locally so the catch block can mark the
     // correct stage as failed even though React state is batched.
@@ -383,13 +396,14 @@ export function GoalStrategyPanel({
         setIsSaved(finalResult.saved);
         setSaveMessage(finalResult.saveMessage);
         setFinalStatus("succeeded");
-        // Clear transient flight/hotel previews after the complete
-        // strategy is installed.
-        setFlightOptions([]);
-        setHotelOptions([]);
+        clearCompletedRun();
       } else {
         setFinalStatus("failed");
         setError(finalResult.message);
+        setCanRetryFinalization(finalResult.retryable !== false);
+        if (finalResult.retryable === false) {
+          setRunId(null);
+        }
         // Preserve previous saved strategy and successfully returned
         // flight/hotel previews.
       }
@@ -417,6 +431,7 @@ export function GoalStrategyPanel({
       } else {
         setFinalStatus("failed");
         setError(genericMessage);
+        setCanRetryFinalization(true);
       }
     } finally {
       setIsGenerating(false);
@@ -429,7 +444,7 @@ export function GoalStrategyPanel({
    * after their signatures and ownership have been verified.
    */
   async function handleFinalizeRetry() {
-    if (isGenerating || !runId) return;
+    if (isGenerating || !runId || !canRetryFinalization) return;
 
     setIsGenerating(true);
     setError(null);
@@ -445,11 +460,14 @@ export function GoalStrategyPanel({
         setIsSaved(finalResult.saved);
         setSaveMessage(finalResult.saveMessage);
         setFinalStatus("succeeded");
-        setFlightOptions([]);
-        setHotelOptions([]);
+        clearCompletedRun();
       } else {
         setFinalStatus("failed");
         setError(finalResult.message);
+        setCanRetryFinalization(finalResult.retryable !== false);
+        if (finalResult.retryable === false) {
+          setRunId(null);
+        }
       }
     } catch (err) {
       if (process.env.NODE_ENV === "development") {
@@ -463,6 +481,7 @@ export function GoalStrategyPanel({
 
       setFinalStatus("failed");
       setError("We couldn't build your strategy right now. Please try again in a moment.");
+      setCanRetryFinalization(true);
     } finally {
       setIsGenerating(false);
     }
@@ -658,22 +677,22 @@ export function GoalStrategyPanel({
       {error ? (
         <div className="mt-4 rounded-xl border border-rose-400/20 bg-rose-400/10 p-3">
           <p className="text-sm font-medium text-rose-200">
-            Strategy couldn't be built
+            Strategy couldn&apos;t be built
           </p>
           <p className="mt-1 text-sm text-rose-100/80">{error}</p>
           <button
             type="button"
             onClick={
-              finalStatus === "failed" && runId
+              finalStatus === "failed" && runId && canRetryFinalization
                 ? handleFinalizeRetry
                 : handleGenerate
             }
             disabled={isGenerating}
             className="mt-3 inline-flex items-center gap-2 rounded-lg border border-rose-400/30 px-3 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-400/10 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {finalStatus === "failed" && runId
-              ? "Try finalizing again"
-              : "Try again"}
+            {finalStatus === "failed" && runId && canRetryFinalization
+              ? "Try finishing again"
+              : "Rebuild my strategy"}
           </button>
         </div>
       ) : null}

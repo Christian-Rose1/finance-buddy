@@ -63,8 +63,6 @@ async function resolveResearchPlan(
         "[strategy-research-plan]",
         JSON.stringify({
           queryCount: plan.queries.length,
-          categories: plan.queries.map((q) => q.category),
-          reasoning: plan.reasoning,
         })
       );
     }
@@ -72,12 +70,7 @@ async function resolveResearchPlan(
     return plan;
   } catch (err) {
     if (process.env.STRATEGY_DEBUG === "1") {
-      console.log(
-        "[strategy-research-plan-fallback]",
-        JSON.stringify({
-          error: err instanceof Error ? err.message : String(err),
-        })
-      );
+      console.log("[strategy-research-plan-fallback]");
     }
 
     // Fallback: deterministic template plan. Import lazily to avoid a
@@ -159,9 +152,7 @@ export async function generateAutomatedStrategy(
       console.log(
         "[strategy-hotel-tavily-response]",
         JSON.stringify({
-          query: hotelPlanQueries[i].query,
           resultCount: hotelResearchResponses[i]?.results?.length ?? 0,
-          results: hotelResearchResponses[i]?.results ?? [],
         })
       );
     }
@@ -185,7 +176,6 @@ export async function generateAutomatedStrategy(
   // 3a. Flight interpretation (best-effort)
   let flightInterpreted: Awaited<ReturnType<typeof interpreter.interpret>> | null = null;
   let flightRejected = false;
-  let flightRejectionError: string | null = null;
   try {
     flightInterpreted = await interpreter.interpret({
       goal,
@@ -196,7 +186,6 @@ export async function generateAutomatedStrategy(
   } catch (err) {
     if (err instanceof ResearchInterpreterError) {
       flightRejected = true;
-      flightRejectionError = err.message;
     } else {
       throw err;
     }
@@ -207,7 +196,6 @@ export async function generateAutomatedStrategy(
       "[strategy-flight-interpreter-result]",
       JSON.stringify({
         rejected: flightRejected,
-        rejectionError: flightRejectionError,
         optionCount: flightInterpreted
           ? flightInterpreted.awardOptions.length
           : 0,
@@ -221,7 +209,6 @@ export async function generateAutomatedStrategy(
   // 3b. Hotel interpretation (best-effort)
   let hotelInterpreted: Awaited<ReturnType<typeof interpreter.interpret>> | null = null;
   let hotelRejected = false;
-  let hotelRejectionError: string | null = null;
   try {
     hotelInterpreted = await interpreter.interpret({
       goal,
@@ -231,14 +218,7 @@ export async function generateAutomatedStrategy(
     });
   } catch (err) {
     if (err instanceof ResearchInterpreterError) {
-      if (process.env.STRATEGY_DEBUG === "1") {
-        console.log(
-          "[strategy-hotel-validation-error]",
-          JSON.stringify({ error: err.message })
-        );
-      }
       hotelRejected = true;
-      hotelRejectionError = err.message;
     } else {
       throw err;
     }
@@ -249,13 +229,9 @@ export async function generateAutomatedStrategy(
       "[strategy-hotel-interpreter-result]",
       JSON.stringify({
         rejected: hotelRejected,
-        rejectionError: hotelRejectionError,
         optionCount: hotelInterpreted
           ? hotelInterpreted.awardOptions.length
           : 0,
-        optionIds: hotelInterpreted
-          ? hotelInterpreted.awardOptions.map((o) => o.id)
-          : [],
         warningCount: hotelInterpreted
           ? hotelInterpreted.warnings.length
           : 0,
@@ -505,7 +481,6 @@ export async function generateHotelResearchStage(
   // Use the research plan when available; fall back to template queries on
   // any planner error so this stage never fails because of planning.
   let hotelResponses: Awaited<ReturnType<TavilyResearchProvider["search"]>>[];
-  let executedQueries: string[];
   const tavily = new TavilyResearchProvider();
 
   try {
@@ -518,7 +493,6 @@ export async function generateHotelResearchStage(
       (q) => q.category === "hotel"
     );
     hotelResponses = await executePlannedQueries(hotelPlanQueries, tavily);
-    executedQueries = hotelPlanQueries.map((q) => q.query);
   } catch {
     const { hotelQueries } = buildStrategyResearchQueries(
       context.goal,
@@ -532,17 +506,14 @@ export async function generateHotelResearchStage(
         })
       )
     );
-    executedQueries = hotelQueries;
   }
 
   if (process.env.STRATEGY_DEBUG === "1") {
-    for (let i = 0; i < executedQueries.length; i++) {
+    for (let i = 0; i < hotelResponses.length; i++) {
       console.log(
         "[strategy-hotel-tavily-response]",
         JSON.stringify({
-          query: executedQueries[i],
           resultCount: hotelResponses[i]?.results?.length ?? 0,
-          results: hotelResponses[i]?.results ?? [],
         })
       );
     }
@@ -564,83 +535,62 @@ export interface VerifiedStrategyResearchStages {
 
 /**
  * Generates a personalized strategy from already-verified flight and hotel
- * research stages plus optional card-offer research.
+ * research stages. Initial finalization may add optional card-offer research;
+ * retries do not.
  *
  * This function NEVER runs flight or hotel Tavily searches and NEVER
  * reinterprets flight or hotel data: those stages are supplied directly as
- * validated InterpretedResearch. Card-offer research (when a card query
- * exists) is still performed here and is never persisted to the staged run.
+ * validated InterpretedResearch. Optional card-offer research is never
+ * persisted to the staged run and runs only during initial finalization.
  *
  * @param context Complete PersonalizedStrategyContext.
  * @param customerRewardPrograms Reward programs the customer owns. Used only to build the optional card query.
  * @param catalogRewardPrograms Complete reward-program catalog. Passed to the interpreter for card offers.
  * @param stages Verified flight/hotel research stages (null means omitted).
+ * @param mode `retry` reuses only verified stages and skips all research work.
  * @returns A complete PersonalizedStrategy suitable for saveLatestStrategy.
  */
+export type StrategyStageFinalizationMode = "initial" | "retry";
+
+export function shouldRunOptionalCardResearch(
+  mode: StrategyStageFinalizationMode
+): boolean {
+  return mode === "initial";
+}
+
 export async function generateAutomatedStrategyFromResearchStages(
   context: PersonalizedStrategyContext,
   customerRewardPrograms: StrategyRewardProgram[],
   catalogRewardPrograms: StrategyRewardProgram[],
-  stages: VerifiedStrategyResearchStages
+  stages: VerifiedStrategyResearchStages,
+  mode: StrategyStageFinalizationMode = "initial"
 ): Promise<PersonalizedStrategy> {
   const goal = context.goal;
 
-  // 1. Build only the optional card-offer query. No flight/hotel queries.
-  // Use the research plan's card queries when available; fall back to the
-  // template card query on any planner error.
   let cardPlanQueries: ResearchPlanQuery[] = [];
-  try {
-    const plan = await resolveResearchPlan(
-      context,
-      customerRewardPrograms,
-      catalogRewardPrograms
-    );
-    cardPlanQueries = plan.queries.filter((q) => q.category === "card");
-  } catch {
-    cardPlanQueries = [];
-  }
-
-  const tavilyForCardFallback = new TavilyResearchProvider();
-
-  // 2. Card-offer research (best-effort, only when a card query exists).
-  // No card query → no search, no interpretation, no warning.
   let cardInterpreted: InterpretedResearch | null = null;
   let cardRejected = false;
-  if (cardPlanQueries.length > 0) {
-    const cardResearchResponses = await executePlannedQueries(
-      cardPlanQueries,
-      tavilyForCardFallback
-    );
 
-    const interpreter = createResearchInterpreter();
+  // An initial finalization may perform best-effort card research. A retry
+  // uses only the verified signed flight/hotel stages and regenerates the
+  // narrative; it must not repeat planning, searches, or interpretation.
+  if (shouldRunOptionalCardResearch(mode)) {
     try {
-      cardInterpreted = await interpreter.interpret({
-        goal,
-        rewardPrograms: catalogRewardPrograms,
-        research: cardResearchResponses,
-        focus: "card_offers",
-      });
-    } catch (err) {
-      if (err instanceof ResearchInterpreterError) {
-        cardRejected = true;
-      } else {
-        throw err;
-      }
+      const plan = await resolveResearchPlan(
+        context,
+        customerRewardPrograms,
+        catalogRewardPrograms
+      );
+      cardPlanQueries = plan.queries.filter((q) => q.category === "card");
+    } catch {
+      cardPlanQueries = [];
     }
-  } else if (goal.allowNewCards) {
-    // Fallback: template card query.
-    const { cardQueries } = buildStrategyResearchQueries(
-      goal,
-      customerRewardPrograms
-    );
-    if (cardQueries.length > 0) {
-      const cardResearchResponses = await Promise.all(
-        cardQueries.map((q) =>
-          tavilyForCardFallback.search({
-            query: q,
-            includeDomains: [...TRUSTED_DOMAINS],
-          })
-        )
+
+    const tavilyForCardFallback = new TavilyResearchProvider();
+    if (cardPlanQueries.length > 0) {
+      const cardResearchResponses = await executePlannedQueries(
+        cardPlanQueries,
+        tavilyForCardFallback
       );
 
       const interpreter = createResearchInterpreter();
@@ -656,6 +606,38 @@ export async function generateAutomatedStrategyFromResearchStages(
           cardRejected = true;
         } else {
           throw err;
+        }
+      }
+    } else if (goal.allowNewCards) {
+      // Fallback: template card query.
+      const { cardQueries } = buildStrategyResearchQueries(
+        goal,
+        customerRewardPrograms
+      );
+      if (cardQueries.length > 0) {
+        const cardResearchResponses = await Promise.all(
+          cardQueries.map((q) =>
+            tavilyForCardFallback.search({
+              query: q,
+              includeDomains: [...TRUSTED_DOMAINS],
+            })
+          )
+        );
+
+        const interpreter = createResearchInterpreter();
+        try {
+          cardInterpreted = await interpreter.interpret({
+            goal,
+            rewardPrograms: catalogRewardPrograms,
+            research: cardResearchResponses,
+            focus: "card_offers",
+          });
+        } catch (err) {
+          if (err instanceof ResearchInterpreterError) {
+            cardRejected = true;
+          } else {
+            throw err;
+          }
         }
       }
     }

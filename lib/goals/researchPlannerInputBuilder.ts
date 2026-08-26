@@ -12,6 +12,7 @@ import type {
 import type {
   PlannerRewardAccount,
   PlannerSpendingCategory,
+  PlannerTransferPartner,
   PlannerWalletCard,
   ResearchPlannerInput,
 } from "./researchPlannerTypes";
@@ -81,7 +82,7 @@ export function buildResearchPlannerInput(
   // The planner input has no authoritative transfer-relationship source.
   // Catalog membership, program family, cards, and program names are not
   // evidence of a transfer relationship, so omit all such relationships.
-  const transferPartners = [];
+  const transferPartners: PlannerTransferPartner[] = [];
 
   return {
     goal: {

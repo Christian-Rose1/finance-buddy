@@ -16,6 +16,7 @@ import { prepareGoalStrategyContext } from "./strategyActionContext";
 import {
   generateAutomatedStrategy,
   generateAutomatedStrategyFromResearchStages,
+  type StrategyStageFinalizationMode,
   generateFlightResearchStage,
   generateHotelResearchStage,
 } from "./automatedStrategyPlanner";
@@ -49,7 +50,7 @@ export type GenerateGoalStrategyResult =
       saved: boolean;
       saveMessage: string | null;
     }
-  | { success: false; message: string };
+  | { success: false; message: string; retryable?: boolean };
 
 export type GoalResearchStageResult =
   | {
@@ -85,6 +86,8 @@ const FLIGHT_STAGE_FAILED_MESSAGE =
   "Flight recommendations could not be generated from the available research.";
 const HOTEL_STAGE_FAILED_MESSAGE =
   "Hotel recommendations could not be generated from the available research.";
+const STRATEGY_RUN_UNAVAILABLE_MESSAGE =
+  "This strategy run is no longer available. Rebuild your complete strategy to try again.";
 
 /**
  * Generate a personalized points strategy for one of the authenticated
@@ -442,7 +445,11 @@ export async function finalizeGoalStrategyRunAction(
   runId: string
 ): Promise<GenerateGoalStrategyResult> {
   if (typeof runId !== "string" || runId.trim().length === 0) {
-    return { success: false, message: "A valid strategy run is required." };
+    return {
+      success: false,
+      message: STRATEGY_RUN_UNAVAILABLE_MESSAGE,
+      retryable: false,
+    };
   }
 
   try {
@@ -459,9 +466,22 @@ export async function finalizeGoalStrategyRunAction(
       catalogRewardPrograms,
     } = preparedResult.prepared;
 
-    const run = await getGoalStrategyRun(runId, goalId, userId, supabase);
+    let run: Awaited<ReturnType<typeof getGoalStrategyRun>>;
+    try {
+      run = await getGoalStrategyRun(runId, goalId, userId, supabase);
+    } catch {
+      return {
+        success: false,
+        message: STRATEGY_RUN_UNAVAILABLE_MESSAGE,
+        retryable: false,
+      };
+    }
     if (!run) {
-      return { success: false, message: "We couldn't find that strategy run." };
+      return {
+        success: false,
+        message: STRATEGY_RUN_UNAVAILABLE_MESSAGE,
+        retryable: false,
+      };
     }
 
     const flightTerminal =
@@ -472,11 +492,23 @@ export async function finalizeGoalStrategyRunAction(
       return {
         success: false,
         message: "Flight and hotel research must finish before building the plan.",
+        retryable: false,
       };
     }
 
+    const finalizationMode: StrategyStageFinalizationMode =
+      run.finalStatus === "failed" ? "retry" : "initial";
+
     // Finalization begins. Supports retry from a previously failed run.
-    await updateGoalStrategyRunFinalStatus(runId, goalId, userId, "running", supabase);
+    try {
+      await updateGoalStrategyRunFinalStatus(runId, goalId, userId, "running", supabase);
+    } catch {
+      return {
+        success: false,
+        message: STRATEGY_RUN_UNAVAILABLE_MESSAGE,
+        retryable: false,
+      };
+    }
 
     // Everything after finalization starts is guarded by an inner failure
     // boundary so a best-effort mark-failed can be attempted.
@@ -502,7 +534,8 @@ export async function finalizeGoalStrategyRunAction(
         context,
         customerRewardPrograms,
         catalogRewardPrograms,
-        { flight, hotel }
+        { flight, hotel },
+        finalizationMode
       );
 
       // Save the complete strategy. A save failure keeps the run for retry
@@ -519,11 +552,10 @@ export async function finalizeGoalStrategyRunAction(
           console.error("[strategy-save-error]", safeSaveMessage);
         }
         return {
-          success: true,
-          strategy,
-          saved: false,
-          saveMessage:
-            "Your strategy was generated but couldn't be saved. Your previously saved strategy, if any, was not changed.",
+          success: false,
+          retryable: true,
+          message:
+            "We couldn't save your strategy right now. Try finishing it again in a moment.",
         };
       }
 
@@ -621,6 +653,7 @@ function finalizeGenericFailure(error: unknown): GenerateGoalStrategyResult {
   }
   return {
     success: false,
+    retryable: true,
     message: "We couldn't build your strategy right now. Please try again in a moment.",
   };
 }
