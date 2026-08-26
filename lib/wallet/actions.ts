@@ -22,10 +22,23 @@ import {
   validateWalletCardForm,
   formatWalletCardFormErrors,
 } from "./validation";
-import type { WalletCard } from "./types";
+import {
+  createWalletBenefitFromProduct,
+  getWalletBenefitManagementContext,
+  updateWalletBenefitForCard,
+} from "./benefitsRepository";
+import {
+  isWalletEntityId,
+  validateWalletBenefitStateForm,
+} from "./benefitStateForm";
+import type { WalletBenefit, WalletCard } from "./types";
 
 export type WalletActionState =
   | { success: true; card: WalletCard; message?: string }
+  | { success: false; error: string };
+
+export type WalletBenefitActionState =
+  | { success: true; benefit: WalletBenefit; message: string }
   | { success: false; error: string };
 
 async function getAuthenticatedUserId(): Promise<string> {
@@ -200,6 +213,125 @@ export async function linkWalletCardAction(
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Failed to update card product link.";
+    return { success: false, error: message };
+  }
+}
+
+/** Starts tracking state for a definition on the card's linked product. */
+export async function createWalletBenefitStateAction(
+  walletCardId: string,
+  productBenefitId: string
+): Promise<WalletBenefitActionState> {
+  try {
+    const userId = await getAuthenticatedUserId();
+    if (
+      !isWalletEntityId(walletCardId) ||
+      !isWalletEntityId(productBenefitId)
+    ) {
+      return { success: false, error: "Benefit selection is invalid." };
+    }
+
+    const benefit = await createWalletBenefitFromProduct(
+      walletCardId,
+      productBenefitId,
+      userId
+    );
+    revalidatePath("/wallet");
+    return {
+      success: true,
+      benefit,
+      message: "Benefit tracking started.",
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to start benefit tracking.";
+    return { success: false, error: message };
+  }
+}
+
+/** Updates user-entered usage and period state for an authorized benefit. */
+export async function updateWalletBenefitStateAction(
+  formData: FormData
+): Promise<WalletBenefitActionState> {
+  try {
+    const userId = await getAuthenticatedUserId();
+    const walletCardIdValue = formData.get("walletCardId");
+    const benefitIdValue = formData.get("benefitId");
+    const walletCardId =
+      typeof walletCardIdValue === "string" ? walletCardIdValue.trim() : "";
+    const benefitId =
+      typeof benefitIdValue === "string" ? benefitIdValue.trim() : "";
+    if (!isWalletEntityId(walletCardId) || !isWalletEntityId(benefitId)) {
+      return { success: false, error: "Benefit selection is invalid." };
+    }
+
+    const { product } = await getWalletBenefitManagementContext(
+      benefitId,
+      walletCardId,
+      userId
+    );
+    const catalogLimit = product.annualLimit ?? product.fixedValue;
+    const validation = validateWalletBenefitStateForm(formData, catalogLimit);
+    if (!validation.valid) {
+      return { success: false, error: validation.error };
+    }
+
+    const benefit = await updateWalletBenefitForCard(
+      benefitId,
+      walletCardId,
+      validation.data,
+      userId
+    );
+    revalidatePath("/wallet");
+    return {
+      success: true,
+      benefit,
+      message: "Benefit details updated.",
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to update benefit details.";
+    return { success: false, error: message };
+  }
+}
+
+/** Activates or deactivates an existing benefit state after ownership checks. */
+export async function setWalletBenefitActiveAction(
+  walletCardId: string,
+  benefitId: string,
+  active: boolean
+): Promise<WalletBenefitActionState> {
+  try {
+    const userId = await getAuthenticatedUserId();
+    if (!isWalletEntityId(walletCardId) || !isWalletEntityId(benefitId)) {
+      return { success: false, error: "Benefit selection is invalid." };
+    }
+
+    const { product, state } = await getWalletBenefitManagementContext(
+      benefitId,
+      walletCardId,
+      userId
+    );
+    const benefit = await updateWalletBenefitForCard(
+      benefitId,
+      walletCardId,
+      {
+        active,
+        ...(active && product.requiresActivation && !state.activatedAt
+          ? { activatedAt: new Date().toISOString() }
+          : {}),
+      },
+      userId
+    );
+    revalidatePath("/wallet");
+    return {
+      success: true,
+      benefit,
+      message: active ? "Benefit activated." : "Benefit deactivated.",
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Failed to update benefit status.";
     return { success: false, error: message };
   }
 }

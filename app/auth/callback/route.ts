@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase-server';
+import { safeAuthRedirectPath } from '@/lib/auth/redirect';
 
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get('code');
-  const next = requestUrl.searchParams.get('next') ?? '/dashboard';
+  const next = safeAuthRedirectPath(requestUrl.searchParams.get('next'));
 
   if (!code) {
     return NextResponse.redirect(new URL('/login', requestUrl.origin));
@@ -29,7 +30,7 @@ export async function GET(request: Request) {
   );
 
   if (error) {
-    console.error('Auth callback error:', error);
+    console.error('[auth-callback-error]', error.name);
     return NextResponse.redirect(new URL('/login', requestUrl.origin));
   }
 

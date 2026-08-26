@@ -6,12 +6,12 @@ import {
   getCardProducts,
   getRewardPrograms,
 } from "@/lib/rewards/catalogRepository";
-import { getWalletBenefitsWithProducts } from "@/lib/wallet/benefitsRepository";
+import { getWalletBenefitOptionsForCard } from "@/lib/wallet/benefitsRepository";
 import { getRewardAccountsForUser } from "@/lib/goals/rewardAccountsRepository";
 import { WalletCardList } from "@/components/wallet-card-list";
 import { WalletCardForm } from "@/components/wallet-card-form";
 import { RewardAccountManager } from "@/components/reward-account-manager";
-import type { WalletBenefitDisplay } from "@/lib/wallet/benefitsRepository";
+import type { WalletBenefitOption } from "@/lib/wallet/benefitsRepository";
 import { Wallet } from "lucide-react";
 
 async function loadWalletData() {
@@ -30,23 +30,26 @@ async function loadWalletData() {
       getRewardPrograms(supabase),
     ]);
 
-    // Load persisted benefit state for each card, rehydrated with its shared
-    // product definition. Empty benefit state renders cleanly via the UI.
-    const benefitsByCard: Record<string, WalletBenefitDisplay[]> = {};
+    // Load each linked product's definitions with optional user-owned state.
+    const benefitOptionsByCard: Record<string, WalletBenefitOption[]> = {};
     const benefitResults = await Promise.all(
       cards.map(async (card) => ({
         cardId: card.id,
-        benefits: await getWalletBenefitsWithProducts(card.id, userData.user.id),
+        benefits: await getWalletBenefitOptionsForCard(
+          card.id,
+          userData.user.id,
+          supabase
+        ),
       }))
     );
     for (const result of benefitResults) {
-      benefitsByCard[result.cardId] = result.benefits;
+      benefitOptionsByCard[result.cardId] = result.benefits;
     }
 
     return {
       cards,
       products,
-      benefitsByCard,
+      benefitOptionsByCard,
       rewardAccounts,
       rewardPrograms,
       error: null,
@@ -55,7 +58,7 @@ async function loadWalletData() {
     return {
       cards: [],
       products: [],
-      benefitsByCard: {},
+      benefitOptionsByCard: {},
       rewardAccounts: [],
       rewardPrograms: [],
       error: "Unable to load your wallet right now.",
@@ -67,7 +70,7 @@ export default async function WalletPage() {
   const {
     cards,
     products,
-    benefitsByCard,
+    benefitOptionsByCard,
     rewardAccounts,
     rewardPrograms,
     error,
@@ -88,7 +91,7 @@ export default async function WalletPage() {
             </p>
           </div>
           <div className="hidden h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-sky-400/30 bg-sky-400/10 text-sky-300 sm:flex">
-            <Wallet className="h-6 w-6" />
+            <Wallet aria-hidden="true" className="h-6 w-6" />
           </div>
         </div>
 
@@ -136,7 +139,7 @@ export default async function WalletPage() {
           <WalletCardList
             cards={cards}
             products={products}
-            benefitsByCard={benefitsByCard}
+            benefitOptionsByCard={benefitOptionsByCard}
           />
         </section>
       </div>

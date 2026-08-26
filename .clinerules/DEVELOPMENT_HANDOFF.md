@@ -1,5 +1,5 @@
 Finance Buddy — Development Handoff
-Updated: 2026-08-19
+Updated: 2026-08-25
 Product North Star
 Finance Buddy is a personalized credit-card points strategist.
 Its purpose is to help users accomplish goals—especially travel goals—using credit-card points at the lowest practical cash cost.
@@ -52,7 +52,7 @@ Implemented:
 Next.js application
 Supabase authentication and user-owned RLS
 Receipt ingestion
-Chase statement ingestion
+Chase statement ingestion (statement PDF) plus generic bank activity CSV ingestion (single auto-detecting parser in lib/parser/statementCsvParser.ts; column detection by header, per-row years, verified against real Chase and Apple Card exports)
 Canonical Purchase persistence
 Normalized purchase items and evidence
 Purchase provenance and metadata
@@ -118,6 +118,10 @@ Review this handoff diff.
 Commit and push the verified Benefit Period milestone.
 Define the Goal Planning Alpha product specification and architecture.
 Only then create bounded Cline implementation tasks.
+Known Build State (2026-08-25)
+npm run build fails on pre-existing type errors in two test fixtures that were not updated for later schema changes: lib/goals/ollamaStrategyProvider.test.ts (PersonalizedStrategy fixture missing pointsInventory and allocationScenarios) and lib/wallet/benefitOpportunity.test.ts (ProductBenefit.periodType and WalletBenefit.periodStart fixtures). These errors exist at HEAD 800319f independent of the CSV work; the CSV ingestion change itself type-checks cleanly and its tests pass.
+Known Storage State (2026-08-25, RESOLVED)
+The app's Supabase project onotvwyrewkszxukhkrd (per .env.local) was a completely fresh project: NO migrations had ever been applied and no migration history existed, which caused "Bucket not found" and would have broken every DB-backed feature. On 2026-08-25 all 17 migrations in supabase/migrations were applied via supabase db push (CLI installed via npm, v2.115.0) and history is now recorded. Verified: all 12 tables, persist_purchase RPC, benefit-period columns, all 8 storage RLS policies, and catalog seeds present; an authenticated end-to-end upload to the statements bucket succeeded. The stale supabase/.temp link previously pointed at degqtzguwbyoxfmdalro, which is NOT accessible from the current Supabase account — ignore it. The CLI is now linked to onotvwyrewkszxukhkrd.
 Working Rules
 ChatGPT handles architecture, product semantics, tradeoffs, sequencing, and task decomposition.
 Cline performs bounded implementation work.

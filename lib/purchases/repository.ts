@@ -1,4 +1,5 @@
 import { createServerClient } from "@/lib/supabase-server";
+import { createHash } from "node:crypto";
 import type {
   Purchase,
   PurchaseEvidence,
@@ -42,14 +43,74 @@ function toItemPayload(item: PurchaseItem) {
 }
 
 /** Maps a PurchaseEvidence (camelCase) to the RPC evidence payload (snake_case). */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Converts a deterministic local evidence key into a stable UUID primary key. */
+export function stableEvidenceUuid(value: string): string {
+  if (UUID_PATTERN.test(value)) return value.toLowerCase();
+  const hex = createHash("sha1")
+    .update(`finance-buddy:evidence:${value}`)
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
+  hex[12] = "5";
+  hex[16] = (parseInt(hex[16], 16) & 0x3 | 0x8).toString(16);
+  return `${hex.slice(0, 8).join("")}-${hex.slice(8, 12).join("")}-${hex
+    .slice(12, 16)
+    .join("")}-${hex.slice(16, 20).join("")}-${hex.slice(20).join("")}`;
+}
+
 function toEvidencePayload(evidence: PurchaseEvidence) {
   return {
+    id: stableEvidenceUuid(evidence.id),
     type: evidence.type,
     source_id: evidence.sourceId,
     source_name: evidence.sourceName,
     confidence: evidence.confidence,
     verified: evidence.verified,
     metadata: evidence.metadata,
+  };
+}
+
+function sourceKeyForPurchase(purchase: Purchase): string | null {
+  return (
+    purchase.evidence.find(
+      (evidence) =>
+        evidence.type === purchase.source && evidence.sourceId !== null
+    )?.sourceId ?? null
+  );
+}
+
+export function toPurchasePersistenceEnvelope(purchase: Purchase) {
+  const evidenceIds = new Map(
+    purchase.evidence.map((evidence) => [evidence.id, stableEvidenceUuid(evidence.id)])
+  );
+  const provenance = Object.fromEntries(
+    Object.entries(purchase.provenance ?? {}).map(([field, value]) => [field, {
+      ...value,
+      evidenceIds: value.evidenceIds.map((id) => evidenceIds.get(id) ?? stableEvidenceUuid(id)),
+    }])
+  );
+  return {
+    purchase: {
+      merchant: purchase.merchant,
+      date: purchase.date,
+      amount: purchase.amount,
+      currency: purchase.currency,
+      category: purchase.category,
+      source: purchase.source,
+      source_confidence: purchase.sourceConfidence,
+      source_key: sourceKeyForPurchase(purchase),
+      card_id: purchase.cardId,
+      discount: purchase.discount,
+      tax: purchase.tax,
+      tip: purchase.tip,
+      fees: purchase.fees,
+      provenance,
+      metadata: purchase.metadata,
+    },
+    items: purchase.items.map(toItemPayload),
+    evidence: purchase.evidence.map(toEvidencePayload),
   };
 }
 
@@ -104,6 +165,21 @@ function toPurchaseParent(row: Record<string, unknown>): Purchase {
     metadata: (row.metadata as Record<string, unknown> | null) ?? null,
     provenance: (row.provenance as Record<string, PurchaseFieldProvenance>) ?? {},
   };
+}
+
+/** Replace deterministic pre-persistence evidence IDs with database IDs. */
+function rebindProvenance(
+  purchase: Purchase,
+  evidence: PurchaseEvidence[]
+): void {
+  const ids = new Map<string, string>();
+  for (const item of evidence) {
+    if (item.sourceId) ids.set(`evidence-${item.sourceId}`, item.id);
+  }
+  if (!purchase.provenance) return;
+  for (const provenance of Object.values(purchase.provenance)) {
+    provenance.evidenceIds = provenance.evidenceIds.map((id) => ids.get(id) ?? id);
+  }
 }
 
 /**
@@ -166,6 +242,7 @@ export async function getPurchaseForUser(
   purchase.evidence = (evidenceResult.data ?? []).map((row) =>
     toEvidence(row as Record<string, unknown>)
   );
+  rebindProvenance(purchase, purchase.evidence);
 
   return purchase;
 }
@@ -229,31 +306,18 @@ export async function getPurchasesForUser(userId: string): Promise<Purchase[]> {
  */
 export async function persistPurchase(
   purchase: Purchase,
-  userId: string
+  userId: string,
+  client?: SupabaseClient
 ): Promise<Purchase> {
-  const supabase = await createServerClient();
+  const supabase = client ?? (await createServerClient());
+  const envelope = toPurchasePersistenceEnvelope(purchase);
 
   // --- Atomic write via the RPC ------------------------------------------
   const { data, error } = await supabase.rpc("persist_purchase", {
     p_user_id: userId,
-    p_purchase: {
-      merchant: purchase.merchant,
-      date: purchase.date,
-      amount: purchase.amount,
-      currency: purchase.currency,
-      category: purchase.category,
-      source: purchase.source,
-      source_confidence: purchase.sourceConfidence,
-      card_id: purchase.cardId,
-      discount: purchase.discount,
-      tax: purchase.tax,
-      tip: purchase.tip,
-      fees: purchase.fees,
-      provenance: purchase.provenance ?? {},
-      metadata: purchase.metadata,
-    },
-    p_items: purchase.items.map(toItemPayload),
-    p_evidence: purchase.evidence.map(toEvidencePayload),
+    p_purchase: envelope.purchase,
+    p_items: envelope.items,
+    p_evidence: envelope.evidence,
   });
 
   if (error) {
@@ -293,7 +357,41 @@ export async function persistPurchase(
   persisted.evidence = (evidenceResult.data ?? []).map((row) =>
     toEvidence(row as Record<string, unknown>)
   );
+  rebindProvenance(persisted, persisted.evidence);
 
+  return persisted;
+}
+
+/**
+ * Persist a collection of Purchases in one database transaction.
+ *
+ * The database function validates ownership once and calls the idempotent
+ * single-purchase writer for each entry. A failure rolls back the entire batch,
+ * so statement imports cannot leave a partially persisted result.
+ */
+export async function persistPurchases(
+  purchases: Purchase[],
+  userId: string,
+  client?: SupabaseClient
+): Promise<Purchase[]> {
+  if (purchases.length === 0) {
+    return [];
+  }
+
+  const supabase = client ?? (await createServerClient());
+  const { data, error } = await supabase.rpc("persist_purchases", {
+    p_user_id: userId,
+    p_purchases: purchases.map(toPurchasePersistenceEnvelope),
+  });
+
+  if (error || !Array.isArray(data) || data.length !== purchases.length) {
+    throw new Error("Failed to persist purchases.");
+  }
+
+  const persisted = data.map((row) =>
+    toPurchaseParent(row as Record<string, unknown>)
+  );
+  await hydratePurchasesChildren(supabase, persisted);
   return persisted;
 }
 
@@ -337,6 +435,7 @@ async function hydratePurchasesChildren(
     purchase.evidence = (evidenceByPurchase.get(purchase.id) ?? []).map((row) =>
       toEvidence(row)
     );
+    rebindProvenance(purchase, purchase.evidence);
   }
 }
 

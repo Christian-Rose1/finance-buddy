@@ -11,7 +11,7 @@ import type { ReceiptExtraction } from "./types";
 
 /**
  * Model-agnostic receipt input: the raw file bytes plus identifying metadata.
- * Works for receipt images (JPEG/PNG/WebP) and receipt PDFs alike.
+ * Works for receipt images (JPEG/PNG/WebP) and text-based receipt PDFs.
  */
 export interface ReceiptInput {
   /**
@@ -29,7 +29,7 @@ export interface ReceiptInput {
    */
   mimeType: string;
 
-  /** Original filename, when available. Used for logging/debugging only. */
+  /** Original filename, when available. Providers must not send or log it. */
   filename?: string | null;
 }
 

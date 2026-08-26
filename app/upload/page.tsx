@@ -4,13 +4,15 @@ import { useState } from "react";
 import { Nav } from "@/components/nav";
 import { ReceiptUploadPanel } from "@/components/receipt-upload-panel";
 import { StatementUploadPanel } from "@/components/statement-upload-panel";
+import { AuthGuard } from "@/components/auth-guard";
 
 export default function UploadPage() {
   const [activeTab, setActiveTab] = useState<"receipt" | "statement">("receipt");
 
   return (
-    <main>
-      <Nav />
+    <AuthGuard>
+      <main>
+        <Nav />
 
       <div className="mx-auto max-w-3xl px-6 py-12">
         <h1 className="text-3xl font-semibold text-white">Add Your Data</h1>
@@ -63,6 +65,7 @@ export default function UploadPage() {
           </div>
         </div>
       </div>
-    </main>
+      </main>
+    </AuthGuard>
   );
 }

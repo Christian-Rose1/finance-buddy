@@ -496,6 +496,21 @@ describe("optimizePurchaseWithLinkedCards", () => {
     assert.equal(result.bestEstimatedValue, 5); // 5% of $100
   });
 
+  it("keeps identical catalog rule IDs distinct across linked cards", () => {
+    const cardA = makeLinkedCard({ id: "card-a", cardProductId: "product-a" });
+    const cardB = makeLinkedCard({ id: "card-b", cardProductId: "product-b" });
+    const sameRule = makeEarningRule({ id: "same-rule", eligibleCategory: "food:dining", percentage: 2 });
+    const purchase = makePurchase({ category: "food:dining" });
+    const result = optimizePurchaseWithLinkedCards(
+      purchase,
+      [cardA, cardB],
+      new Map([["product-a", makeProduct({ id: "product-a" })], ["product-b", makeProduct({ id: "product-b" })]]),
+      new Map([["product-a", [sameRule]], ["product-b", [{ ...sameRule, cardProductId: "product-b" }]]])
+    );
+    assert.equal(result.matches.length, 2);
+    assert.notEqual(result.matches[0].ruleId, result.matches[1].ruleId);
+  });
+
   it("ignores an inactive linked card", () => {
     const activeCard = makeLinkedCard({
       id: "active",

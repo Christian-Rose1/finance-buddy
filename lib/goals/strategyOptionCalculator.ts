@@ -20,6 +20,7 @@ export interface OptionRequirementCalculation {
   pointsRequired: number | null;
   assumptions: string[];
   warnings: string[];
+  cashFees: number | null;
 }
 
 export interface FundingAccountMatch {
@@ -79,6 +80,7 @@ function insufficient(
     pointsRequired: null,
     assumptions: [],
     warnings,
+    cashFees: null,
   };
 }
 
@@ -90,7 +92,18 @@ function calculated(
   assumptions: string[] = [],
   warnings: string[] = [],
 ): OptionRequirementCalculation {
-  return { status: "calculated", pointsRequired, assumptions, warnings };
+  return { status: "calculated", pointsRequired, assumptions, warnings, cashFees: null };
+}
+
+function completed(option: StrategyAwardOption, result: OptionRequirementCalculation) {
+  return { ...result, cashFees: option.cashFees };
+}
+
+function sourcePoints(option: StrategyAwardOption, destinationPoints: number): number | null {
+  if (option.transferFromProgramId === null) return destinationPoints;
+  const ratio = option.transferRatio;
+  if (ratio === null || !Number.isFinite(ratio) || ratio <= 0) return null;
+  return Math.ceil(destinationPoints * ratio);
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +117,8 @@ function calculated(
  * Returns null for missing, invalid, zero, or reversed dates.
  */
 export function calculateTripNights(goal: Goal): number | null {
-  const { earliestDeparture, latestReturn } = goal;
+  const { earliestDeparture, latestReturn, minimumNights, maximumNights } =
+    goal;
 
   if (!earliestDeparture || !latestReturn) return null;
 
@@ -116,8 +130,35 @@ export function calculateTripNights(goal: Goal): number | null {
   const diffMs = ret - dep;
   if (diffMs <= 0) return null;
 
-  const nights = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  return nights > 0 ? nights : null;
+  const spanNights = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (spanNights <= 0) return null;
+
+  if (
+    (minimumNights !== null && (!Number.isInteger(minimumNights) || minimumNights <= 0 || minimumNights > spanNights)) ||
+    (maximumNights !== null && (!Number.isInteger(maximumNights) || maximumNights <= 0 || maximumNights > spanNights)) ||
+    (minimumNights !== null && maximumNights !== null && minimumNights > maximumNights)
+  ) return null;
+
+  // Option C: respect the saved stay-length range. Use the declared minimum
+  // as the concrete default single-stay length; fall back to the maximum, then
+  // to the full earliestDeparture→latestReturn window span only when no range
+  // is declared. This stops the whole departure/return window from being
+  // treated as one long stay (which previously inflated tripNights and the
+  // hotel per-night math).
+  const declaredNights =
+    minimumNights !== null &&
+    minimumNights !== undefined &&
+    Number.isInteger(minimumNights) &&
+    minimumNights > 0
+      ? minimumNights
+      : maximumNights !== null &&
+          maximumNights !== undefined &&
+          Number.isInteger(maximumNights) &&
+          maximumNights > 0
+        ? maximumNights
+        : spanNights;
+
+  return declaredNights > 0 ? declaredNights : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +249,12 @@ export function calculateFlightPointsRequired(
     );
   }
 
-  return calculated(pointsRequired, assumptions, warnings);
+  const sourceRequired = sourcePoints(option, pointsRequired);
+  if (sourceRequired === null) {
+    return insufficient(["Transfer relationship and ratio are not authoritative enough to calculate source points"]);
+  }
+  if (sourceRequired !== pointsRequired) assumptions.push(`Transfer ratio applied: ${option.transferRatio} source points per destination point`);
+  return completed(option, calculated(sourceRequired, assumptions, warnings));
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +327,10 @@ export function calculateHotelPointsRequired(
       );
     }
 
-    return calculated(pointsRequired, assumptions, warnings);
+    const sourceRequired = sourcePoints(option, pointsRequired);
+    if (sourceRequired === null) return insufficient(["Transfer relationship and ratio are not authoritative enough to calculate source points"]);
+    if (sourceRequired !== pointsRequired) assumptions.push(`Transfer ratio applied: ${option.transferRatio} source points per destination point`);
+    return completed(option, calculated(sourceRequired, assumptions, warnings));
   }
 
   if (pricingBasis === "total_stay") {
@@ -302,7 +351,10 @@ export function calculateHotelPointsRequired(
       );
     }
 
-    return calculated(option.pointsRequired, assumptions, warnings);
+    const sourceRequired = sourcePoints(option, option.pointsRequired);
+    if (sourceRequired === null) return insufficient(["Transfer relationship and ratio are not authoritative enough to calculate source points"]);
+    if (sourceRequired !== option.pointsRequired) assumptions.push(`Transfer ratio applied: ${option.transferRatio} source points per destination point`);
+    return completed(option, calculated(sourceRequired, assumptions, warnings));
   }
 
   // one_way, round_trip, or unknown
@@ -343,6 +395,13 @@ export function findFundingAccount(
   );
 
   if (eligible.length === 0) return null;
+
+  if (
+    option.transferFromProgramId !== null &&
+    (option.transferRatio === null ||
+      !Number.isFinite(option.transferRatio) ||
+      option.transferRatio <= 0)
+  ) return null;
 
   // Priority 1: exact rewardProgramId match → transfer_source
   const transferSourceMatches = eligible.filter(

@@ -33,7 +33,7 @@ export function buildPersonalizedStrategyContext(
   // Map WalletCard to the context's wallet card shape. The context type only
   // supports a cardProductId link; when a card is linked, prefer the catalog
   // product's canonical name/issuer, otherwise keep the user-entered values.
-  const mappedWalletCards = walletCards.map((card) => {
+  const mappedWalletCards = walletCards.filter((card) => card.active).map((card) => {
     const product = card.cardProductId
       ? cardProducts.find((p) => p.id === card.cardProductId)
       : undefined;
@@ -55,6 +55,15 @@ export function buildPersonalizedStrategyContext(
 
   purchases.forEach((p) => {
     if (!Number.isFinite(p.amount) || (p.amount as number) < 0) {
+      return;
+    }
+
+    // Spending from another currency, or with no currency, cannot safely be
+    // used to personalize a goal denominated in the goal currency.
+    if (
+      typeof p.currency !== "string" ||
+      p.currency.trim().toUpperCase() !== goal.currency.trim().toUpperCase()
+    ) {
       return;
     }
 

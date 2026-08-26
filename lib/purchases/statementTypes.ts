@@ -13,5 +13,6 @@ export interface StatementTransaction {
   currency: string | null;
   cardId: string | null;
   category: string | null;
+  categorySource?: "statement" | "inferred";
   confidence: number;
 }

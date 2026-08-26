@@ -1,115 +1,178 @@
 import { NextRequest, NextResponse } from "next/server";
-import { extractPdfText } from "@/lib/parser/pdfTextExtractor";
-import { parseTransactions } from "@/lib/parser/chaseParser";
-import { toStatementTransaction } from "@/lib/parser/toStatementTransaction";
-import { purchaseFromStatement } from "@/lib/purchases/fromStatement";
-import { persistPurchase } from "@/lib/purchases/repository";
+import { createHash } from "node:crypto";
+import { PdfTextExtractionError } from "@/lib/parser/pdfTextExtractor";
+import {
+  detectStatementFileFormat,
+  parseStatementFile,
+  StatementFormatError,
+} from "@/lib/parser/statementParser";
+import { CsvStatementParseError } from "@/lib/parser/csvStatementParser";
+import type { StatementTransaction } from "@/lib/purchases/statementTypes";
+import { createStatementImportDraftPayload } from "@/lib/imports/payload";
+import {
+  createImportDraft,
+  ImportDraftError,
+} from "@/lib/imports/repository";
+import {
+  confirmImportDraft,
+  discardImportDraft,
+} from "@/lib/imports/workflow";
 import { createServerClient } from "@/lib/supabase-server";
-import { StatementTransaction } from "@/lib/purchases/statementTypes";
+import {
+  MAX_STATEMENT_FILE_BYTES,
+  normalizeOwnedStoragePath,
+  requestBodyIsTooLarge,
+  storageObjectMatchesBytes,
+} from "@/lib/uploads/policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SUPPORTED_PDF_TYPES = ["application/pdf"];
+const MAX_STATEMENT_TRANSACTIONS = 500;
 
-const MONTH_NAMES =
-  /(?:january|february|march|april|may|june|july|august|september|october|november|december)/i;
+function csvHasTooManyPhysicalRows(data: Buffer): boolean {
+  let rows = 1;
+  for (const byte of data) {
+    if (byte === 0x0a) rows += 1;
+    if (rows > MAX_STATEMENT_TRANSACTIONS + 1) return true;
+  }
+  return false;
+}
 
-/** Validates a 2-digit year into a 2000s year (e.g. "26" → 2026). */
-function fullYear(yy: string): number | null {
-  const n = Number(yy);
-  if (Number.isInteger(n) && n >= 0 && n <= 99) {
-    return 2000 + n;
+async function readDraftId(request: NextRequest): Promise<string | null> {
+  try {
+    const value: unknown = await request.json();
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      typeof (value as Record<string, unknown>).draftId === "string"
+    ) {
+      return (value as Record<string, string>).draftId;
+    }
+  } catch {
+    // The caller receives one generic request-shape error below.
   }
   return null;
 }
 
-/**
- * Deterministically detects the statement year from PDF text.
- *
- * Chase statements commonly use 2-digit years (MM/DD/YY) in the header,
- * while also printing a month-name year like "July 2026" in the letterhead.
- *
- * Priority order:
- * 1. Labeled date with a 4-digit year: "Closing Date 06/22/2026"
- * 2. Statement-period range with 4-digit years: "05/11/2026 - 06/09/2026" → closing year
- * 3. Month-name + 4-digit year in the header: "July 2026"
- * 4. Labeled date with a 2-digit year: "Statement Date: 06/22/26" → 20YY
- * 5. Statement-period range with 2-digit years: "05/23/26 - 06/22/26" → closing year
- * 6. All 4-digit years in the document must agree (fallback)
- *
- * Returns null when no year can be determined confidently.
- */
-function detectStatementYear(text: string): number | null {
-  // Priority 1: labeled statement/closing date with a 4-digit year.
-  const label4Re =
-    /(?:closing\s+date|statement\s+date|account\s+period|billing\s+period)[^0-9]*\d{1,2}\/\d{1,2}\/(\d{4})/i;
-  const label4Match = text.match(label4Re);
-  if (label4Match?.[1]) {
-    const year = Number(label4Match[1]);
-    if (Number.isInteger(year) && year >= 2000 && year <= 2100) {
-      return year;
-    }
+function importDraftErrorResponse(error: unknown): NextResponse {
+  if (error instanceof ImportDraftError) {
+    const status =
+      error.code === "not_found"
+        ? 404
+        : error.code === "expired"
+          ? 410
+          : error.code === "discarded" ||
+              error.code === "already_confirmed" ||
+              error.code === "in_progress"
+            ? 409
+            : 500;
+    return NextResponse.json({ ok: false, error: error.message }, { status });
   }
-
-  // Priority 2: statement-period range with 4-digit years → closing year.
-  const period4Re =
-    /\d{1,2}\/\d{1,2}\/(\d{4})\s*(?:-|–|to)\s*\d{1,2}\/\d{1,2}\/(\d{4})/i;
-  const period4Match = text.match(period4Re);
-  if (period4Match?.[2]) {
-    const year = Number(period4Match[2]);
-    if (Number.isInteger(year) && year >= 2000 && year <= 2100) {
-      return year;
-    }
-  }
-
-  // Priority 3: month-name + 4-digit year (e.g. "July 2026") in the header.
-  const monthYearRe = new RegExp(
-    `${MONTH_NAMES.source}\\s+(20\\d{2})`,
-    "i"
+  return NextResponse.json(
+    { ok: false, error: "Statement import could not be updated. Please try again." },
+    { status: 500 }
   );
-  const monthYearMatch = text.match(monthYearRe);
-  if (monthYearMatch?.[1]) {
-    const year = Number(monthYearMatch[1]);
-    if (Number.isInteger(year) && year >= 2000 && year <= 2100) {
-      return year;
-    }
+}
+
+function statementPdfErrorResponse(error: unknown): NextResponse {
+  if (!(error instanceof PdfTextExtractionError)) {
+    return NextResponse.json(
+      { ok: false, error: "Statement PDF text extraction failed." },
+      { status: 500 }
+    );
   }
 
-  // Priority 4: labeled statement/closing date with a 2-digit year (MM/DD/YY).
-  const label2Re =
-    /(?:closing\s+date|statement\s+date|account\s+period|billing\s+period)[^0-9]*\d{1,2}\/\d{1,2}\/(\d{2})/i;
-  const label2Match = text.match(label2Re);
-  if (label2Match?.[1]) {
-    const year = fullYear(label2Match[1]);
-    if (year !== null) return year;
+  switch (error.code) {
+    case "empty":
+      return NextResponse.json(
+        { ok: false, error: "The statement PDF is empty." },
+        { status: 400 }
+      );
+    case "malformed":
+      return NextResponse.json(
+        { ok: false, error: "The statement PDF is malformed or corrupted." },
+        { status: 400 }
+      );
+    case "encrypted":
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Password-protected statement PDFs are not supported. Upload an unlocked text-based Chase statement PDF.",
+        },
+        { status: 422 }
+      );
+    case "no_text":
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "No readable text was found in the statement PDF. Scanned statement PDFs are not supported.",
+        },
+        { status: 422 }
+      );
+    default:
+      return NextResponse.json(
+        { ok: false, error: "Statement PDF text extraction failed." },
+        { status: 500 }
+      );
+  }
+}
+
+function statementParseErrorResponse(error: unknown): NextResponse {
+  if (error instanceof PdfTextExtractionError) {
+    return statementPdfErrorResponse(error);
   }
 
-  // Priority 5: statement-period range with 2-digit years → closing year.
-  const period2Re =
-    /\d{1,2}\/\d{1,2}\/(\d{2})\s*(?:-|–|to)\s*\d{1,2}\/\d{1,2}\/(\d{2})/i;
-  const period2Match = text.match(period2Re);
-  if (period2Match?.[2]) {
-    const year = fullYear(period2Match[2]);
-    if (year !== null) return year;
+  if (error instanceof CsvStatementParseError) {
+    return NextResponse.json(
+      { ok: false, error: error.message },
+      { status: 400 }
+    );
   }
 
-  // Priority 6: every 4-digit year in the document must agree.
-  const years: number[] = [];
-  const yearRe = /\b(20\d{2})\b/g;
-  let m;
-  while ((m = yearRe.exec(text)) !== null) {
-    const y = Number(m[1]);
-    if (y >= 2000 && y <= 2100) {
-      years.push(y);
-    }
+  if (error instanceof StatementFormatError) {
+    return NextResponse.json(
+      { ok: false, error: error.message },
+      { status: error.code === "missing_pdf_date" ? 400 : 415 }
+    );
   }
-  if (years.length === 0) return null;
-  if (years.every((y) => y === years[0])) return years[0];
-  return null;
+
+  return NextResponse.json(
+    { ok: false, error: "Statement parsing failed." },
+    { status: 500 }
+  );
 }
 
 export async function POST(request: NextRequest) {
+  if (
+    requestBodyIsTooLarge(
+      request.headers.get("content-length"),
+      MAX_STATEMENT_FILE_BYTES
+    )
+  ) {
+    return NextResponse.json(
+      { ok: false, error: "Statement files must be 20 MB or smaller." },
+      { status: 413 }
+    );
+  }
+
+  const supabase = await createServerClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return NextResponse.json(
+      { ok: false, error: "Authentication required. Please sign in first." },
+      { status: 401 }
+    );
+  }
+
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -121,6 +184,17 @@ export async function POST(request: NextRequest) {
   }
 
   const file = formData.get("file");
+  const storagePathResult = normalizeOwnedStoragePath(
+    formData.get("storagePath"),
+    user.id
+  );
+
+  if (!storagePathResult.valid || !storagePathResult.path) {
+    return NextResponse.json(
+      { ok: false, error: "Statement storage path is invalid." },
+      { status: 400 }
+    );
+  }
 
   if (!file || !(file instanceof File)) {
     return NextResponse.json(
@@ -129,55 +203,114 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!SUPPORTED_PDF_TYPES.includes(file.type)) {
+  if (!detectStatementFileFormat(file.type, file.name)) {
     return NextResponse.json(
       {
         ok: false,
-        error: `Unsupported file type "${file.type}". Expected application/pdf.`,
+        error:
+          "Unsupported statement file. Upload a CSV export or a text-based Chase credit-card PDF.",
+      },
+      { status: 415 }
+    );
+  }
+
+  if (file.size > MAX_STATEMENT_FILE_BYTES) {
+    return NextResponse.json(
+      { ok: false, error: "Statement files must be 20 MB or smaller." },
+      { status: 413 }
+    );
+  }
+
+  let statementDigest: string;
+  let statementTransactions: StatementTransaction[];
+  try {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    if (
+      !(await storageObjectMatchesBytes(
+        supabase,
+        "statements",
+        storagePathResult.path,
+        buffer
+      ))
+    ) {
+      return NextResponse.json(
+        { ok: false, error: "The uploaded statement could not be verified." },
+        { status: 409 }
+      );
+    }
+    if (detectStatementFileFormat(file.type, file.name) === "csv" && csvHasTooManyPhysicalRows(buffer)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `A statement may contain at most ${MAX_STATEMENT_TRANSACTIONS} transactions.`,
+        },
+        { status: 413 }
+      );
+    }
+    statementDigest = createHash("sha256").update(buffer).digest("hex");
+    statementTransactions = (
+      await parseStatementFile({
+        data: buffer,
+        mimeType: file.type,
+        filename: file.name,
+      })
+    ).transactions;
+  } catch (error) {
+    return statementParseErrorResponse(error);
+  }
+  if (statementTransactions.length === 0) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "No purchase transactions were found in this statement.",
+      },
+      { status: 400 }
+    );
+  }
+  if (statementTransactions.length > MAX_STATEMENT_TRANSACTIONS) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `A statement may contain at most ${MAX_STATEMENT_TRANSACTIONS} transactions.`,
       },
       { status: 400 }
     );
   }
 
-  let text: string;
+  const uploadedStoragePath = storagePathResult.path;
+  const draftPayload = createStatementImportDraftPayload({
+    transactions: statementTransactions,
+    statementDigest,
+    storagePath: uploadedStoragePath,
+  });
+
+  let draft;
   try {
-    const buffer = Buffer.from(await file.arrayBuffer());
-    text = await extractPdfText(buffer);
-  } catch (err) {
+    draft = await createImportDraft(draftPayload, user.id, supabase);
+  } catch {
     return NextResponse.json(
       {
         ok: false,
-        error:
-          err instanceof Error
-            ? `PDF text extraction failed: ${err.message}`
-            : "PDF text extraction failed.",
+        error: "Failed to prepare statement review. Please try again.",
       },
       { status: 500 }
     );
   }
 
-  const year = detectStatementYear(text);
-  if (year === null) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error:
-          "Could not determine the statement year from the PDF. " +
-          "The statement must contain a clearly dated closing/statement date or period.",
-      },
-      { status: 400 }
-    );
-  }
+  return NextResponse.json({
+    ok: true,
+    draftId: draft.id,
+    expiresAt: draft.expiresAt,
+    transactions: statementTransactions,
+  });
+}
 
-  const parsed = parseTransactions(text);
-  const statementTransactions = parsed.map((tx) => toStatementTransaction(tx, year));
-  const purchases = statementTransactions.map((tx) => purchaseFromStatement(tx));
-
-  // Persist each statement Purchase for the authenticated user. The server
-  // client reads the Supabase session from request cookies, so browser and
-  // server share the same authenticated session.
+export async function PATCH(request: NextRequest) {
   const supabase = await createServerClient();
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
 
   if (authError || !user) {
     return NextResponse.json(
@@ -186,33 +319,58 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // NOTE: A Chase statement account number is NOT a card identifier and is
-  // never used to populate Purchase.cardId. The account number is a different
-  // identifier from a credit-card last four, so matching them would be
-  // incorrect. Card-used confirmation requires card-specific evidence (e.g. a
-  // card's printed last four on a receipt, or explicit user confirmation) and
-  // must come from a legitimate evidence source, not the statement account
-  // number. Statement Purchases therefore keep cardId = null here.
-  const persistedPurchases = [];
-  for (const purchase of purchases) {
-    try {
-      persistedPurchases.push(await persistPurchase(purchase, user.id));
-    } catch {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Failed to save one or more statement purchases. Please try again.",
-          transactions: statementTransactions,
-          purchases: persistedPurchases,
-        },
-        { status: 500 }
-      );
-    }
+  const draftId = await readDraftId(request);
+  if (!draftId) {
+    return NextResponse.json(
+      { ok: false, error: "A statement import draft is required." },
+      { status: 400 }
+    );
   }
 
-  return NextResponse.json({
-    ok: true,
-    transactions: statementTransactions,
-    purchases: persistedPurchases,
-  });
+  try {
+    const result = await confirmImportDraft(
+      draftId,
+      "statement",
+      user.id,
+      supabase
+    );
+    return NextResponse.json({ ok: true, ...result });
+  } catch (error) {
+    return importDraftErrorResponse(error);
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  const supabase = await createServerClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    return NextResponse.json(
+      { ok: false, error: "Authentication required. Please sign in first." },
+      { status: 401 }
+    );
+  }
+
+  const draftId = await readDraftId(request);
+  if (!draftId) {
+    return NextResponse.json(
+      { ok: false, error: "A statement import draft is required." },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const result = await discardImportDraft(
+      draftId,
+      "statement",
+      user.id,
+      supabase
+    );
+    return NextResponse.json({ ok: true, ...result });
+  } catch (error) {
+    return importDraftErrorResponse(error);
+  }
 }

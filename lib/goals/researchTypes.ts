@@ -4,6 +4,8 @@ export interface ResearchQuery {
   query: string;
   includeDomains: string[];
   maxResults?: number;
+  /** Search depth preference. Defaults to "basic" when absent. */
+  searchDepth?: "basic" | "advanced";
 }
 
 export interface ResearchResult {
@@ -48,6 +50,10 @@ export const SPECIALIST_DOMAINS: readonly string[] = Object.freeze([
   "frequentmiler.com",
   "upgradedpoints.com",
   "thepointsguy.com",
+  "onemileatatime.com",
+  "liveandletsfly.com",
+  "nerdwallet.com",
+  "milevalue.com",
 ]);
 
 export const TRUSTED_DOMAINS: readonly string[] = Object.freeze([

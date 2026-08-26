@@ -14,22 +14,35 @@ import {
  * Field-level provenance is populated to track how each value was
  * produced.
  */
+export interface PurchaseFromStatementOptions {
+  /** Stable identifier for this transaction within its source statement. */
+  sourceId?: string;
+  /** Storage bucket/path metadata for the uploaded statement object. */
+  storage?: { bucket: string; path: string };
+}
+
 export function purchaseFromStatement(
   transaction: StatementTransaction,
-  id?: string
+  id?: string,
+  options?: PurchaseFromStatementOptions
 ): Purchase {
   const purchaseId =
     id || `purchase-statement-${transaction.id}`;
+  const evidenceSourceId = options?.sourceId ?? transaction.id;
+  const evidenceId = `evidence-${evidenceSourceId}`;
+  const evidenceMetadata = options?.storage
+    ? { bucket: options.storage.bucket, path: options.storage.path }
+    : null;
 
   const evidence: PurchaseEvidence[] = [
     {
-      id: purchaseId,
+      id: evidenceId,
       type: "statement",
-      sourceId: transaction.id,
+      sourceId: evidenceSourceId,
       sourceName: transaction.merchant,
       confidence: transaction.confidence,
-      verified: true,
-      metadata: null,
+      verified: false,
+      metadata: evidenceMetadata,
     },
   ];
 
@@ -39,31 +52,31 @@ export function purchaseFromStatement(
   const provenance: Record<string, PurchaseFieldProvenance> = {
     merchant: createEvidenceProvenance(
       "merchant",
-      [purchaseId],
+      [evidenceId],
       transaction.confidence,
       "statement-parser"
     ),
     date: createEvidenceProvenance(
       "date",
-      [purchaseId],
+      [evidenceId],
       transaction.confidence,
       "statement-parser"
     ),
     amount: createEvidenceProvenance(
       "amount",
-      [purchaseId],
+      [evidenceId],
       transaction.confidence,
       "statement-parser"
     ),
     source: createEvidenceProvenance(
       "source",
-      [purchaseId],
+      [evidenceId],
       transaction.confidence,
       "statement-parser"
     ),
     sourceConfidence: createEvidenceProvenance(
       "sourceConfidence",
-      [purchaseId],
+      [evidenceId],
       transaction.confidence,
       "statement-parser"
     ),
@@ -75,7 +88,7 @@ export function purchaseFromStatement(
   if (transaction.currency !== null) {
     provenance.currency = createEvidenceProvenance(
       "currency",
-      [purchaseId],
+      [evidenceId],
       transaction.confidence,
       "statement-parser"
     );
@@ -83,7 +96,7 @@ export function purchaseFromStatement(
   if (transaction.cardId !== null) {
     provenance.cardId = createEvidenceProvenance(
       "cardId",
-      [purchaseId],
+      [evidenceId],
       transaction.confidence,
       "statement-parser"
     );
@@ -92,9 +105,13 @@ export function purchaseFromStatement(
   // Category is parser-derived (a deterministic rule applied to the
   // merchant name), not directly read from the statement line.
   if (transaction.category !== null) {
-    provenance.category = createInferredProvenance(
+    provenance.category = transaction.categorySource === "statement"
+      ? createEvidenceProvenance(
+          "category", [evidenceId], transaction.confidence, "statement-parser"
+        )
+      : createInferredProvenance(
       "category",
-      [purchaseId],
+      [evidenceId],
       1,
       "deterministic-category-rule"
     );

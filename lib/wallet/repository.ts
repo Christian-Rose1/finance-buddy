@@ -236,13 +236,15 @@ export async function deleteWalletCard(
 ): Promise<void> {
   const supabase = client ?? await createServerClient();
 
-  const { error } = await supabase
+  const { data: row, error } = await supabase
     .from("wallet_cards")
     .delete()
     .eq("id", cardId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !row) {
     throw new Error("Failed to delete wallet card.");
   }
 }

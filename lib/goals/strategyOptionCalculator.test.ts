@@ -173,6 +173,46 @@ describe("calculateTripNights", () => {
     });
     assert.equal(calculateTripNights(goal), 9);
   });
+it("respects declared minimumNights over a wider date window", () => {
+    const goal = makeGoal({
+      earliestDeparture: "2026-07-01",
+      latestReturn: "2026-07-28",
+      minimumNights: 8,
+      maximumNights: 16,
+    });
+    // Window span is 27 nights, but the declared minimum (8) is the stay length.
+    assert.equal(calculateTripNights(goal), 8);
+  });
+
+  it("falls back to maximumNights when only the maximum is declared", () => {
+    const goal = makeGoal({
+      earliestDeparture: "2026-07-01",
+      latestReturn: "2026-07-28",
+      minimumNights: null,
+      maximumNights: 16,
+    });
+    assert.equal(calculateTripNights(goal), 16);
+  });
+
+  it("rejects a declared minimum that exceeds the date span", () => {
+    const goal = makeGoal({
+      earliestDeparture: "2026-07-01",
+      latestReturn: "2026-07-04",
+      minimumNights: 5,
+      maximumNights: null,
+    });
+    assert.equal(calculateTripNights(goal), null);
+  });
+
+  it("rejects an oversized maximum for a short date window", () => {
+    const goal = makeGoal({
+      earliestDeparture: "2026-07-01",
+      latestReturn: "2026-07-04",
+      minimumNights: null,
+      maximumNights: 5,
+    });
+    assert.equal(calculateTripNights(goal), null);
+  });
 });
 
 // ---------------------------------------------------------------------------

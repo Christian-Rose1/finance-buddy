@@ -25,8 +25,17 @@ function isObject(
 ): value is Record<string, unknown> {
   return (
     typeof value === "object" &&
-    value !== null
+    value !== null &&
+    !Array.isArray(value)
   );
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[]
+): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
 }
 
 function isNullableString(
@@ -81,9 +90,23 @@ function isIsoDate(
     return true;
   }
 
+  if (typeof value !== "string") return false;
+
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+
   return (
-    typeof value === "string" &&
-    /^\d{4}-\d{2}-\d{2}$/.test(value)
+    year >= 1 &&
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
   );
 }
 
@@ -96,6 +119,23 @@ function validateItem(
   if (!isObject(value)) {
     return new ReceiptValidationError(
       "Item must be an object.",
+      path
+    );
+  }
+
+  if (
+    !hasOnlyKeys(value, [
+      "name",
+      "quantity",
+      "unit_price",
+      "total",
+      "discount",
+      "category",
+      "confidence",
+    ])
+  ) {
+    return new ReceiptValidationError(
+      "Item contains an unrecognized field.",
       path
     );
   }
@@ -160,6 +200,30 @@ export function validateReceiptExtraction(
       success: false,
       error: new ReceiptValidationError(
         "Receipt extraction must be an object.",
+        "$"
+      ),
+    };
+  }
+
+  if (
+    !hasOnlyKeys(value, [
+      "merchant",
+      "transaction_date",
+      "currency",
+      "items",
+      "subtotal",
+      "tax",
+      "tip",
+      "discount",
+      "total",
+      "confidence",
+      "source",
+    ])
+  ) {
+    return {
+      success: false,
+      error: new ReceiptValidationError(
+        "Receipt extraction contains an unrecognized field.",
         "$"
       ),
     };
@@ -270,10 +334,18 @@ export function validateReceiptExtraction(
     };
   }
 
-  const items: ReceiptItem[] =
-    value.items.map(
-      (item) => item as ReceiptItem
-    );
+  const items: ReceiptItem[] = value.items.map((item) => {
+    const source = item as Record<string, unknown>;
+    return {
+      name: source.name as string | null,
+      quantity: source.quantity as number | null,
+      unit_price: source.unit_price as number | null,
+      total: source.total as number | null,
+      discount: source.discount as number | null,
+      category: source.category as string | null,
+      confidence: source.confidence as number,
+    };
+  });
 
   return {
     success: true,

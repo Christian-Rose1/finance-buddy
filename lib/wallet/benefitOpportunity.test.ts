@@ -55,6 +55,7 @@ function makeProduct(overrides: Partial<ProductBenefit> = {}): ProductBenefit {
     eligibleMerchant: null,
     fixedValue: 100,
     annualLimit: 100,
+    periodType: "calendar_year",
     requiresActivation: false,
     source: "issuer_website",
     lastVerifiedAt: "2026-08-17T14:00:00Z",
@@ -71,6 +72,8 @@ function makeState(overrides: Partial<WalletBenefit> = {}): WalletBenefit {
     active: true,
     activatedAt: null,
     expiresAt: null,
+    periodStart: null,
+    periodEnd: null,
     remainingValue: 100,
     usedValue: 0,
     metadata: null,
@@ -144,6 +147,23 @@ describe("evaluateBenefitOpportunity", () => {
     assert.equal(result.status, "not_eligible");
     assert.equal(result.usableValue, null);
     assert.equal(result.potentialValue, null);
+  });
+
+  it("rejects inactive catalog benefits and expired or out-of-period state", () => {
+    for (const state of [
+      makeState({ expiresAt: "2026-07-31T00:00:00Z" }),
+      makeState({ periodStart: "2026-09-01T00:00:00Z" }),
+      makeState({ periodEnd: "2026-07-31T00:00:00Z" }),
+    ]) {
+      assert.equal(
+        evaluateBenefitOpportunity(makePurchase(), makeProduct(), state).status,
+        "not_eligible"
+      );
+    }
+    assert.equal(
+      evaluateBenefitOpportunity(makePurchase(), makeProduct({ active: false }), makeState()).status,
+      "not_eligible"
+    );
   });
 
   it("category mismatch → not_eligible", () => {

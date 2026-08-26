@@ -16,6 +16,9 @@ import {
   getWalletBenefitForUser,
   updateWalletBenefit,
   deleteWalletBenefit,
+  createWalletBenefitFromProduct,
+  updateWalletBenefitForCard,
+  getWalletBenefitOptionsForCard,
   getWalletBenefitsWithProducts,
   type CreateWalletBenefitInput,
 } from "./benefitsRepository";
@@ -253,6 +256,25 @@ function makeProductBenefitRow(overrides: Row = {}): Row {
   };
 }
 
+function makeWalletCardRow(overrides: Row = {}): Row {
+  return {
+    id: "card-1",
+    user_id: "user-a",
+    name: "Card A",
+    issuer: "Bank A",
+    network: "visa",
+    reward_currency: "points",
+    last_four: "1111",
+    active: true,
+    source: "user",
+    card_product_id: "product-1",
+    metadata: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -388,17 +410,292 @@ describe("wallet benefits repository", () => {
     assert.equal(getRows(client, "wallet_benefits").length, 0);
   });
 
-  it("does not delete another user's benefit", async () => {
+  it("rejects deleting another user's benefit", async () => {
     const client = makeClient({
       wallet_benefits: [
         makeBenefitRow({ id: "benefit-1", user_id: "user-b" }),
       ],
     });
 
-    await deleteWalletBenefit("benefit-1", "user-a", client);
+    await assert.rejects(
+      deleteWalletBenefit("benefit-1", "user-a", client),
+      /Failed to delete wallet benefit/
+    );
 
     // row belonging to user-b remains
     assert.equal(getRows(client, "wallet_benefits").length, 1);
+  });
+
+  it("creates catalog-derived state only for an owned card's linked product", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [makeProductBenefitRow()],
+    });
+
+    const benefit = await createWalletBenefitFromProduct(
+      "card-1",
+      "benefit-def-1",
+      "user-a",
+      client
+    );
+
+    assert.equal(benefit.active, false);
+    assert.equal(benefit.remainingValue, 50);
+    assert.equal(benefit.usedValue, 0);
+    assert.equal(benefit.activatedAt, null);
+  });
+
+  it("rejects catalog state for another user's card or a different card product", async () => {
+    const otherUserClient = makeClient({
+      wallet_cards: [makeWalletCardRow({ user_id: "user-b" })],
+      product_benefits: [makeProductBenefitRow()],
+    });
+    const wrongProductClient = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [
+        makeProductBenefitRow({ card_product_id: "product-2" }),
+      ],
+    });
+
+    await assert.rejects(
+      createWalletBenefitFromProduct(
+        "card-1",
+        "benefit-def-1",
+        "user-a",
+        otherUserClient
+      ),
+      /not linked to a catalog product/
+    );
+    await assert.rejects(
+      createWalletBenefitFromProduct(
+        "card-1",
+        "benefit-def-1",
+        "user-a",
+        wrongProductClient
+      ),
+      /not available for this card/
+    );
+  });
+
+  it("returns existing state instead of creating a duplicate", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [makeProductBenefitRow()],
+      wallet_benefits: [makeBenefitRow()],
+    });
+
+    const benefit = await createWalletBenefitFromProduct(
+      "card-1",
+      "benefit-def-1",
+      "user-a",
+      client
+    );
+
+    assert.equal(benefit.id, "benefit-1");
+    assert.equal(getRows(client, "wallet_benefits").length, 1);
+  });
+
+  it("updates state only through the owned card and enforces the catalog cap", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [makeProductBenefitRow()],
+      wallet_benefits: [makeBenefitRow()],
+    });
+
+    const updated = await updateWalletBenefitForCard(
+      "benefit-1",
+      "card-1",
+      { remainingValue: 30, usedValue: 20 },
+      "user-a",
+      client
+    );
+    assert.equal(updated.remainingValue, 30);
+    assert.equal(updated.usedValue, 20);
+
+    await assert.rejects(
+      updateWalletBenefitForCard(
+        "benefit-1",
+        "card-1",
+        { remainingValue: 40, usedValue: 20 },
+        "user-a",
+        client
+      ),
+      /cannot exceed the catalog limit/
+    );
+    await assert.rejects(
+      updateWalletBenefitForCard(
+        "benefit-1",
+        "card-2",
+        { active: false },
+        "user-a",
+        client
+      ),
+      /not found for this card/
+    );
+  });
+
+  it("cannot mutate another user's benefit through an owned card", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [makeProductBenefitRow()],
+      wallet_benefits: [makeBenefitRow({ user_id: "user-b" })],
+    });
+
+    await assert.rejects(
+      updateWalletBenefitForCard(
+        "benefit-1",
+        "card-1",
+        { active: false },
+        "user-a",
+        client
+      ),
+      /not found for this card/
+    );
+
+    assert.equal(getRows(client, "wallet_benefits")[0].active, true);
+  });
+
+  it("rejects negative and non-finite usage at the repository boundary", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [makeProductBenefitRow()],
+      wallet_benefits: [makeBenefitRow()],
+    });
+
+    for (const updates of [
+      { remainingValue: -1 },
+      { remainingValue: Number.NaN },
+      { remainingValue: Number.POSITIVE_INFINITY },
+      { usedValue: -1 },
+      { usedValue: Number.NaN },
+      { usedValue: Number.POSITIVE_INFINITY },
+    ]) {
+      await assert.rejects(
+        updateWalletBenefitForCard(
+          "benefit-1",
+          "card-1",
+          updates,
+          "user-a",
+          client
+        ),
+        /non-negative number/
+      );
+    }
+  });
+
+  it("allows deactivation but rejects activation after a catalog benefit is retired", async () => {
+    const deactivateClient = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [makeProductBenefitRow({ active: false })],
+      wallet_benefits: [makeBenefitRow({ active: true })],
+    });
+    const activateClient = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [makeProductBenefitRow({ active: false })],
+      wallet_benefits: [makeBenefitRow({ active: false })],
+    });
+
+    const deactivated = await updateWalletBenefitForCard(
+      "benefit-1",
+      "card-1",
+      { active: false },
+      "user-a",
+      deactivateClient
+    );
+    assert.equal(deactivated.active, false);
+
+    await assert.rejects(
+      updateWalletBenefitForCard(
+        "benefit-1",
+        "card-1",
+        { active: true },
+        "user-a",
+        activateClient
+      ),
+      /no longer active/
+    );
+  });
+
+  it("rejects updates when the state definition no longer matches the linked product", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [
+        makeProductBenefitRow({ card_product_id: "product-2" }),
+      ],
+      wallet_benefits: [makeBenefitRow()],
+    });
+
+    await assert.rejects(
+      updateWalletBenefitForCard(
+        "benefit-1",
+        "card-1",
+        { active: false },
+        "user-a",
+        client
+      ),
+      /not available for this card/
+    );
+  });
+
+  it("lists active definitions for the linked product with optional state", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      product_benefits: [
+        makeProductBenefitRow(),
+        makeProductBenefitRow({
+          id: "benefit-def-2",
+          title: "Trip protection",
+          type: "trip_delay",
+          fixed_value: null,
+          annual_limit: null,
+          requires_activation: false,
+        }),
+        makeProductBenefitRow({
+          id: "benefit-def-other",
+          card_product_id: "product-2",
+        }),
+      ],
+      wallet_benefits: [makeBenefitRow()],
+    });
+
+    const options = await getWalletBenefitOptionsForCard(
+      "card-1",
+      "user-a",
+      client
+    );
+
+    assert.deepEqual(
+      options.map((option) => option.product.id),
+      ["benefit-def-1", "benefit-def-2"]
+    );
+    assert.equal(options[0].state?.id, "benefit-1");
+    assert.equal(options[1].state, null);
+  });
+
+  it("does not attach stale state from a previously linked product", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow({ card_product_id: "product-2" })],
+      product_benefits: [
+        makeProductBenefitRow(),
+        makeProductBenefitRow({
+          id: "benefit-def-2",
+          card_product_id: "product-2",
+          title: "Current product benefit",
+        }),
+      ],
+      wallet_benefits: [makeBenefitRow()],
+    });
+
+    const options = await getWalletBenefitOptionsForCard(
+      "card-1",
+      "user-a",
+      client
+    );
+
+    assert.deepEqual(
+      options.map(({ product, state }) => [product.id, state?.id ?? null]),
+      [["benefit-def-2", null]]
+    );
   });
 
   it("ignores a user_id supplied in the create input", async () => {
@@ -468,6 +765,7 @@ describe("wallet benefits repository", () => {
 
   it("rehydrates user benefit state with its shared product definition", async () => {
     const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
       wallet_benefits: [makeBenefitRow()],
       product_benefits: [makeProductBenefitRow()],
     });
@@ -491,6 +789,7 @@ describe("wallet benefits repository", () => {
 
   it("returns an empty array when there is no persisted benefit state", async () => {
     const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
       wallet_benefits: [],
       product_benefits: [makeProductBenefitRow()],
     });
@@ -503,6 +802,7 @@ describe("wallet benefits repository", () => {
   it("skips benefit state whose product definition cannot be resolved", async () => {
     // benefit has no corresponding product_benefits row
     const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
       wallet_benefits: [makeBenefitRow()],
       product_benefits: [],
     });
@@ -512,8 +812,27 @@ describe("wallet benefits repository", () => {
     assert.equal(displays.length, 0);
   });
 
+  it("skips state for a definition from a different linked product", async () => {
+    const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
+      wallet_benefits: [makeBenefitRow()],
+      product_benefits: [
+        makeProductBenefitRow({ card_product_id: "product-2" }),
+      ],
+    });
+
+    const displays = await getWalletBenefitsWithProducts(
+      "card-1",
+      "user-a",
+      client
+    );
+
+    assert.equal(displays.length, 0);
+  });
+
   it("does not expose another user's benefit state", async () => {
     const client = makeClient({
+      wallet_cards: [makeWalletCardRow()],
       wallet_benefits: [
         makeBenefitRow({ id: "benefit-1", user_id: "user-b", product_benefit_id: "benefit-def-1" }),
       ],

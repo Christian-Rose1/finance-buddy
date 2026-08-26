@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git worktree *)",
+      "Bash(ln *)",
+      "Bash(npx *)",
+      "Bash(awk *)",
+      "Bash(sed *)",
+      "Bash(set *)",
+      "Bash(source *)",
+      "Bash(curl *)",
+      "Bash(python3 *)",
+      "Bash(echo *)",
+      "Bash(node *)",
+      "Bash(supabase *)",
+      "Bash(cat *)",
+      "Bash(rm *)",
+      "Bash(brew *)",
+      "Bash(npm *)",
+      "Bash(ls *)"
+    ]
+  },
+  "$version": 4
+}

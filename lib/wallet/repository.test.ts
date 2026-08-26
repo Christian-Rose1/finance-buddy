@@ -403,6 +403,33 @@ describe("wallet card repository", () => {
     assert.equal(getRows(client, "wallet_cards").length, 0);
   });
 
+  it("rejects deleting another user's card without removing it", async () => {
+    const client = makeClient({
+      wallet_cards: [
+        {
+          id: "card-1",
+          user_id: "user-b",
+          name: "Card B",
+          issuer: "Bank B",
+          network: "amex",
+          reward_currency: "cashback",
+          last_four: "2222",
+          active: true,
+          source: "user",
+          metadata: null,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    await assert.rejects(
+      deleteWalletCard("card-1", "user-a", client),
+      /Failed to delete wallet card/
+    );
+    assert.equal(getRows(client, "wallet_cards").length, 1);
+  });
+
   it("ignores a user_id supplied in the create input", async () => {
     const client = makeClient();
     const input = makeInput({ metadata: { source: "test" } });

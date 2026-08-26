@@ -169,6 +169,8 @@ export interface PersonalizedStrategy {
   followUpQuestions: string[];
   pointsInventory: StrategyPointsInventoryItem[];
   allocationScenarios: StrategyAllocationScenario[];
+  /** Server-only lifecycle marker; deterministic degradation is never saved. */
+  deterministicFallback?: boolean;
 }
 
 /**
@@ -182,8 +184,58 @@ export type PersonalizedStrategyNarrative = Omit<
   "pointsInventory" | "allocationScenarios"
 >;
 
+// ---------------------------------------------------------------------------
+// Sanitized cloud-safe prompt types
+// ---------------------------------------------------------------------------
+
+export interface SanitizedGoal {
+  type: "travel";
+  title: string;
+  origin: string[];
+  destinations: string[];
+  earliestDeparture: string | null;
+  latestReturn: string | null;
+  minimumNights: number | null;
+  maximumNights: number | null;
+  travelerCount: number;
+  cabinPreference: string;
+  optimizationPriority: string;
+  maximumCashBudget: number | null;
+  currency: string;
+  allowNewCards: boolean;
+}
+
+export interface SanitizedPointsInventoryItem {
+  programName: string | null;
+  ownerType: "self" | "companion";
+  balance: number;
+  verificationStatus: "unverified" | "verified";
+  origin: "manual" | "evidence" | "connected";
+}
+
+export interface SanitizedWalletCard {
+  name: string;
+  issuer: string;
+  rewardCurrency: string;
+}
+
+export interface SanitizedStrategyPrompt {
+  goal: SanitizedGoal;
+  pointsInventory: SanitizedPointsInventoryItem[];
+  walletCards: SanitizedWalletCard[];
+  monthlySpendingByCategory: StrategySpendingCategory[];
+  awardOptions: StrategyAwardOption[];
+  cardOffers: StrategyCardOffer[];
+  sources: StrategySource[];
+  generatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Provider interface
+// ---------------------------------------------------------------------------
+
 export interface StrategyProvider {
   generateStrategy(
-    context: PersonalizedStrategyContext
+    prompt: SanitizedStrategyPrompt
   ): Promise<PersonalizedStrategyNarrative>;
 }

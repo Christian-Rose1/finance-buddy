@@ -34,6 +34,8 @@ export type BenefitOpportunityStatus =
   | "not_eligible";
 
 export interface BenefitOpportunity {
+  /** Owning wallet card, required for attributing value to a purchase. */
+  cardId: string;
   /** Shared product-level benefit definition id. */
   productBenefitId: string;
 
@@ -156,21 +158,41 @@ export function evaluateBenefitOpportunity(
   state: WalletBenefit
 ): BenefitOpportunity {
   const base = {
+    cardId: state.walletCardId,
     productBenefitId: product.id,
     walletBenefitId: state.id,
     title: product.title,
     remainingValue: state.remainingValue,
   };
 
-  // Inactive benefit → not eligible.
-  if (!state.active) {
+  if (!purchase.currency?.trim()) {
+    return {
+      ...base,
+      status: "not_eligible",
+      usableValue: null,
+      potentialValue: null,
+      missingConditions: ["purchase_currency"],
+      reason: "The purchase currency is unknown, so benefit value cannot be calculated.",
+    };
+  }
+
+  const purchaseTime = purchase.date ? Date.parse(purchase.date) : null;
+  const outside = (boundary: string | null, start: boolean) => {
+    if (!boundary || purchaseTime === null || !Number.isFinite(purchaseTime)) return false;
+    const boundaryTime = Date.parse(boundary);
+    return Number.isFinite(boundaryTime) && (start ? purchaseTime < boundaryTime : purchaseTime > boundaryTime);
+  };
+
+  if (!product.active || !state.active || outside(state.periodStart, true) ||
+      outside(state.periodEnd, false) || outside(state.expiresAt, false)) {
     return {
       ...base,
       status: "not_eligible",
       usableValue: null,
       potentialValue: null,
       missingConditions: [],
-      reason: "This benefit is not active.",
+      reason: !product.active ? "This benefit is not active in the catalog." :
+        !state.active ? "This benefit is not active." : "This benefit is outside its active period.",
     };
   }
 

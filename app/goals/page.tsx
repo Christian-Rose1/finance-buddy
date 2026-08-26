@@ -7,7 +7,7 @@ import {
   type SavedGoalStrategy,
 } from "@/lib/goals/strategyRepository";
 import { GoalForm } from "@/components/goal-form";
-import { GoalStrategyPanel } from "@/components/goal-strategy-panel";
+import { GoalCard } from "@/components/goal-card";
 import { Target } from "lucide-react";
 
 async function loadGoalsData() {
@@ -59,11 +59,11 @@ export default async function GoalsPage() {
               Financial Goals
             </h1>
             <p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-base">
-              Plan your travel goals and we'll help you find the best way to fund them with points.
+              Plan your travel goals and we&apos;ll help you find the best way to fund them with points.
             </p>
           </div>
           <div className="hidden h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-sky-400/30 bg-sky-400/10 text-sky-300 sm:flex">
-            <Target className="h-6 w-6" />
+            <Target aria-hidden="true" className="h-6 w-6" />
           </div>
         </div>
 
@@ -101,34 +101,18 @@ export default async function GoalsPage() {
           <div className="space-y-4">
             {goals.length === 0 ? (
               <div className="fb-card p-8 text-center">
-                <p className="text-slate-400">You haven't created any goals yet.</p>
+                <p className="text-slate-400">You haven&apos;t created any goals yet.</p>
               </div>
             ) : (
               goals.map((goal) => (
-                <div key={goal.id} className="fb-card p-4 sm:p-6">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="text-lg font-medium text-white">{goal.title}</h3>
-                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400">
-                        <span>
-                          {goal.origin.join(", ")} → {goal.destinations.join(", ")}
-                        </span>
-                        <span>•</span>
-                        <span className="capitalize">{goal.cabinPreference}</span>
-                        <span>•</span>
-                        <span>{goal.travelerCount} {goal.travelerCount === 1 ? "traveler" : "travelers"}</span>
-                      </div>
-                    </div>
-                    <div className="rounded-full bg-sky-400/10 px-2.5 py-0.5 text-xs font-medium text-sky-300 capitalize">
-                      {goal.status}
-                    </div>
-                  </div>
-
-                  <GoalStrategyPanel
-                    goalId={goal.id}
-                    initialStrategy={savedStrategies[goal.id]?.strategy ?? null}
-                  />
-                </div>
+                <GoalCard
+                  key={goal.id}
+                  goal={goal}
+                  initialStrategy={savedStrategies[goal.id]?.strategy ?? null}
+                  strategyGeneratedAt={
+                    savedStrategies[goal.id]?.generatedAt ?? null
+                  }
+                />
               ))
             )}
           </div>

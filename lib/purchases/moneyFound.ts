@@ -54,14 +54,14 @@ export interface MoneyFoundItem {
   /** Trusted dollar value for THIS purchase. */
   value: number;
 
-  /** Currency of the value (purchase currency, default USD). */
-  currency: string;
+  /** Currency of the value, when the purchase currency is known. */
+  currency: string | null;
 }
 
 export interface MoneyFoundResult {
   /** Sum of all trusted dollar values for this purchase, rounded to cents. */
   total: number;
-  currency: string;
+  currency: string | null;
   items: MoneyFoundItem[];
 }
 
@@ -92,9 +92,8 @@ export function computeMoneyFound(
   optimization?: PurchaseOptimizationResult | null,
   opportunities?: BenefitOpportunity[]
 ): MoneyFoundResult {
-  const currency = purchase.currency && purchase.currency.length === 3
-    ? purchase.currency
-    : "USD";
+  const currency = purchase.currency?.trim().toUpperCase() || null;
+  if (currency === null) return { total: 0, currency: null, items: [] };
 
   const items: MoneyFoundItem[] = [];
 
@@ -130,6 +129,7 @@ export function computeMoneyFound(
     for (const opportunity of opportunities) {
       if (
         opportunity.status === "confirmed_eligible" &&
+        opportunity.cardId === purchase.cardId &&
         (opportunity.usableValue ?? 0) > 0
       ) {
         items.push({

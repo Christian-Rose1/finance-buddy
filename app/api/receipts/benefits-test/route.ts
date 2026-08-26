@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * Development test endpoint for the deterministic wallet benefit matching
- * engine.
+ * engine. This endpoint is unavailable in production; production requests
+ * receive a 404 before the request body or development fixtures are used.
  *
  * Accepts a validated `ReceiptExtraction` JSON payload and returns the
  * `BenefitMatch[]` results from matching it against the development wallet
@@ -22,6 +23,13 @@ export const dynamic = "force-dynamic";
  *   { "ok": true, "benefits": BenefitMatch[] }
  */
 export async function POST(request: NextRequest) {
+  if (process.env.NODE_ENV === "production") {
+    return NextResponse.json(
+      { ok: false, error: "Not found." },
+      { status: 404 }
+    );
+  }
+
   let body: unknown;
   try {
     body = await request.json();

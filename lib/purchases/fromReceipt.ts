@@ -64,13 +64,14 @@ export function purchaseFromReceipt(
   // is a stable identifier for this receipt source; otherwise fall back to the
   // generated purchase id for non-Storage usage of the adapter.
   const evidenceSourceId = options?.sourceId ?? purchaseId;
+  const evidenceId = `evidence-${evidenceSourceId}`;
   const evidenceMetadata = options?.storage
     ? { bucket: options.storage.bucket, path: options.storage.path }
     : null;
 
   const evidence: PurchaseEvidence[] = [
     {
-      id: purchaseId,
+      id: evidenceId,
       type: "receipt",
       sourceId: evidenceSourceId,
       sourceName: receipt.source,
@@ -87,55 +88,55 @@ export function purchaseFromReceipt(
   const provenance: Record<string, PurchaseFieldProvenance> = {
     merchant: createEvidenceProvenance(
       "merchant",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     date: createEvidenceProvenance(
       "date",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     amount: createEvidenceProvenance(
       "amount",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     currency: createEvidenceProvenance(
       "currency",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     source: createEvidenceProvenance(
       "source",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     sourceConfidence: createEvidenceProvenance(
       "sourceConfidence",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     discount: createEvidenceProvenance(
       "discount",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     tax: createEvidenceProvenance(
       "tax",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
     tip: createEvidenceProvenance(
       "tip",
-      [purchaseId],
+      [evidenceId],
       receipt.confidence,
       "receipt-extraction"
     ),
@@ -146,7 +147,7 @@ export function purchaseFromReceipt(
   if (category !== null) {
     provenance.category = createInferredProvenance(
       "category",
-      [purchaseId],
+      [evidenceId],
       1,
       "deterministic-category-rule"
     );

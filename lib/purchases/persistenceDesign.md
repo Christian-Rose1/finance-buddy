@@ -294,45 +294,42 @@ RLS is enabled on all three tables: `purchases`, `purchase_items`,
 
 ---
 
-## 9. Evidence idempotency (uniqueness rule)
+## 9. Import and evidence idempotency
 
-Duplicate evidence insertion is prevented deterministically.
+Evidence uniqueness and import uniqueness solve different problems.
 
-### Rule
+### Purchase import key
 
-A `purchase_evidence` row is unique on:
+New receipt and statement imports carry a stable `purchases.source_key`:
 
-```
-(purchase_id, type, source_id)
-```
+- Receipt: SHA-256 of the uploaded image bytes.
+- Statement transaction: SHA-256 of the statement PDF bytes plus the stable
+  parsed transaction id.
 
-**when `source_id` is not null.**
-
-- If `source_id` is not null → uniqueness enforced by the constraint above.
-- If `source_id` is null (manual, or no stable id) → no uniqueness constraint;
-  idempotency falls back to application-layer de-duplication (e.g., by
-  `purchase_id + type + metadata fingerprint`).
-
-### Partial unique index
+The database enforces:
 
 ```sql
-CREATE UNIQUE INDEX uq_purchase_evidence_source
-  ON purchase_evidence (purchase_id, type, source_id)
-  WHERE source_id IS NOT NULL;
+CREATE UNIQUE INDEX purchases_user_source_key_unique
+  ON purchases (user_id, source, source_key)
+  WHERE source_key IS NOT NULL;
 ```
 
-This is a **partial unique index**: it only treats rows as duplicate when a
-stable `source_id` exists. This avoids blocking legitimate multiple null-source-id
-manual evidence rows.
+`persist_purchase` returns the existing Purchase when this key already exists,
+so retrying identical source content is idempotent. Historical rows retain a
+null key and are not retroactively deduplicated.
 
-### Consequences
+### Atomic statement batch
 
-- Re-importing the same statement transaction id twice → second insert conflicts,
-  so ingesting the same source twice is idempotent.
-- The same receipt re-uploaded with the same `source_id` on the same purchase →
-  conflict, no duplicate evidence row.
-- Matching may collect evidence IDs from both purchases, but **matching never
-  merges**. Merging is a separate explicit operation (see §2).
+`persist_purchases` accepts up to 500 purchase envelopes and writes the entire
+statement in one PostgreSQL transaction. A malformed entry or write failure
+rolls back the batch; a retry safely reuses any already-existing source keys.
+
+### Evidence uniqueness
+
+Evidence within one Purchase remains unique on
+`(purchase_id, type, source_id)` when `source_id` is non-null. This prevents
+duplicate evidence attachment after future merge workflows, while the
+purchase-level source key prevents duplicate parent Purchases during import.
 
 ---
 
@@ -351,11 +348,10 @@ manual evidence rows.
 
 ---
 
-## 11. Non-goals (this design)
+## 11. Current limitations
 
-- No `wallet_cards` table yet → `card_id` stays `text`.
-- No storage-bucket schema here → storage lives in `purchase_evidence.metadata`.
-- No RLS trigger/security-invoker function definitions; policies above are the
-  contract.
-- No migration files. This document is the design source of truth for a future
-  migration.
+- `purchases.card_id` remains `text`; application actions validate ownership
+  before setting it, but the database does not yet enforce a wallet-card FK.
+- Storage object identity remains in `purchase_evidence.metadata`; the database
+  does not fetch or inspect object contents.
+- Existing pre-idempotency Purchase rows are preserved without backfill.

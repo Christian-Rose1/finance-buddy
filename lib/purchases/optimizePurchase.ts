@@ -215,10 +215,11 @@ function benefitToRule(benefit: CardBenefit): RewardEligibilityRule | null {
  */
 function earningRuleToRule(
   rule: EarningRule,
-  walletCardId: string
+  walletCardId: string,
+  identity = rule.id
 ): RewardEligibilityRule {
   return {
-    id: rule.id,
+    id: identity,
     cardId: walletCardId,
     type: rule.type,
     eligibleCategory: rule.eligibleCategory,
@@ -251,6 +252,8 @@ function calculateRuleValue(
   if (result.status !== "confirmed_eligible" && result.status !== "likely_eligible") {
     return 0;
   }
+
+  if (purchase.currency === null || purchase.currency.trim() === "") return 0;
 
   const amount = purchase.amount ?? 0;
 
@@ -353,6 +356,8 @@ function runOptimization(
     ) {
       continue;
     }
+
+    if (!purchase.currency?.trim()) continue;
 
     if (match.estimatedValue > 0) {
       const existing = cardDollarValues.get(match.cardId);
@@ -519,8 +524,9 @@ export function optimizePurchaseWithLinkedCards(
     const activeRules = productRules.filter((rule) => rule.active);
 
     for (const rule of activeRules) {
-      rules.push(earningRuleToRule(rule, card.id));
-      titleByRuleId.set(rule.id, rule.explanation);
+      const identity = `${card.id}:${rule.id}`;
+      rules.push(earningRuleToRule(rule, card.id, identity));
+      titleByRuleId.set(identity, rule.explanation);
     }
   }
 

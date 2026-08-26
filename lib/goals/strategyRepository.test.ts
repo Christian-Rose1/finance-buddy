@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -8,6 +8,26 @@ import {
   type SavedGoalStrategy,
 } from "./strategyRepository";
 import type { PersonalizedStrategy } from "./strategyTypes";
+import {
+  SAVED_STRATEGY_SIGNATURE_VERSION,
+  signSavedStrategy,
+} from "./strategyPersistenceSigning";
+
+const SYNTHETIC_SECRET = "0123456789abcdef0123456789abcdef";
+let originalSigningSecret: string | undefined;
+
+before(() => {
+  originalSigningSecret = process.env.STRATEGY_RUN_SIGNING_SECRET;
+  process.env.STRATEGY_RUN_SIGNING_SECRET = SYNTHETIC_SECRET;
+});
+
+after(() => {
+  if (originalSigningSecret === undefined) {
+    delete process.env.STRATEGY_RUN_SIGNING_SECRET;
+  } else {
+    process.env.STRATEGY_RUN_SIGNING_SECRET = originalSigningSecret;
+  }
+});
 
 /**
  * Minimal mocked Supabase query builder.
@@ -84,8 +104,34 @@ function validRow(overrides: Record<string, unknown> = {}): Record<string, unkno
     generated_at: "2026-08-22T10:00:00.000Z",
     created_at: "2026-08-22T10:00:00.000Z",
     updated_at: "2026-08-22T10:00:00.000Z",
+    integrity_required: false,
+    signature_version: null,
+    strategy_signature: null,
     ...overrides,
   };
+}
+
+function signedRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const strategy = validStrategy();
+  const goalId = "goal-1";
+  const userId = "user-1";
+  const generatedAt = "2026-08-22T10:00:00.000Z";
+  return validRow({
+    goal_id: goalId,
+    user_id: userId,
+    strategy_json: strategy,
+    generated_at: generatedAt,
+    integrity_required: true,
+    signature_version: SAVED_STRATEGY_SIGNATURE_VERSION,
+    strategy_signature: signSavedStrategy({
+      version: SAVED_STRATEGY_SIGNATURE_VERSION,
+      goalId,
+      userId,
+      generatedAt,
+      strategy,
+    }),
+    ...overrides,
+  });
 }
 
 /** A valid PersonalizedStrategy fixture. */
@@ -142,6 +188,7 @@ test("get maps a valid row to SavedGoalStrategy", async () => {
   assert.equal(result.generatedAt, "2026-08-22T10:00:00.000Z");
   assert.equal(result.createdAt, "2026-08-22T10:00:00.000Z");
   assert.equal(result.updatedAt, "2026-08-22T10:00:00.000Z");
+  assert.equal(result.integrity, "legacy");
   assert.equal(result.strategy.headline, "Fly to Europe with points");
   assert.equal(result.strategy.feasibility, "on_track");
 });
@@ -170,6 +217,28 @@ test("get rejects malformed strategy_json safely", async () => {
   );
 });
 
+test("get accepts a valid signed strategy", async () => {
+  const { client } = mockClient({ data: signedRow(), error: null });
+
+  const result = await getLatestStrategyForGoal("goal-1", "user-1", client);
+
+  assert.equal(result?.integrity, "verified");
+});
+
+test("get rejects a tampered signed strategy", async () => {
+  const row = signedRow();
+  row.strategy_json = {
+    ...(row.strategy_json as PersonalizedStrategy),
+    headline: "Tampered headline",
+  };
+  const { client } = mockClient({ data: row, error: null });
+
+  await assert.rejects(
+    () => getLatestStrategyForGoal("goal-1", "user-1", client),
+    /Failed to load saved strategy\./
+  );
+});
+
 test("get throws a generic error on database read error", async () => {
   const { client } = mockClient({ data: null, error: new Error("db down") });
 
@@ -180,7 +249,7 @@ test("get throws a generic error on database read error", async () => {
 });
 
 test("save uses goal_id conflict upsert", async () => {
-  const { client, builderRef } = mockClient({ data: validRow(), error: null });
+  const { client, builderRef } = mockClient({ data: signedRow(), error: null });
 
   await saveLatestStrategy(
     "goal-1",
@@ -196,7 +265,7 @@ test("save uses goal_id conflict upsert", async () => {
 });
 
 test("save payload uses function goalId and userId", async () => {
-  const { client, builderRef } = mockClient({ data: validRow(), error: null });
+  const { client, builderRef } = mockClient({ data: signedRow(), error: null });
 
   await saveLatestStrategy(
     "goal-1",
@@ -211,7 +280,7 @@ test("save payload uses function goalId and userId", async () => {
 });
 
 test("save stores schema_version=1", async () => {
-  const { client, builderRef } = mockClient({ data: validRow(), error: null });
+  const { client, builderRef } = mockClient({ data: signedRow(), error: null });
 
   await saveLatestStrategy(
     "goal-1",
@@ -226,7 +295,7 @@ test("save stores schema_version=1", async () => {
 
 test("save stores strategy_json unchanged", async () => {
   const strategy = validStrategy();
-  const { client, builderRef } = mockClient({ data: validRow(), error: null });
+  const { client, builderRef } = mockClient({ data: signedRow(), error: null });
 
   await saveLatestStrategy(
     "goal-1",
@@ -240,7 +309,7 @@ test("save stores strategy_json unchanged", async () => {
 });
 
 test("save does not include id or created_at", async () => {
-  const { client, builderRef } = mockClient({ data: validRow(), error: null });
+  const { client, builderRef } = mockClient({ data: signedRow(), error: null });
 
   await saveLatestStrategy(
     "goal-1",
@@ -253,6 +322,32 @@ test("save does not include id or created_at", async () => {
   assert.ok(builderRef.current?.upsertPayload);
   assert.equal("id" in builderRef.current.upsertPayload, false);
   assert.equal("created_at" in builderRef.current.upsertPayload, false);
+});
+
+test("save requires and signs integrity metadata", async () => {
+  const { client, builderRef } = mockClient({ data: signedRow(), error: null });
+
+  await saveLatestStrategy(
+    "goal-1",
+    "user-1",
+    validStrategy(),
+    "2026-08-22T10:00:00Z",
+    client
+  );
+
+  assert.equal(builderRef.current?.upsertPayload?.integrity_required, true);
+  assert.equal(
+    builderRef.current?.upsertPayload?.signature_version,
+    SAVED_STRATEGY_SIGNATURE_VERSION
+  );
+  assert.match(
+    String(builderRef.current?.upsertPayload?.strategy_signature),
+    /^[0-9a-f]{64}$/
+  );
+  assert.equal(
+    builderRef.current?.upsertPayload?.generated_at,
+    "2026-08-22T10:00:00.000Z"
+  );
 });
 
 test("save throws a generic error on database write error", async () => {

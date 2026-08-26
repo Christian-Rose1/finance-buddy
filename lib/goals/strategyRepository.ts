@@ -5,12 +5,18 @@
  * All operations use the cookie-aware server Supabase client and rely on RLS
  * as the security boundary. `user_id` and `goal_id` are always taken from the
  * explicit function arguments; no value is ever accepted from a browser
- * payload. Strategy JSON is always server-generated and validated.
+ * payload. New/updated strategy JSON is server-generated, validated, signed,
+ * and verified again on read. Pre-migration rows remain explicitly legacy.
  */
 
 import { createServerClient } from "@/lib/supabase-server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PersonalizedStrategy, StrategyFeasibility } from "./strategyTypes";
+import {
+  SAVED_STRATEGY_SIGNATURE_VERSION,
+  signSavedStrategy,
+  verifySavedStrategy,
+} from "./strategyPersistenceSigning";
 
 /** Current persisted strategy schema version. */
 const CURRENT_STRATEGY_SCHEMA_VERSION = 1;
@@ -32,7 +38,11 @@ export interface SavedGoalStrategy {
   generatedAt: string;
   createdAt: string;
   updatedAt: string;
+  integrity: "legacy" | "verified";
 }
+
+const SELECT_COLUMNS =
+  "goal_id, user_id, strategy_json, schema_version, generated_at, created_at, updated_at, integrity_required, signature_version, strategy_signature";
 
 /** Maps a goal_strategies row (snake_case) to a SavedGoalStrategy (camelCase). */
 function toSavedGoalStrategy(row: Record<string, unknown>): SavedGoalStrategy {
@@ -44,7 +54,47 @@ function toSavedGoalStrategy(row: Record<string, unknown>): SavedGoalStrategy {
     generatedAt: row.generated_at as string,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
+    integrity: row.integrity_required === true ? "verified" : "legacy",
   };
+}
+
+function normalizedTimestamp(value: string): string {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) {
+    throw new Error("Failed to load saved strategy.");
+  }
+  return timestamp.toISOString();
+}
+
+function hasValidIntegrity(record: Record<string, unknown>): boolean {
+  if (record.integrity_required === false) {
+    return (
+      record.signature_version === null && record.strategy_signature === null
+    );
+  }
+
+  if (
+    record.integrity_required !== true ||
+    record.signature_version !== SAVED_STRATEGY_SIGNATURE_VERSION ||
+    typeof record.strategy_signature !== "string"
+  ) {
+    return false;
+  }
+
+  try {
+    return verifySavedStrategy(
+      {
+        version: SAVED_STRATEGY_SIGNATURE_VERSION,
+        goalId: record.goal_id as string,
+        userId: record.user_id as string,
+        generatedAt: normalizedTimestamp(record.generated_at as string),
+        strategy: record.strategy_json,
+      },
+      record.strategy_signature
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -60,6 +110,17 @@ function isValidSavedRow(row: unknown): row is Record<string, unknown> {
   }
 
   const record = row as Record<string, unknown>;
+
+  const stringFields = [
+    "goal_id",
+    "user_id",
+    "generated_at",
+    "created_at",
+    "updated_at",
+  ];
+  if (stringFields.some((field) => typeof record[field] !== "string")) {
+    return false;
+  }
 
   if (record.schema_version !== CURRENT_STRATEGY_SCHEMA_VERSION) {
     return false;
@@ -104,7 +165,7 @@ function isValidSavedRow(row: unknown): row is Record<string, unknown> {
     }
   }
 
-  return true;
+  return hasValidIntegrity(record);
 }
 
 /**
@@ -127,9 +188,7 @@ export async function getLatestStrategyForGoal(
 
   const { data: row, error } = await supabase
     .from("goal_strategies")
-    .select(
-      "goal_id, user_id, strategy_json, schema_version, generated_at, created_at, updated_at"
-    )
+    .select(SELECT_COLUMNS)
     .eq("goal_id", goalId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -175,9 +234,7 @@ export async function getLatestStrategiesForGoals(
 
   const { data: rows, error } = await supabase
     .from("goal_strategies")
-    .select(
-      "goal_id, user_id, strategy_json, schema_version, generated_at, created_at, updated_at"
-    )
+    .select(SELECT_COLUMNS)
     .eq("user_id", userId)
     .in("goal_id", goalIds);
 
@@ -220,22 +277,31 @@ export async function saveLatestStrategy(
   client?: SupabaseClient
 ): Promise<SavedGoalStrategy> {
   const supabase = client ?? (await createServerClient());
+  const normalizedGeneratedAt = normalizedTimestamp(generatedAt);
+  const strategySignature = signSavedStrategy({
+    version: SAVED_STRATEGY_SIGNATURE_VERSION,
+    goalId,
+    userId,
+    generatedAt: normalizedGeneratedAt,
+    strategy,
+  });
 
   const payload = {
     goal_id: goalId,
     user_id: userId,
     strategy_json: strategy,
     schema_version: CURRENT_STRATEGY_SCHEMA_VERSION,
-    generated_at: generatedAt,
+    generated_at: normalizedGeneratedAt,
+    integrity_required: true,
+    signature_version: SAVED_STRATEGY_SIGNATURE_VERSION,
+    strategy_signature: strategySignature,
     updated_at: new Date().toISOString(),
   };
 
   const { data: row, error } = await supabase
     .from("goal_strategies")
     .upsert(payload, { onConflict: "goal_id" })
-    .select(
-      "goal_id, user_id, strategy_json, schema_version, generated_at, created_at, updated_at"
-    )
+    .select(SELECT_COLUMNS)
     .single();
 
   if (error || !row) {

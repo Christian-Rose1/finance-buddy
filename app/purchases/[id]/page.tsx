@@ -10,10 +10,8 @@ import {
 } from "@/lib/rewards/catalogRepository";
 import {
   optimizePurchaseWithLinkedCards,
-  optimizePurchaseWithDevelopmentWallet,
   type PurchaseOptimizationResult,
 } from "@/lib/purchases/optimizePurchase";
-import { DEVELOPMENT_WALLET } from "@/lib/wallet/cards";
 import { getWalletBenefitsWithProducts } from "@/lib/wallet/benefitsRepository";
 import {
   evaluateBenefitOpportunity,
@@ -24,6 +22,7 @@ import {
   type MoneyFoundResult,
 } from "@/lib/purchases/moneyFound";
 import type { Purchase } from "@/lib/purchases/types";
+import { formatMoney } from "@/lib/purchases/formatMoney";
 import type { WalletCard } from "@/lib/wallet/types";
 import type { CardProduct, EarningRule } from "@/lib/rewards/catalogTypes";
 import {
@@ -38,18 +37,6 @@ import {
 } from "lucide-react";
 import { CardUsedSelector } from "@/components/card-used-selector";
 import { BookingChannelSelector } from "../../../components/booking-channel-selector";
-
-function formatCurrency(value: number, currency: string | null): string {
-  const code = currency && currency.length === 3 ? currency : "USD";
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: code,
-    }).format(value);
-  } catch {
-    return `$${value.toFixed(2)}`;
-  }
-}
 
 function formatDate(date: string | null): string {
   if (!date) return "—";
@@ -130,7 +117,7 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
       (card) => card.active && card.cardProductId !== null
     );
 
-    let optimization: PurchaseOptimizationResult;
+    let optimization: PurchaseOptimizationResult | null = null;
 
     if (linkedCards.length > 0) {
       const rulesByProductId = await loadRulesForProducts(products, linkedCards);
@@ -142,11 +129,6 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
         productsById,
         rulesByProductId
       );
-    } else {
-      optimization = optimizePurchaseWithDevelopmentWallet(
-        purchase,
-        DEVELOPMENT_WALLET
-      );
     }
 
     // Load the user's active wallet benefit state (rehydrated with shared
@@ -156,18 +138,22 @@ async function loadPurchaseWithOptimization(id: string): Promise<{
       walletCards,
       userId
     );
+    const trustedOptimization =
+      optimization !== null && optimization.bestCardId !== null
+        ? optimization
+        : null;
 
     // Money Found = confirmed dollar value only (from optimization and from
     // confirmed benefit opportunities). Pure, deterministic, no DB writes.
     const moneyFound = computeMoneyFound(
       purchase,
-      optimization.bestCardId !== null ? optimization : null,
+      trustedOptimization,
       benefitOpportunities
     );
 
     return {
       purchase,
-      optimization: optimization.bestCardId !== null ? optimization : null,
+      optimization: trustedOptimization,
       benefitOpportunities,
       moneyFound,
       walletCards,
@@ -256,8 +242,6 @@ export default async function PurchaseDetailPage({
     purchase.tip !== null ||
     purchase.fees !== null;
 
-  const isDevelopment = optimization?.mode === "development";
-  const isPersonalized = optimization?.mode === "personalized";
   const hasRewardUnits =
     optimization !== null &&
     optimization.bestEstimatedRewardUnits !== null &&
@@ -293,7 +277,7 @@ export default async function PurchaseDetailPage({
             </h1>
             <p className="mt-1 text-xl font-medium text-emerald-300">
               {purchase.amount !== null && !Number.isNaN(purchase.amount)
-                ? formatCurrency(purchase.amount, purchase.currency)
+                ? formatMoney(purchase.amount, purchase.currency)
                 : "—"}
             </p>
           </div>
@@ -372,7 +356,7 @@ export default async function PurchaseDetailPage({
                   <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                     <p className="text-xs text-slate-400">Discount</p>
                     <p className="mt-1 text-sm font-medium text-white">
-                      {formatCurrency(purchase.discount, purchase.currency)}
+                      {formatMoney(purchase.discount, purchase.currency)}
                     </p>
                   </div>
                 )}
@@ -380,7 +364,7 @@ export default async function PurchaseDetailPage({
                   <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                     <p className="text-xs text-slate-400">Tax</p>
                     <p className="mt-1 text-sm font-medium text-white">
-                      {formatCurrency(purchase.tax, purchase.currency)}
+                      {formatMoney(purchase.tax, purchase.currency)}
                     </p>
                   </div>
                 )}
@@ -388,7 +372,7 @@ export default async function PurchaseDetailPage({
                   <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                     <p className="text-xs text-slate-400">Tip</p>
                     <p className="mt-1 text-sm font-medium text-white">
-                      {formatCurrency(purchase.tip, purchase.currency)}
+                      {formatMoney(purchase.tip, purchase.currency)}
                     </p>
                   </div>
                 )}
@@ -396,7 +380,7 @@ export default async function PurchaseDetailPage({
                   <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                     <p className="text-xs text-slate-400">Fees</p>
                     <p className="mt-1 text-sm font-medium text-white">
-                      {formatCurrency(purchase.fees, purchase.currency)}
+                      {formatMoney(purchase.fees, purchase.currency)}
                     </p>
                   </div>
                 )}
@@ -428,13 +412,13 @@ export default async function PurchaseDetailPage({
                     <div className="text-right">
                       <p className="text-sm font-semibold text-white">
                         {item.total !== null && !Number.isNaN(item.total)
-                          ? formatCurrency(item.total, purchase.currency)
+                          ? formatMoney(item.total, purchase.currency)
                           : "—"}
                       </p>
                       {item.quantity !== null && item.unitPrice !== null ? (
                         <p className="mt-1 text-xs text-slate-400">
                           {item.quantity} ×{" "}
-                          {formatCurrency(item.unitPrice, purchase.currency)}
+                          {formatMoney(item.unitPrice, purchase.currency)}
                         </p>
                       ) : null}
                     </div>
@@ -445,38 +429,16 @@ export default async function PurchaseDetailPage({
           )}
 
           {optimization && (
-            <div
-              className={`mt-8 rounded-2xl border p-5 ${
-                isPersonalized
-                  ? "border-sky-400/20 bg-sky-400/10"
-                  : "border-amber-400/20 bg-amber-400/10"
-              }`}
-            >
+            <div className="mt-8 rounded-2xl border border-sky-400/20 bg-sky-400/10 p-5">
               <div className="flex items-center gap-2">
-                <Sparkles
-                  className={`h-5 w-5 ${
-                    isPersonalized ? "text-sky-300" : "text-amber-300"
-                  }`}
-                />
+                <Sparkles className="h-5 w-5 text-sky-300" />
                 <h2 className="text-lg font-semibold text-white">
-                  {isPersonalized
-                    ? "Best card for this purchase"
-                    : "Best card (development test)"}
+                  Best card for this purchase
                 </h2>
               </div>
 
-              {isDevelopment && (
-                <p className="mt-2 text-sm text-amber-100/80">
-                  Development test data — not real card advice.
-                </p>
-              )}
-
               <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-                <p className="text-xs text-slate-400">
-                  {isPersonalized
-                    ? "Recommended card"
-                    : "Recommended development card"}
-                </p>
+                <p className="text-xs text-slate-400">Recommended card</p>
                 <p className="mt-1 text-base font-semibold text-white">
                   {optimization.bestCardName ?? "Unknown card"}
                 </p>
@@ -492,7 +454,7 @@ export default async function PurchaseDetailPage({
                 ) : hasDollarValue ? (
                   <p className="mt-2 text-sm text-emerald-300">
                     Estimated reward value:{" "}
-                    {formatCurrency(
+                    {formatMoney(
                       optimization.bestEstimatedValue,
                       purchase.currency
                     )}
@@ -569,7 +531,7 @@ export default async function PurchaseDetailPage({
                     opportunity.usableValue !== null ? (
                       <p className="mt-2 text-sm font-medium text-emerald-300">
                         Usable value:{" "}
-                        {formatCurrency(
+                        {formatMoney(
                           opportunity.usableValue,
                           purchase.currency
                         )}
@@ -579,7 +541,7 @@ export default async function PurchaseDetailPage({
                     opportunity.potentialValue !== null ? (
                       <p className="mt-2 text-sm font-medium text-amber-200">
                         Up to{" "}
-                        {formatCurrency(
+                        {formatMoney(
                           opportunity.potentialValue,
                           purchase.currency
                         )}{" "}
@@ -601,7 +563,7 @@ export default async function PurchaseDetailPage({
                 </h2>
               </div>
               <p className="mt-2 text-2xl font-extrabold text-emerald-300">
-                {formatCurrency(moneyFound.total, moneyFound.currency)}
+                {formatMoney(moneyFound.total, moneyFound.currency)}
               </p>
               <p className="mt-1 text-xs text-slate-400">
                 Confirmed value only — does not include potential or likely-only
@@ -619,7 +581,7 @@ export default async function PurchaseDetailPage({
                         {item.description}
                       </span>
                       <span className="text-sm font-medium text-emerald-300">
-                        {formatCurrency(item.value, item.currency)}
+                        {formatMoney(item.value, item.currency)}
                       </span>
                     </div>
                   ))}

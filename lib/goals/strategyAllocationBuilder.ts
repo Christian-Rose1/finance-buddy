@@ -49,6 +49,25 @@ interface ScoredOption {
   matchPriority: number;
 }
 
+function cashWithinBudget(option: StrategyAwardOption, goal: Goal): boolean {
+  if (goal.maximumCashBudget === null) return true;
+  return option.cashFees !== null && Number.isFinite(option.cashFees) &&
+    option.cashFees <= goal.maximumCashBudget;
+}
+
+function preferenceScore(option: StrategyAwardOption, goal: Goal): number {
+  if (goal.optimizationPriority === "lowest_cash") {
+    return option.cashFees ?? Number.POSITIVE_INFINITY;
+  }
+  if (goal.optimizationPriority === "best_experience") {
+    return option.centsPerPoint === null ? Number.POSITIVE_INFINITY : -option.centsPerPoint;
+  }
+  if (goal.optimizationPriority === "simplest") {
+    return option.transferFromProgramId === null ? 0 : 1;
+  }
+  return 0;
+}
+
 /**
  * Rank options by: calculable+fundable first, then goal-match relevance,
  * then original source order. Never ranks by raw points across programs.
@@ -66,6 +85,9 @@ function rankOptions(
 
     // Exclude unavailable
     if (option.availabilityStatus === "unavailable") continue;
+    // A budget-ineligible option must not become the primary, balanced, or
+    // fallback choice merely because it has a better match label.
+    if (!cashWithinBudget(option, goal)) continue;
 
     const match = getGoalMatch(option);
 
@@ -73,7 +95,8 @@ function rankOptions(
     if (excludeDifferentDestination && match === "different_destination") continue;
 
     const calculable = isOptionCalculable(option, goal);
-    const fundable = findFundingAccount(option, inventory) !== null;
+    const fundable =
+      cashWithinBudget(option, goal) && findFundingAccount(option, inventory) !== null;
 
     scored.push({
       option,
@@ -89,6 +112,10 @@ function rankOptions(
     const aBoth = a.calculable && a.fundable;
     const bBoth = b.calculable && b.fundable;
     if (aBoth !== bBoth) return aBoth ? -1 : 1;
+
+    const aPreference = preferenceScore(a.option, goal);
+    const bPreference = preferenceScore(b.option, goal);
+    if (aPreference !== bPreference) return aPreference - bPreference;
 
     // Then goal-match relevance
     if (a.matchPriority !== b.matchPriority) return a.matchPriority - b.matchPriority;
@@ -219,7 +246,14 @@ function buildFlightFirst(
     };
   }
 
-  const funding = findFundingAccount(flight, inventory);
+  if (!cashWithinBudget(flight, goal)) {
+    return { ...base, flightOptionId: flight.id, flightPointsRequired: calc.pointsRequired,
+      status: "insufficient_information", warnings: ["Flight cash fees exceed the goal maximum cash budget"] };
+  }
+
+  const funding = cashWithinBudget(flight, goal)
+    ? findFundingAccount(flight, inventory)
+    : null;
   if (!funding) {
     return {
       ...base,
@@ -286,7 +320,14 @@ function buildHotelFirst(
     };
   }
 
-  const funding = findFundingAccount(hotel, inventory);
+  if (!cashWithinBudget(hotel, goal)) {
+    return { ...base, hotelOptionId: hotel.id, hotelPointsRequired: calc.pointsRequired,
+      status: "insufficient_information", warnings: ["Hotel cash fees exceed the goal maximum cash budget"] };
+  }
+
+  const funding = cashWithinBudget(hotel, goal)
+    ? findFundingAccount(hotel, inventory)
+    : null;
   if (!funding) {
     return {
       ...base,
@@ -353,14 +394,14 @@ function buildBalanced(
   if (flight) {
     flightCalc = calculateFlightPointsRequired(flight, goal);
     if (flightCalc.status === "calculated") {
-      flightFunding = findFundingAccount(flight, inventory);
+      if (cashWithinBudget(flight, goal)) flightFunding = findFundingAccount(flight, inventory);
     }
   }
 
   if (hotel) {
     hotelCalc = calculateHotelPointsRequired(hotel, goal);
     if (hotelCalc.status === "calculated") {
-      hotelFunding = findFundingAccount(hotel, inventory);
+      if (cashWithinBudget(hotel, goal)) hotelFunding = findFundingAccount(hotel, inventory);
     }
   }
 
@@ -509,7 +550,9 @@ function buildFallback(
     const calc = calcRequirement(option, goal);
     if (calc.status !== "calculated") continue;
 
-    const funding = findFundingAccount(option, inventory);
+    const funding = cashWithinBudget(option, goal)
+      ? findFundingAccount(option, inventory)
+      : null;
     if (!funding) continue;
 
     const allocation = buildAllocation(funding, calc.pointsRequired!);

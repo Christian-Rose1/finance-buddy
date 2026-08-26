@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
 import type {
   CardNetwork,
   RewardCurrency,
@@ -34,6 +34,14 @@ interface WalletCardFormProps {
 }
 
 export function WalletCardForm({ mode, card, onSuccess }: WalletCardFormProps) {
+  const instanceId = useId();
+  const controlIds = {
+    name: `${instanceId}-name`,
+    issuer: `${instanceId}-issuer`,
+    network: `${instanceId}-network`,
+    rewardCurrency: `${instanceId}-reward-currency`,
+    lastFour: `${instanceId}-last-four`,
+  };
   const [state, setState] = useState<WalletActionState | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -66,11 +74,14 @@ export function WalletCardForm({ mode, card, onSuccess }: WalletCardFormProps) {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
-          <label htmlFor="name" className="block text-sm font-medium text-slate-200">
+          <label
+            htmlFor={controlIds.name}
+            className="block text-sm font-medium text-slate-200"
+          >
             Card name
           </label>
           <input
-            id="name"
+            id={controlIds.name}
             name="name"
             type="text"
             defaultValue={card?.name ?? ""}
@@ -84,11 +95,14 @@ export function WalletCardForm({ mode, card, onSuccess }: WalletCardFormProps) {
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="issuer" className="block text-sm font-medium text-slate-200">
+          <label
+            htmlFor={controlIds.issuer}
+            className="block text-sm font-medium text-slate-200"
+          >
             Issuer
           </label>
           <input
-            id="issuer"
+            id={controlIds.issuer}
             name="issuer"
             type="text"
             defaultValue={card?.issuer ?? ""}
@@ -104,11 +118,14 @@ export function WalletCardForm({ mode, card, onSuccess }: WalletCardFormProps) {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
-          <label htmlFor="network" className="block text-sm font-medium text-slate-200">
+          <label
+            htmlFor={controlIds.network}
+            className="block text-sm font-medium text-slate-200"
+          >
             Network
           </label>
           <select
-            id="network"
+            id={controlIds.network}
             name="network"
             defaultValue={card?.network ?? "visa"}
             className="fb-input"
@@ -123,11 +140,14 @@ export function WalletCardForm({ mode, card, onSuccess }: WalletCardFormProps) {
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="rewardCurrency" className="block text-sm font-medium text-slate-200">
+          <label
+            htmlFor={controlIds.rewardCurrency}
+            className="block text-sm font-medium text-slate-200"
+          >
             Reward type
           </label>
           <select
-            id="rewardCurrency"
+            id={controlIds.rewardCurrency}
             name="rewardCurrency"
             defaultValue={card?.rewardCurrency ?? "points"}
             className="fb-input"
@@ -143,11 +163,14 @@ export function WalletCardForm({ mode, card, onSuccess }: WalletCardFormProps) {
       </div>
 
       <div className="space-y-2">
-        <label htmlFor="lastFour" className="block text-sm font-medium text-slate-200">
+        <label
+          htmlFor={controlIds.lastFour}
+          className="block text-sm font-medium text-slate-200"
+        >
           Last four digits <span className="text-slate-500">(optional)</span>
         </label>
         <input
-          id="lastFour"
+          id={controlIds.lastFour}
           name="lastFour"
           type="text"
           inputMode="numeric"

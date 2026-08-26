@@ -468,7 +468,7 @@ describe("goals repository", () => {
     assert.equal(stored.title, "Goal B");
   });
 
-  it("does not delete another user's goal", async () => {
+  it("rejects deleting another user's goal without removing it", async () => {
     const client = makeClient({
       goals: [
         {
@@ -495,9 +495,44 @@ describe("goals repository", () => {
       ],
     });
 
-    await deleteGoal("goal-1", "user-a", client);
+    await assert.rejects(
+      deleteGoal("goal-1", "user-a", client),
+      /Failed to delete goal/
+    );
 
     assert.equal(getRows(client, "goals").length, 1);
+  });
+
+  it("deletes an owned goal", async () => {
+    const client = makeClient({
+      goals: [
+        {
+          id: "goal-1",
+          user_id: "user-a",
+          type: "travel",
+          title: "Goal A",
+          status: "active",
+          origin: ["DEN"],
+          destinations: ["CDG"],
+          earliest_departure: null,
+          latest_return: null,
+          minimum_nights: null,
+          maximum_nights: null,
+          traveler_count: 1,
+          cabin_preference: "economy",
+          optimization_priority: "balanced",
+          maximum_cash_budget: null,
+          currency: "USD",
+          allow_new_cards: false,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    await deleteGoal("goal-1", "user-a", client);
+
+    assert.equal(getRows(client, "goals").length, 0);
   });
 
   it("updates a goal mapping nullable and non-null fields and setting updated_at", async () => {

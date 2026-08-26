@@ -112,6 +112,32 @@ function findScenario(
 // ---------------------------------------------------------------------------
 
 describe("buildStrategyAllocationScenarios", () => {
+  it("does not fund a transfer option without a supported ratio", () => {
+    const option = makeFlightOption({ transferFromProgramId: "chase_ur", transferRatio: null });
+    const scenarios = buildStrategyAllocationScenarios(makeGoal(), [option], [], [makeInventoryItem()]);
+    assert.equal(scenarios[0].status, "insufficient_information");
+  });
+
+  it("applies transfer ratios and rejects unknown fees under a cash budget", () => {
+    const option = makeFlightOption({ transferFromProgramId: "chase_ur", transferRatio: 2, pointsRequired: 30_000, cashFees: null });
+    const budgetedGoal = makeGoal({ maximumCashBudget: 500 });
+    const scenarios = buildStrategyAllocationScenarios(budgetedGoal, [option], [], [makeInventoryItem()]);
+    assert.equal(scenarios[0].status, "insufficient_information");
+  });
+
+  it("keeps every over-budget option out of all scenarios", () => {
+    const budgetedGoal = makeGoal({ maximumCashBudget: 50 });
+    const flight = makeFlightOption({ cashFees: 100 });
+    const hotel = makeHotelOption({ cashFees: 100 });
+    const scenarios = buildStrategyAllocationScenarios(
+      budgetedGoal,
+      [flight],
+      [hotel],
+      [makeInventoryItem()]
+    );
+    assert.ok(scenarios.every((scenario) => scenario.status === "insufficient_information"));
+    assert.ok(scenarios.every((scenario) => scenario.flightOptionId === null || scenario.status !== "feasible"));
+  });
   it("returns exactly four scenarios in required order", () => {
     const goal = makeGoal();
     const flights = [makeFlightOption()];
@@ -596,6 +622,23 @@ describe("buildStrategyAllocationScenarios", () => {
     for (const s of scenarios) {
       assert.equal(s.travelerCount, 2);
       assert.equal(s.tripNights, 9);
+    }
+  });
+it("scenarios use the declared minimumNights, not the full date-window span", () => {
+    const goal = makeGoal({
+      earliestDeparture: "2026-07-01",
+      latestReturn: "2026-07-28",
+      minimumNights: 8,
+      maximumNights: 16,
+    });
+    const flights = [makeFlightOption()];
+    const hotels = [makeHotelOption()];
+    const inventory = [makeInventoryItem()];
+
+    const scenarios = buildStrategyAllocationScenarios(goal, flights, hotels, inventory);
+    assert.ok(scenarios.length > 0);
+    for (const s of scenarios) {
+      assert.equal(s.tripNights, 8);
     }
   });
 });

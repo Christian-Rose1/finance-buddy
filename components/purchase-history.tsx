@@ -1,27 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { Search, ShoppingBag } from "lucide-react";
 import type { Purchase } from "@/lib/purchases/types";
+import { formatMoney } from "@/lib/purchases/formatMoney";
 import {
   PURCHASE_HISTORY_PAGE_SIZE,
   filterPurchases,
   getDistinctCategories,
   getVisiblePurchases,
 } from "@/lib/purchases/purchaseHistory";
-
-function formatCurrency(value: number, currency: string | null): string {
-  const code = currency && currency.length === 3 ? currency : "USD";
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: code,
-    }).format(value);
-  } catch {
-    return `$${value.toFixed(2)}`;
-  }
-}
 
 function formatDate(date: string | null): string {
   if (!date) return "—";
@@ -58,10 +47,18 @@ export function PurchaseHistory({ purchases }: { purchases: Purchase[] }) {
     [purchases, search, category, source]
   );
 
-  // Reset the visible window whenever the filters change.
-  useEffect(() => {
+  // Reset the visible window whenever the filters change. Adjusting state
+  // during render is the React-recommended replacement for doing so in an
+  // effect (avoids an extra render pass).
+  const [prevFilters, setPrevFilters] = useState({ search, category, source });
+  if (
+    prevFilters.search !== search ||
+    prevFilters.category !== category ||
+    prevFilters.source !== source
+  ) {
+    setPrevFilters({ search, category, source });
     setVisibleCount(PURCHASE_HISTORY_PAGE_SIZE);
-  }, [search, category, source]);
+  }
 
   const visible = getVisiblePurchases(filtered, visibleCount);
   const hasMore = visibleCount < filtered.length;
@@ -154,7 +151,7 @@ export function PurchaseHistory({ purchases }: { purchases: Purchase[] }) {
                 {purchase.amount !== null &&
                 purchase.amount !== undefined &&
                 !Number.isNaN(purchase.amount)
-                  ? formatCurrency(purchase.amount, purchase.currency)
+                  ? formatMoney(purchase.amount, purchase.currency)
                   : "—"}
               </p>
             </Link>

@@ -5,7 +5,8 @@
  *
  * This is intentionally small. It is NOT a generic evidence framework. It
  * reuses the existing Purchase.provenance model (evidence / inferred /
- * calculated / manual) and the existing RPC path (persist_purchase).
+ * calculated / manual) and narrow database RPCs for the two confirmation
+ * workflows.
  *
  * Only the `card_id` field and the `provenance.cardId` entry are ever touched.
  * All other provenance keys are preserved.
@@ -13,11 +14,8 @@
 
 import { createServerClient } from "@/lib/supabase-server";
 import { getPurchaseForUser } from "@/lib/purchases/repository";
-import { getWalletCardForUser } from "@/lib/wallet/repository";
-import { createManualProvenance } from "@/lib/purchases/provenance";
 import { revalidatePath } from "next/cache";
 import type { Purchase } from "@/lib/purchases/types";
-import type { PurchaseFieldProvenance } from "@/lib/purchases/provenance";
 
 /** Card-used confirmation result. */
 export interface ConfirmPurchaseCardResult {
@@ -70,84 +68,21 @@ export async function confirmPurchaseCardAction(
     throw new Error("Purchase not found or does not belong to the user.");
   }
 
-  // 2. If cardId is non-null, validate the card.
-  if (cardId !== null) {
-    const walletCard = await getWalletCardForUser(cardId, userId);
-    if (!walletCard) {
-      throw new Error("Wallet card not found or not owned by the user.");
-    }
-    if (!walletCard.active) {
-      throw new Error("Wallet card must be active to confirm use.");
-    }
-    // cardId is valid and owned + active; proceed to write.
-  }
-
-  // 3. Re-read the existing provenance from the DB to preserve all other keys.
-  const { data: row, error: rowErr } = await supabase
-    .from("purchases")
-    .select("provenance")
-    .eq("id", purchaseId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (rowErr) {
-    throw new Error("Failed to read current purchase provenance.");
-  }
-
-  const existingProvenance: Record<string, PurchaseFieldProvenance> | undefined =
-    row?.provenance;
-
-  // ---- Merge the manual/verified cardId provenance ----
-  let mergedProvenance: Record<string, PurchaseFieldProvenance> | undefined;
-
-  if (cardId === null) {
-    // CLEAR: remove only the cardId provenance key, preserve everything else.
-    if (existingProvenance) {
-      const { cardId: _, ...rest } = existingProvenance;
-      mergedProvenance = rest;
-    } else {
-      mergedProvenance = undefined;
-    }
-  } else {
-    // SET: merge manual/verified cardId provenance alongside existing keys.
-    const cardProv = createManualProvenance(
-      "cardId",
-      "user-card-confirmation",
-      "verified",
-      []
-    );
-
-    if (existingProvenance) {
-      // Shallow merge: keep existing keys, override/add cardId.
-      mergedProvenance = {
-        ...existingProvenance,
-        cardId: cardProv,
-      };
-    } else {
-      mergedProvenance = { cardId: cardProv };
-    }
-  }
-
-  // ---- Direct RLS-scoped UPDATE on the existing purchase row ----
-  // We update ONLY card_id + provenance. No new Purchase is created.
-  const { error: updateError } = await supabase
-    .from("purchases")
-    .update({
-      card_id: cardId ?? null,
-      provenance: mergedProvenance ?? {},
-    })
-    .eq("id", purchaseId)
-    .eq("user_id", userId);
+  const { error: updateError } = await supabase.rpc("confirm_purchase_card", {
+    p_purchase_id: purchaseId,
+    p_card_id: cardId,
+  });
 
   if (updateError) {
     throw new Error("Failed to update purchase card confirmation.");
   }
 
-  // 4. Revalidate the Purchase Detail path so the page re-renders with the
+  // Revalidate the Purchase Detail path so the page re-renders with the
   //    saved card_id + provenance on the next request.
   revalidatePath(`/purchases/${purchaseId}`);
 
-  // 5. Re-read the purchase so the caller gets a complete rehydrated object.
+  // Re-read through the ownership-scoped repository so the caller gets the
+  // complete normalized purchase and child evidence rows.
   const refreshed = await getPurchaseForUser(purchaseId, userId);
   if (!refreshed) {
     throw new Error("Purchase not found after update.");
@@ -192,63 +127,19 @@ export async function confirmPurchaseBookingChannelAction(
     throw new Error("Purchase not found or does not belong to the user.");
   }
 
-  // 2. Re-read existing metadata/provenance to preserve all fields
-  const { data: row, error: rowErr } = await supabase
-    .from("purchases")
-    .select("metadata,provenance")
-    .eq("id", purchaseId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (rowErr) {
-    throw new Error("Failed to read current purchase metadata/provenance.");
-  }
-
-  const existingMetadata = (row?.metadata as Record<string, unknown>) || {};
-  const existingProvenance =
-    (row?.provenance as Record<string, PurchaseFieldProvenance>) || {};
-
-  // ---- Merge bookingChannel ----
-  let mergedMetadata: Record<string, unknown>;
-  let mergedProvenance: Record<string, PurchaseFieldProvenance>;
-
-  if (channel === null) {
-    // CLEAR: remove only metadata.bookingChannel
-    mergedMetadata = { ...existingMetadata };
-    delete mergedMetadata.bookingChannel;
-
-    // CLEAR: remove only provenance.bookingChannel
-    mergedProvenance = { ...existingProvenance };
-    delete mergedProvenance.bookingChannel;
-  } else {
-    // SET: add to both metadata and provenance
-    mergedMetadata = { ...existingMetadata, bookingChannel: "chase_travel" };
-    mergedProvenance = {
-      ...existingProvenance,
-      bookingChannel: createManualProvenance(
-        "bookingChannel",
-        "user-booking-channel-confirmation",
-        "verified",
-        []
-      ),
-    };
-  }
-
-  // ---- Update purchase row ----
-  const { error: updateError } = await supabase
-    .from("purchases")
-    .update({
-      metadata: mergedMetadata,
-      provenance: mergedProvenance,
-    })
-    .eq("id", purchaseId)
-    .eq("user_id", userId);
+  const { error: updateError } = await supabase.rpc(
+    "confirm_purchase_booking_channel",
+    {
+      p_purchase_id: purchaseId,
+      p_channel: channel,
+    }
+  );
 
   if (updateError) {
     throw new Error("Failed to update purchase booking channel confirmation.");
   }
 
-  // 3. Revalidate path and re-read purchase
+  // Revalidate path and re-read purchase
   revalidatePath(`/purchases/${purchaseId}`);
   const refreshed = await getPurchaseForUser(purchaseId, userId);
   if (!refreshed) {

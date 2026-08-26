@@ -288,13 +288,15 @@ export async function deleteGoal(
 ): Promise<void> {
   const supabase = client ?? await createServerClient();
 
-  const { error } = await supabase
+  const { data: row, error } = await supabase
     .from("goals")
     .delete()
     .eq("id", goalId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !row) {
     throw new Error("Failed to delete goal.");
   }
 }

@@ -30,11 +30,14 @@ export default function HomePage() {
         </div>
 
         <div className="fb-card p-6">
-          <p className="text-sm uppercase tracking-[0.2em] text-slate-400">Preview</p>
+          <p className="text-sm uppercase tracking-[0.2em] text-slate-400">Illustrative sample</p>
+          <p className="mt-2 text-sm text-slate-400">
+            Example values only. These are not calculated from your financial data.
+          </p>
           <div className="mt-6 space-y-4">
-            <Metric label="Money Found" value="$42.18" />
-            <Metric label="Potential Missed Rewards" value="$19.00" />
-            <Metric label="Monthly Points Earned" value="5,482" />
+            <Metric label="Example Money Found" value="$42.18" />
+            <Metric label="Example Potential Rewards" value="$19.00" />
+            <Metric label="Example Monthly Points" value="5,482" />
           </div>
         </div>
       </section>

@@ -1,10 +1,15 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import type { WalletCard } from "@/lib/wallet/types";
 import type { CardProduct } from "@/lib/rewards/catalogTypes";
-import { linkWalletCardAction } from "@/lib/wallet/actions";
-import { Link2, Unlink } from "lucide-react";
+import {
+  linkWalletCardAction,
+  type WalletActionState,
+} from "@/lib/wallet/actions";
+import { Link2, Unlink, X } from "lucide-react";
+import { getProductLinkFeedback } from "./wallet-card-product-link-presentation";
 
 interface WalletCardProductLinkProps {
   card: WalletCard;
@@ -15,119 +20,156 @@ export function WalletCardProductLink({
   card,
   products,
 }: WalletCardProductLinkProps) {
+  const router = useRouter();
+  const editorId = useId();
   const [isEditing, setIsEditing] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [linkedProductId, setLinkedProductId] = useState(card.cardProductId);
+  const [status, setStatus] = useState<WalletActionState | null>(null);
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  const linkedProduct = card.cardProductId
-    ? products.find((p) => p.id === card.cardProductId)
+  const linkedProduct = linkedProductId
+    ? products.find((product) => product.id === linkedProductId)
     : null;
 
   function handleLink(productId: string | null) {
+    if (isPending) return;
+
+    setStatus(null);
+    setPendingMessage(
+      productId === null
+        ? `Unlinking ${card.name}...`
+        : `Linking ${card.name} to the selected product...`
+    );
     startTransition(async () => {
-      const result = await linkWalletCardAction(card.id, productId);
-      if (result.success) {
-        setStatus(result.message ?? "Updated.");
-        setIsEditing(false);
-      } else {
-        setStatus(result.error);
+      try {
+        const result = await linkWalletCardAction(card.id, productId);
+        setStatus(result);
+        if (result.success) {
+          setLinkedProductId(result.card.cardProductId);
+          setIsEditing(false);
+          router.refresh();
+        }
+      } catch {
+        setStatus({
+          success: false,
+          error: "The card product link could not be updated. Please try again.",
+        });
+      } finally {
+        setPendingMessage(null);
       }
     });
   }
 
-  if (!isEditing) {
-    return (
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-sm">
+  const feedback = getProductLinkFeedback(isPending, pendingMessage, status);
+
+  return (
+    <div className="mt-3" aria-busy={isPending}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 text-sm">
           {linkedProduct ? (
-            <p className="text-slate-300">
-              Linked to: <span className="font-medium text-white">{linkedProduct.name}</span>
+            <p className="break-words text-slate-300">
+              Linked to:{" "}
+              <span className="font-medium text-white">{linkedProduct.name}</span>
+            </p>
+          ) : linkedProductId ? (
+            <p className="text-amber-200">
+              The linked product is not available in the current catalog.
             </p>
           ) : (
             <p className="text-slate-400">No catalog product linked.</p>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          {linkedProduct ? (
-            <>
-              <button
-                type="button"
-                onClick={() => setIsEditing(true)}
-                disabled={isPending}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                <Link2 className="h-4 w-4" />
-                Change
-              </button>
-              <button
-                type="button"
-                onClick={() => handleLink(null)}
-                disabled={isPending}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                <Unlink className="h-4 w-4" />
-                Unlink
-              </button>
-            </>
-          ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setStatus(null);
+              setIsEditing((current) => !current);
+            }}
+            disabled={isPending || (!isEditing && products.length === 0)}
+            aria-expanded={isEditing}
+            aria-controls={editorId}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            {isEditing ? (
+              <X aria-hidden="true" className="h-4 w-4" />
+            ) : (
+              <Link2 aria-hidden="true" className="h-4 w-4" />
+            )}
+            {isEditing
+              ? "Close product chooser"
+              : linkedProductId
+                ? "Change"
+                : "Link card product"}
+          </button>
+          {linkedProductId ? (
             <button
               type="button"
-              onClick={() => setIsEditing(true)}
-              disabled={isPending || products.length === 0}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
+              onClick={() => handleLink(null)}
+              disabled={isPending}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-sm font-medium text-rose-200 transition hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-70"
             >
-              <Link2 className="h-4 w-4" />
-              Link card product
+              <Unlink aria-hidden="true" className="h-4 w-4" />
+              {isPending ? "Unlinking..." : "Unlink"}
             </button>
-          )}
+          ) : null}
         </div>
       </div>
-    );
-  }
 
-  return (
-    <div className="mt-3 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
-      <p className="text-sm font-medium text-white">Choose a catalog product</p>
-
-      {products.length === 0 ? (
-        <p className="mt-2 text-sm text-slate-400">
-          No card products are available in the catalog yet.
-        </p>
-      ) : (
-        <div className="mt-3 space-y-2">
-          {products.map((product) => (
-            <button
-              key={product.id}
-              type="button"
-              onClick={() => handleLink(product.id)}
-              disabled={isPending || product.id === card.cardProductId}
-              className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              <span className="font-medium text-white">{product.name}</span>
-              <span className="text-slate-400">{product.issuer}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setIsEditing(false)}
+      {isEditing ? (
+        <fieldset
+          id={editorId}
           disabled={isPending}
-          className="text-sm text-slate-400 hover:text-white"
+          className="mt-3 rounded-2xl border border-white/10 bg-slate-950/40 p-4"
         >
-          Cancel
-        </button>
-      </div>
+          <legend className="px-1 text-sm font-medium text-white">
+            Choose a catalog product
+          </legend>
 
-      {status ? (
+          {products.length === 0 ? (
+            <p className="mt-2 text-sm text-slate-400">
+              No card products are available in the catalog yet.
+            </p>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {products.map((product) => {
+                const isCurrent = product.id === linkedProductId;
+                return (
+                  <button
+                    key={product.id}
+                    type="button"
+                    onClick={() => handleLink(product.id)}
+                    disabled={isPending || isCurrent}
+                    className="flex w-full flex-col gap-1 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <span className="break-words font-medium text-white">
+                      {product.name}
+                      {isCurrent ? " (current)" : ""}
+                    </span>
+                    <span className="text-slate-400">{product.issuer}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+        </fieldset>
+      ) : null}
+
+      {feedback ? (
         <p
-          className={`mt-3 text-sm ${
-            status.startsWith("Failed") ? "text-rose-300" : "text-emerald-300"
+          className={`mt-2 text-sm ${
+            feedback.kind === "success"
+              ? "text-emerald-300"
+              : feedback.kind === "error"
+                ? "text-rose-300"
+                : "text-sky-300"
           }`}
+          role={feedback.kind === "error" ? "alert" : "status"}
+          aria-live={feedback.kind === "error" ? "assertive" : "polite"}
         >
-          {status}
+          {feedback.message}
         </p>
       ) : null}
     </div>

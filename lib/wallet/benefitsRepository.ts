@@ -17,7 +17,11 @@ import { createServerClient } from "@/lib/supabase-server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WalletBenefit } from "./types";
 import type { ProductBenefit } from "@/lib/rewards/catalogTypes";
-import { getProductBenefits } from "@/lib/rewards/catalogRepository";
+import {
+  getProductBenefit,
+  getProductBenefits,
+} from "@/lib/rewards/catalogRepository";
+import { getWalletCardForUser } from "./repository";
 
 /** Fields required to create a persisted user benefit state row. */
 export interface CreateWalletBenefitInput {
@@ -47,6 +51,11 @@ export interface UpdateWalletBenefitInput {
   remainingValue?: number | null;
   usedValue?: number;
   metadata?: Record<string, unknown> | null;
+}
+
+export interface WalletBenefitManagementContext {
+  product: ProductBenefit;
+  state: WalletBenefit;
 }
 
 /** Maps a wallet_benefits row (snake_case) to a WalletBenefit (camelCase). */
@@ -276,15 +285,205 @@ export async function deleteWalletBenefit(
 ): Promise<void> {
   const supabase = client ?? await createServerClient();
 
-  const { error } = await supabase
+  const { data: row, error } = await supabase
     .from("wallet_benefits")
     .delete()
     .eq("id", benefitId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .select("id")
+    .maybeSingle();
 
-  if (error) {
+  if (error || !row) {
     throw new Error("Failed to delete wallet benefit.");
   }
+}
+
+async function getWalletBenefitForCardProduct(
+  walletCardId: string,
+  productBenefitId: string,
+  userId: string,
+  client: SupabaseClient
+): Promise<WalletBenefit | null> {
+  const { data: row, error } = await client
+    .from("wallet_benefits")
+    .select("*")
+    .eq("wallet_card_id", walletCardId)
+    .eq("product_benefit_id", productBenefitId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error("Failed to load wallet benefit.");
+  }
+
+  return row ? toWalletBenefit(row as Record<string, unknown>) : null;
+}
+
+async function requireCardProductBenefit(
+  walletCardId: string,
+  productBenefitId: string,
+  userId: string,
+  client: SupabaseClient
+): Promise<ProductBenefit> {
+  const card = await getWalletCardForUser(walletCardId, userId, client);
+  if (!card?.cardProductId) {
+    throw new Error("This card is not linked to a catalog product.");
+  }
+
+  const product = await getProductBenefit(productBenefitId, client);
+  if (!product || product.cardProductId !== card.cardProductId) {
+    throw new Error("That benefit is not available for this card.");
+  }
+
+  return product;
+}
+
+function knownBenefitLimit(product: ProductBenefit): number | null {
+  const limit = product.annualLimit ?? product.fixedValue;
+  return limit !== null && Number.isFinite(limit) && limit >= 0 ? limit : null;
+}
+
+function validateBenefitStateUpdate(
+  current: WalletBenefit,
+  updates: UpdateWalletBenefitInput,
+  product: ProductBenefit
+): void {
+  const remaining =
+    updates.remainingValue !== undefined
+      ? updates.remainingValue
+      : current.remainingValue;
+  const used =
+    updates.usedValue !== undefined ? updates.usedValue : current.usedValue;
+  const limit = knownBenefitLimit(product);
+
+  if (
+    updates.remainingValue !== undefined ||
+    updates.usedValue !== undefined
+  ) {
+    if (remaining !== null && (!Number.isFinite(remaining) || remaining < 0)) {
+      throw new Error("Remaining value must be a non-negative number.");
+    }
+    if (!Number.isFinite(used) || used < 0) {
+      throw new Error("Used value must be a non-negative number.");
+    }
+    if (limit === null && (remaining !== null || used !== 0)) {
+      throw new Error("This benefit does not have a catalog value to track.");
+    }
+    if (
+      limit !== null &&
+      (remaining === null ||
+        remaining > limit ||
+        used > limit ||
+        remaining + used > limit)
+    ) {
+      throw new Error("Benefit usage cannot exceed the catalog limit.");
+    }
+  }
+
+  const periodStart =
+    updates.periodStart !== undefined ? updates.periodStart : current.periodStart;
+  const periodEnd =
+    updates.periodEnd !== undefined ? updates.periodEnd : current.periodEnd;
+  if (
+    (updates.periodStart !== undefined || updates.periodEnd !== undefined) &&
+    periodStart !== null &&
+    periodEnd !== null &&
+    new Date(periodEnd).getTime() < new Date(periodStart).getTime()
+  ) {
+    throw new Error("Benefit period end cannot be before its start.");
+  }
+}
+
+/**
+ * Initialize user state from an active benefit definition belonging to the
+ * card's currently linked product. Repeated requests return the existing row.
+ */
+export async function createWalletBenefitFromProduct(
+  walletCardId: string,
+  productBenefitId: string,
+  userId: string,
+  client?: SupabaseClient
+): Promise<WalletBenefit> {
+  const supabase = client ?? await createServerClient();
+  const product = await requireCardProductBenefit(
+    walletCardId,
+    productBenefitId,
+    userId,
+    supabase
+  );
+  if (!product.active) {
+    throw new Error("This catalog benefit is no longer active.");
+  }
+
+  const existing = await getWalletBenefitForCardProduct(
+    walletCardId,
+    productBenefitId,
+    userId,
+    supabase
+  );
+  if (existing) return existing;
+
+  return createWalletBenefit(
+    {
+      walletCardId,
+      productBenefitId,
+      active: !product.requiresActivation,
+      activatedAt: null,
+      expiresAt: null,
+      periodStart: null,
+      periodEnd: null,
+      remainingValue: knownBenefitLimit(product),
+      usedValue: 0,
+      metadata: null,
+    },
+    userId,
+    supabase
+  );
+}
+
+/** Resolve and authorize a user benefit against its current wallet-card link. */
+export async function getWalletBenefitManagementContext(
+  benefitId: string,
+  walletCardId: string,
+  userId: string,
+  client?: SupabaseClient
+): Promise<WalletBenefitManagementContext> {
+  const supabase = client ?? await createServerClient();
+  const state = await getWalletBenefitForUser(benefitId, userId, supabase);
+  if (!state || state.walletCardId !== walletCardId) {
+    throw new Error("Wallet benefit was not found for this card.");
+  }
+
+  const product = await requireCardProductBenefit(
+    walletCardId,
+    state.productBenefitId,
+    userId,
+    supabase
+  );
+  return { product, state };
+}
+
+/** Update mutable state only after card, owner, and catalog linkage checks. */
+export async function updateWalletBenefitForCard(
+  benefitId: string,
+  walletCardId: string,
+  updates: UpdateWalletBenefitInput,
+  userId: string,
+  client?: SupabaseClient
+): Promise<WalletBenefit> {
+  const supabase = client ?? await createServerClient();
+  const { product, state } = await getWalletBenefitManagementContext(
+    benefitId,
+    walletCardId,
+    userId,
+    supabase
+  );
+  if (updates.active === true && !product.active) {
+    throw new Error("This catalog benefit is no longer active.");
+  }
+
+  validateBenefitStateUpdate(state, updates, product);
+  return updateWalletBenefit(benefitId, updates, userId, supabase);
 }
 
 // =============================================================================
@@ -304,6 +503,62 @@ export interface WalletBenefitDisplay {
 
   /** The user-specific benefit state. */
   state: WalletBenefit;
+}
+
+/** A current card-product definition and its optional user tracking state. */
+export interface WalletBenefitOption {
+  product: ProductBenefit;
+  state: WalletBenefit | null;
+}
+
+async function getBenefitDefinitionsForProduct(
+  cardProductId: string,
+  client: SupabaseClient
+): Promise<ProductBenefit[]> {
+  const { data: rows, error } = await client
+    .from("product_benefits")
+    .select("id")
+    .eq("card_product_id", cardProductId)
+    .order("title", { ascending: true });
+
+  if (error) {
+    throw new Error("Failed to load product benefits.");
+  }
+
+  const ids = (rows ?? [])
+    .map((row) => (row as Record<string, unknown>).id)
+    .filter((id): id is string => typeof id === "string");
+  return getProductBenefits(ids, { activeOnly: false }, client);
+}
+
+/**
+ * Load active catalog benefits available to a user's linked card, plus any
+ * inactive definition that still has user state so it can be deactivated.
+ */
+export async function getWalletBenefitOptionsForCard(
+  walletCardId: string,
+  userId: string,
+  client?: SupabaseClient
+): Promise<WalletBenefitOption[]> {
+  const supabase = client ?? await createServerClient();
+  const card = await getWalletCardForUser(walletCardId, userId, supabase);
+  if (!card?.cardProductId) return [];
+
+  const [states, products] = await Promise.all([
+    getWalletBenefitsForCard(walletCardId, userId, supabase),
+    getBenefitDefinitionsForProduct(card.cardProductId, supabase),
+  ]);
+  const stateByProductId = new Map(
+    states.map((state) => [state.productBenefitId, state])
+  );
+
+  return products
+    .filter((product) => product.active || stateByProductId.has(product.id))
+    .map((product) => ({
+      product,
+      state: stateByProductId.get(product.id) ?? null,
+    }))
+    .sort((a, b) => a.product.title.localeCompare(b.product.title));
 }
 
 /**
@@ -331,7 +586,13 @@ export async function getWalletBenefitsWithProducts(
   userId: string,
   client?: SupabaseClient
 ): Promise<WalletBenefitDisplay[]> {
-  const states = await getWalletBenefitsForCard(walletCardId, userId, client);
+  const supabase = client ?? await createServerClient();
+  const card = await getWalletCardForUser(walletCardId, userId, supabase);
+  if (!card?.cardProductId) {
+    return [];
+  }
+
+  const states = await getWalletBenefitsForCard(walletCardId, userId, supabase);
 
   if (states.length === 0) {
     return [];
@@ -341,14 +602,18 @@ export async function getWalletBenefitsWithProducts(
     new Set(states.map((s) => s.productBenefitId))
   );
 
-  const products = await getProductBenefits(definitionIds, { activeOnly: false }, client);
+  const products = await getProductBenefits(
+    definitionIds,
+    { activeOnly: false },
+    supabase
+  );
 
   const productById = new Map(products.map((p) => [p.id, p]));
 
   const displays: WalletBenefitDisplay[] = [];
   for (const state of states) {
     const product = productById.get(state.productBenefitId);
-    if (!product) continue;
+    if (!product || product.cardProductId !== card.cardProductId) continue;
     displays.push({ product, state });
   }
 

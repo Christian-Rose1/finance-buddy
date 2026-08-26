@@ -86,6 +86,7 @@ function makeOpportunity(
   overrides: Partial<BenefitOpportunity> = {}
 ): BenefitOpportunity {
   return {
+    cardId: "card-1",
     productBenefitId: "csp-hotel-credit",
     walletBenefitId: "wallet-benefit-1",
     title: "$100 Annual Chase Travel Hotel Credit",
@@ -129,7 +130,7 @@ describe("computeMoneyFound", () => {
 
   it("3. confirmed benefit counts", () => {
     const result = computeMoneyFound(
-      makePurchase(),
+      makePurchase({ cardId: "card-1" }),
       undefined,
       [makeOpportunity({ status: "confirmed_eligible", usableValue: 100 })]
     );
@@ -142,7 +143,7 @@ describe("computeMoneyFound", () => {
 
   it("4. insufficient_information does not count", () => {
     const result = computeMoneyFound(
-      makePurchase(),
+      makePurchase({ cardId: "card-1" }),
       undefined,
       [
         makeOpportunity({
@@ -163,7 +164,7 @@ describe("computeMoneyFound", () => {
     // A confirmed eligible points rule has estimatedValue === 0 because the
     // optimizer never converts points/miles to dollars.
     const result = computeMoneyFound(
-      makePurchase({ cardId: "card-1" }),
+      makePurchase({ cardId: null }),
       makeOptimization([
         makeMatch({ status: "confirmed_eligible", estimatedValue: 0, benefitTitle: "3X points" }),
       ])
@@ -177,7 +178,7 @@ describe("computeMoneyFound", () => {
     // usableValue is capped at the purchase amount even though remaining balance
     // is larger. The remainder of the balance must NOT be added.
     const result = computeMoneyFound(
-      makePurchase(),
+      makePurchase({ cardId: "card-1" }),
       undefined,
       [
         makeOpportunity({
@@ -215,14 +216,14 @@ describe("computeMoneyFound", () => {
     assert.equal(result.currency, "USD");
   });
 
-  it("defaults currency to USD when purchase currency is absent", () => {
+  it("does not calculate value when purchase currency is absent", () => {
     const result = computeMoneyFound(
       makePurchase({ currency: null, cardId: "card-1" }),
       makeOptimization([makeMatch({ status: "confirmed_eligible", estimatedValue: 2 })])
     );
 
-    assert.equal(result.currency, "USD");
-    assert.equal(result.items[0].currency, "USD");
+    assert.equal(result.currency, null);
+    assert.equal(result.items.length, 0);
   });
 
   it("counts both confirmed cashback and confirmed benefit once each", () => {
@@ -282,16 +283,14 @@ describe("computeMoneyFound — card awareness", () => {
   });
 
   it("benefits remain independently eligible without a used card", () => {
-    // Benefit opportunities are not gated on purchase.cardId in this step;
-    // that is intentionally unchanged. A confirmed usableValue still counts
-    // even when the used card is unknown.
+    // A benefit on an unknown used card is not attributable to this purchase.
     const result = computeMoneyFound(
       makePurchase({ cardId: null }),
       undefined,
       [makeOpportunity({ status: "confirmed_eligible", usableValue: 100 })]
     );
 
-    assert.equal(result.total, 100);
-    assert.equal(result.items[0].source, "benefit");
+    assert.equal(result.total, 0);
+    assert.equal(result.items.length, 0);
   });
 });
