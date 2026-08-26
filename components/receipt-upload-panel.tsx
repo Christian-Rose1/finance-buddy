@@ -155,7 +155,9 @@ export function ReceiptUploadPanel() {
   }
 
   useEffect(() => {
-    loadFiles();
+    (async () => {
+      await loadFiles();
+    })();
   }, []);
 
   return (

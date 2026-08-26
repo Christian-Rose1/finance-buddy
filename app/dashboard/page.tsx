@@ -262,7 +262,7 @@ export default async function DashboardPage() {
                 </div>
                 <p className="mt-5 text-3xl font-semibold text-amber-300">Not calculated yet</p>
                 <p className="mt-2 text-xs text-slate-500">
-                  Money you've already earned on past purchases. Only confirmed, merchant-matched cashback and confirmed benefit value count. Computed per purchase on the Purchase Detail page; not yet rolled up to the dashboard.
+                  Money you&apos;ve already earned on past purchases. Only confirmed, merchant-matched cashback and confirmed benefit value count. Computed per purchase on the Purchase Detail page; not yet rolled up to the dashboard.
                 </p>
               </div>
 

@@ -59,7 +59,7 @@ export default async function GoalsPage() {
               Financial Goals
             </h1>
             <p className="mt-2 max-w-2xl text-sm text-slate-400 sm:text-base">
-              Plan your travel goals and we'll help you find the best way to fund them with points.
+              Plan your travel goals and we&apos;ll help you find the best way to fund them with points.
             </p>
           </div>
           <div className="hidden h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-sky-400/30 bg-sky-400/10 text-sky-300 sm:flex">
@@ -101,7 +101,7 @@ export default async function GoalsPage() {
           <div className="space-y-4">
             {goals.length === 0 ? (
               <div className="fb-card p-8 text-center">
-                <p className="text-slate-400">You haven't created any goals yet.</p>
+                <p className="text-slate-400">You haven&apos;t created any goals yet.</p>
               </div>
             ) : (
               goals.map((goal) => (

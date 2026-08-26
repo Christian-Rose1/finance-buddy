@@ -107,7 +107,9 @@ export function StatementUploadPanel() {
   }
 
   useEffect(() => {
-    loadFiles();
+    (async () => {
+      await loadFiles();
+    })();
   }, []);
 
   return (

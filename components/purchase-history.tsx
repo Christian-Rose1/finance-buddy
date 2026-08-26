@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { Search, ShoppingBag } from "lucide-react";
 import type { Purchase } from "@/lib/purchases/types";
@@ -58,10 +58,18 @@ export function PurchaseHistory({ purchases }: { purchases: Purchase[] }) {
     [purchases, search, category, source]
   );
 
-  // Reset the visible window whenever the filters change.
-  useEffect(() => {
+  // Reset the visible window whenever the filters change. Adjusting state
+  // during render is the React-recommended replacement for doing so in an
+  // effect (avoids an extra render pass).
+  const [prevFilters, setPrevFilters] = useState({ search, category, source });
+  if (
+    prevFilters.search !== search ||
+    prevFilters.category !== category ||
+    prevFilters.source !== source
+  ) {
+    setPrevFilters({ search, category, source });
     setVisibleCount(PURCHASE_HISTORY_PAGE_SIZE);
-  }, [search, category, source]);
+  }
 
   const visible = getVisiblePurchases(filtered, visibleCount);
   const hasMore = visibleCount < filtered.length;
