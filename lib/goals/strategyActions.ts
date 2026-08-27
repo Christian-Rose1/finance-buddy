@@ -175,8 +175,8 @@ export async function generateGoalFlightStageAction(
       warnings: envelope.interpreted.warnings,
       message: null,
     };
-  } catch (error) {
-    return genericStageFailure(error);
+  } catch {
+    return genericStageFailure("flight");
   }
 }
 
@@ -269,8 +269,8 @@ export async function generateGoalHotelStageAction(
       warnings: envelope.interpreted.warnings,
       message: null,
     };
-  } catch (error) {
-    return genericStageFailure(error);
+  } catch {
+    return genericStageFailure("hotel");
   }
 }
 
@@ -351,16 +351,16 @@ async function runHotelStageResearch(
 }
 
 /**
- * Generic outer failure boundary for stage actions. Logs only error name and
- * message under STRATEGY_DEBUG, never objects/payloads/customer data.
+ * Generic outer failure boundary for stage actions. Emits only a fixed
+ * allowlisted stage/category diagnostic under STRATEGY_DEBUG: no error names,
+ * messages, identifiers, provider details, payloads, prompts, sources,
+ * customer data, signatures, or complete errors. Specialized provider
+ * diagnostics elsewhere retain their already-reviewed fixed categories and
+ * status fields.
  */
-function genericStageFailure(error: unknown): GoalResearchStageResult {
-  const safeMessage =
-    error instanceof Error
-      ? `${error.name}: ${error.message}`
-      : "Unknown error";
+function genericStageFailure(stage: "flight" | "hotel"): GoalResearchStageResult {
   if (process.env.STRATEGY_DEBUG === "1") {
-    console.error("[strategy-stage-error]", safeMessage);
+    console.error("[strategy-stage-error]", JSON.stringify({ stage, category: "unexpected_stage_failure" }));
   }
   return {
     success: false,

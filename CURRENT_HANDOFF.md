@@ -1,5 +1,208 @@
 # Finance Buddy Current Handoff
 
+## 2026-08-27 Narrative Trust Stop Final Hardening
+
+Implemented locally on top of Narrative Trust Stop v1; no live provider search,
+browser automation, database action, migration, commit, or push was performed.
+
+- **No global evidence unlock.** Until source-bound, claim-level authorization
+  exists, no exact-cash or customer-verified record may restore unrestricted
+  model-authored recommendation prose. This holds for benchmark-only, exact-cash,
+  customer-verified, and mixed evidence: one stronger flight cannot authorize
+  hotel/budget/transfer/availability/mixed-payment/full-trip prose, and stronger
+  evidence unrelated to a model-recommended option changes nothing. The
+  strongest-evidence classifier
+  (`strongestNarrativeEvidence` in `lib/goals/strategyNarrativeTrustGate.ts`) is
+  descriptive only — it selects the fixed server-owned copy variant and future
+  routing, it never grants narrative authority. The policy is explicit in code
+  and tests: “Structured evidence may be displayed, but model recommendation
+  prose remains suppressed until claims are bound to the specific supporting
+  evidence.” Claim-level authorization is deferred to the source-bound
+  candidate milestone.
+- **Unconditional suppression.** Server-side (`applyNarrativeTrustGateToNarrative`)
+  and at presentation (`applyNarrativeTrustGateToStrategy` /
+  `buildCustomerSafeStrategyPresentation`) the model-authored headline, summary,
+  actions, and alternatives are replaced with deterministic server-owned copy in
+  EVERY evidence state: benchmark-only uses “Planning benchmarks found”;
+  structured-evidence states use “Planning estimates found” plus copy stating no
+  claim-specific recommendation is ready yet. `feasibility` is cleared to
+  `insufficient_information`, `pointsGap` and recommendation IDs are nulled, and
+  actions/alternatives are emptied.
+- **Structured lanes stay visible.** Exact-cash and customer-verified records
+  are projected with their own evidence labels (“Exact cash quote” / “Customer
+  verified”), prices, dates, coverage, taxes, cancellation/baggage terms, and
+  unknown-field counts. Their existence is never converted into permission to
+  display unrestricted model narrative.
+- **Syntax vs. semantics separated.** The shared customer-text policy
+  (`lib/goals/customerTextPolicy.ts`) blocks opaque internal references,
+  URLs where prohibited, and genuine technical pipeline terms
+  (payload/signature/validation/provider/stage). It deliberately does NOT drop a
+  sentence merely because it contains ordinary semantic words such as `live`,
+  `bookable`, `guaranteed`, or `exact` — those appear in important cautionary
+  statements (“No live availability was verified.”, “Exact dates were not
+  confirmed.”, “This planning estimate is not bookable.”). Unsupported positive
+  claims are controlled by the deterministic evidence gate and future
+  claim-level authorization, never by a growing keyword blacklist.
+- **Contract completeness after filtering.** A required headline or summary is
+  never persisted as an empty string: fixed neutral server-owned fallbacks are
+  used when syntactic filtering empties them, and the evidence gate then
+  replaces the narrative with the stronger fixed trust-stop copy. An action that
+  loses its required title or explanation is dropped whole; an alternative that
+  loses its required title or tradeoff is dropped whole; empty assumptions and
+  warnings are dropped. Fragments and raw unsafe fallback text are never
+  preserved.
+- Exact-cash and customer-verified production lanes remain empty by design;
+  fixtures proving lane display are explicitly test-only.
+- Architecture note (unchanged from v1): the active staged gateway is a private
+  `WeakMap`, repository-minted running-stage authority, and a one-shot opaque
+  executor; its observations are ephemeral, unpersisted, unprojected, and
+  explicitly NOT candidate evidence. Historical handoff sections describing
+  HMAC-sealed execution/`web_observed_candidate` evidence describe superseded
+  work.
+- Verification: focused trust/presentation/provider-contract/lifecycle tests,
+  the full suite, `npx tsc --noEmit`, `npm run build`, and `git diff --check`
+  passed. Test-count reconciliation below. No live provider, browser, database,
+  migration, commit, or push was performed.
+
+## 2026-08-27 Narrative Trust Stop v1
+
+Implemented locally; no live provider search, browser automation, database
+action, migration, commit, or push was performed.
+
+- New deterministic narrative trust gate (`lib/goals/strategyNarrativeTrustGate.ts`):
+  finalization and presentation classify the strategy by the strongest eligible
+  structured evidence (`customer_verified` > `exact_cash_offer` >
+  `planning_benchmark`), never by model prose. When only planning benchmarks
+  exist, the entire model-authored recommendation narrative is suppressed:
+  headline becomes the fixed “Planning benchmarks found”, summary becomes the
+  fixed “Finance Buddy found planning benchmarks, but not a route- and
+  date-specific option strong enough to recommend yet…” copy, and actions and
+  alternatives are emptied. Estimate cards, saved-goal constraints, native
+  points balances, ownership, verified/unverified state, deterministic points
+  requirements, gaps, and allocation scenarios all remain visible. The gate is
+  deliberately not a keyword blacklist: benchmark-only mode suppresses the
+  whole narrative, so budget/affordability/availability/transfer/mixed-payment
+  semantic detection is never attempted.
+- The gate runs server-side in `generateAutomatedStrategyFromResearchStages`
+  on the provider narrative before research data is merged and the strategy is
+  persisted, and again in `buildCustomerSafeStrategyPresentation` as defense in
+  depth (so pre-existing saved benchmark-only strategies can never display the
+  old model narrative).
+- Internal-reference blocking now lives in one shared policy
+  (`lib/goals/customerTextPolicy.ts`): `award-N`, `card-N`, `cash-N`, `source-N`,
+  `option-N`, `scenario-N`, `action-N`, `alternative-N`, `allocation-N`,
+  `research-N`, `request-N`, `offer-N`, `trip-shape-N`, `flight-estimate-N`,
+  `hotel-estimate-N`, and legacy source/account/goal/user/program/run-N syntaxes
+  are removed from customer-visible model prose at provider-output validation
+  (before persistence) and again at presentation. Complete unsafe sentences are
+  dropped whole; projection-generated display keys (e.g. `flight-estimate-1`)
+  are client-safe identifiers and are not affected. Server-generated
+  finalization warnings (which name only the model's own cleared fabricated
+  reference) are not treated as model prose.
+- “Feasible” customer wording now means only what is proven: a points-arithmetic
+  scenario label reads “Points balance could cover this benchmark” (or “…this
+  option” for structured evidence) instead of implying trip-level feasibility.
+- Final-provider fragility: benchmark-only finalization still depends on the
+  strategy provider completing a contract-valid completion; the gate replaces
+  the narrative afterward. A provider-skip deterministic fallback was assessed
+  and deliberately NOT added in this milestone because it would change
+  finalization failure/retry semantics that the refresh lifecycle, its tests,
+  and “Never save malformed model output merely to make refresh succeed”
+  depend on. Follow-up needed: a separate milestone that assembles the
+  benchmark-only strategy without calling the narrative model, with explicit
+  acceptance criteria for provider-failure behavior.
+- Architecture note: the active staged gateway is a private `WeakMap`,
+  repository-minted running-stage authority, and a one-shot opaque executor;
+  its observations are ephemeral, unpersisted, unprojected, and explicitly NOT
+  candidate evidence. Historical handoff sections describing HMAC-sealed
+  execution/`web_observed_candidate` evidence describe superseded work and
+  must not be confused with the active architecture.
+- Verification: focused trust/presentation/provider-contract tests and the full
+  suite passed; `npx tsc --noEmit`, `npm run build`, and `git diff --check`
+  passed. Test count reconciliation below. No live provider, browser,
+  database, migration, commit, or push was performed.
+
+## 2026-08-27 Refresh Lifecycle and Safe Recovery Correction
+
+A user-observed Refresh attempt on the saved strategy failed, and the panel
+kept displaying active "Refreshing" progress after the attempt had stopped.
+Code inspection verified the defect: `showProgress` depended on
+`currentStage`, which was never reset after a terminal success or failure, so
+stale progress stayed visible indefinitely. Every failure also showed one
+generic message, safe stage outcomes and finalization retryability were
+discarded, and initial-build previews were coupled to the active-progress
+container, so hiding progress would also have hidden completed previews.
+
+The exact underlying provider/action failure category for that refresh
+remains unknown because attempt-specific logs were unavailable. The cause has
+still not been identified.
+
+The corrected implementation distinguishes outcomes the first cut of this
+correction conflated:
+
+- An outer action failure (`success: false` from a stage/finalization action
+  or a transport exception) stops the client workflow, shows the allowlisted
+  action-failure message, and clears the client run reference and transient
+  previews while preserving the saved strategy and timestamp.
+- A valid terminal degraded stage (`success: true, stageStatus: "failed"`)
+  means the signed stage reached a terminal state and returned a `runId`, but
+  that research lane produced no usable interpreted options. The panel
+  records the degraded status, retains no options for that lane, keeps
+  successful sibling previews, and continues to hotel research and
+  finalization in every terminal combination (succeeded/failed ×
+  succeeded/failed). A degraded stage never shows a failure notice and is
+  never described as having succeeded or produced estimates.
+- Retryable versus non-retryable finalization remains the finalization
+  action's authoritative verdict. `runId` is retained only when finalization
+  explicitly reports `retryable: true`; "Try finishing again" appears only
+  for that reusable run and sends only `goalId` and the existing `runId`, so
+  flight and hotel research are never rerun. A non-retryable result clears
+  the client run reference and transient previews. Retry starts clear stale
+  errors and are unavailable until a result explicitly restores them.
+- A finalization transport exception conservatively retains the reusable run
+  because the existing server-validation design demonstrably makes a repeated
+  finalization attempt safe: the run permits only failed→running, stages load
+  from verified server-side payloads, research is never rerun, the saved
+  strategy is replaced only after successful persistence, and an expired,
+  missing, or stuck-running run returns an explicit non-retryable result.
+
+Customer wording is allowlisted per category and context: first-build versus
+saved-refresh flight/hotel action-failure wording, and context-aware final
+stage copy ("Finishing your plan" versus "Finishing your updated plan", with
+matching retryable-failure wording). Arbitrary action, provider, status, or
+exception text never reaches customers.
+
+Safe diagnostics were corrected: the generic outer stage boundary now emits
+only a fixed allowlisted field under `STRATEGY_DEBUG=1`, e.g.
+`{"stage":"flight","category":"unexpected_stage_failure"}` (or the hotel
+equivalent), and no longer appends error names or messages. Specialized
+provider diagnostics elsewhere retain their already-reviewed fixed
+categories and status fields. No raw errors, prompts, sources, payloads,
+customer data, signatures, identifiers, or complete errors are logged.
+
+The behavior lives in a pure `strategyPanelLifecycle` state model whose
+events distinguish `flight_stage_completed` / `hotel_stage_completed`
+(carrying the server terminal status and safe options) from
+`flight_action_failed` / `hotel_action_failed`, so action failure can never
+be confused with a degraded stage. Retained first-build previews render
+separately from active progress under "Research completed so far" only while
+their reusable run remains; saved-strategy refreshes continue suppressing
+temporary previews. The saved strategy and timestamp survive every failure
+and change only through a successful-finalization outcome.
+
+Test-count reconciliation: the pre-correction tracked suite contained 737
+tests, verified by running exactly the tracked test files. The first cut of
+the new lifecycle suite added 13 tests (the interim report misstated 12;
+737 + 13 = 750). After this correction the lifecycle suite contains 21 tests
+and the full suite reports 758 (737 + 21). No existing test was modified or
+removed; `git status` shows only the two new lifecycle files plus the
+component, `strategyActions.ts`, and this handoff as modified.
+
+Still required after review: one later bounded live Refresh with
+`STRATEGY_DEBUG=1` safe diagnostics to observe the new lifecycle and, if a
+failure recurs, identify its category from the fixed safe stage field. Do not
+run that live refresh until the user explicitly approves it.
+
 ## 2026-08-27 Deterministic Strategy Timestamp Rendering
 
 A live `/goals` hydration mismatch was observed because render-time
@@ -200,6 +403,13 @@ are not covered by the current suite. They must be restored with new
 capability-bound tests in the future candidate milestone. Candidate extraction,
 projection, rendering, persistence, booking, funding, and allocation remain
 out of scope and unimplemented.
+
+> ⚠️ SUPERSEDED: the sections below (HMAC-sealed execution records and the
+> `web_observed_candidate` extractor) describe removed/superseded candidate
+> work, not the active architecture. The active staged gateway is a private
+> `WeakMap` + repository-minted running-stage authority + one-shot opaque
+> executor; its observations are ephemeral, unpersisted, unprojected, and are
+> NOT candidate evidence. Do not treat HMAC candidate sections as current.
 
 ## 2026-08-27 Provider-Execution Provenance and Coverage Correction
 

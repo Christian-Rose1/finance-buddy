@@ -1,5 +1,6 @@
 import type { Goal } from "./types";
 import type { StrategyAwardOption } from "./strategyTypes";
+import { containsCustomerInternalReference } from "./customerTextPolicy";
 
 export interface CustomerSafeGoalSummary {
   title: string;
@@ -37,14 +38,17 @@ const coverageLabels: Record<string, string> = { source_explicit: "Coverage stat
 export function safeGoalLabel(value: unknown, fallback = ""): string {
   if (typeof value !== "string") return fallback;
   const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized || normalized.length > 120 || /[\u0000-\u001f\u007f]/.test(normalized) || /https?:\/\//i.test(normalized) || /\b(?:source|account|goal|user|program|run)-[A-Za-z0-9_-]+\b/i.test(normalized)) return fallback;
+  if (!normalized || normalized.length > 120 || /[\u0000-\u001f\u007f]/.test(normalized) || /https?:\/\//i.test(normalized) || containsCustomerInternalReference(normalized)) return fallback;
   return normalized;
 }
 
 export function toCustomerSafeResearchLabel(value: unknown, fallback: string): string {
   if (typeof value !== "string") return fallback;
   const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized || normalized.length > 160 || /[\u0000-\u001f\u007f]/.test(normalized) || /https?:\/\//i.test(normalized) || /\b(?:source|account|goal|user|program|run)-[A-Za-z0-9_-]+\b/i.test(normalized) || /\b(?:payload|signature|validation|provider|stage|live|bookable|available for booking|guaranteed|exact availability)\b/i.test(normalized)) return fallback;
+  // Syntax and privacy only: URLs, internal references, and genuine technical
+  // pipeline terms. Ordinary semantic words (live, bookable, guaranteed,
+  // exact) are not blacklisted — claim truth is the evidence gate's job.
+  if (!normalized || normalized.length > 160 || /[\u0000-\u001f\u007f]/.test(normalized) || /https?:\/\//i.test(normalized) || containsCustomerInternalReference(normalized) || /\b(?:payload|signature|validation|provider|stage)\b/i.test(normalized)) return fallback;
   return normalized;
 }
 

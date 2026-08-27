@@ -99,3 +99,21 @@ test("preview rejects hostile labels and raw fields", () => {
   assert.equal(preview.itineraryLabel, null);
   for (const forbidden of ["https://", "provider", "source-raw", "option-raw", "payload", "signature", "stage"]) assert.equal(output.toLowerCase().includes(forbidden), false);
 });
+
+test("research and goal labels reject opaque internal references including award/card/cash", () => {
+  const preview = buildCustomerSafePlanningPreview(
+    option({ programName: "award-1 Program", itineraryLabel: "card-2 flight details" }),
+    "k",
+  );
+  assert.equal(preview.programName, "Reward program");
+  assert.equal(preview.itineraryLabel, null);
+
+  const summary = buildCustomerSafeGoalSummary({
+    ...baseGoal,
+    origin: ["award-5", "Denver"],
+    destinations: ["cash-7", "Paris"],
+  });
+  assert.equal(summary.route, "Denver → Paris");
+  const output = JSON.stringify(summary);
+  for (const forbidden of ["award-5", "cash-7"]) assert.equal(output.includes(forbidden), false, forbidden);
+});

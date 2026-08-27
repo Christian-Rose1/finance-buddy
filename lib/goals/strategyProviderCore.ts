@@ -17,6 +17,7 @@ import type {
 } from "./strategyTypes";
 import { evidenceLevelOf } from "./travelEvidence";
 import { FOLLOW_UP_DECISION_TOPICS } from "./strategyTypes";
+import { filterCustomerSentences } from "./customerTextPolicy";
 
 // ---------------------------------------------------------------------------
 // Error
@@ -45,6 +46,15 @@ export const FEASIBILITY_VALUES: StrategyFeasibility[] = [
   "depends_on_new_card",
   "insufficient_information",
 ];
+
+/**
+ * Fixed neutral server-owned fallbacks when syntactic filtering empties a
+ * required narrative field. The deterministic narrative trust gate may later
+ * replace these with the stronger fixed trust-stop copy.
+ */
+export const NEUTRAL_HEADLINE_FALLBACK = "Your planning strategy";
+export const NEUTRAL_SUMMARY_FALLBACK =
+  "Planning guidance based on your saved goal.";
 
 export const STRATEGY_PROMPT = `You are a personalized credit-card points strategy planner.
 
@@ -476,8 +486,19 @@ export function validateStrategyOutput(
 ): PersonalizedStrategyNarrative {
   const root = requireObject(parsed, "strategy", provider, model);
 
-  const headline = requireString(root.headline, "headline", provider, model);
-  const summary = requireString(root.summary, "summary", provider, model);
+  // Model-authored narrative prose is customer-visible text. Discard complete
+  // unsafe sentences (internal references such as award-1/source-2, URLs, and
+  // technical pipeline terms) before the narrative can be persisted. A
+  // required headline/summary must never persist as an empty string: use the
+  // fixed neutral server-owned fallback when every sentence is unsafe.
+  const headline =
+    filterCustomerSentences(
+      requireString(root.headline, "headline", provider, model),
+    ) || NEUTRAL_HEADLINE_FALLBACK;
+  const summary =
+    filterCustomerSentences(
+      requireString(root.summary, "summary", provider, model),
+    ) || NEUTRAL_SUMMARY_FALLBACK;
 
   const feasibility = requireString(
     root.feasibility,
@@ -583,9 +604,17 @@ export function validateStrategyOutput(
     "assumptions",
     provider,
     model
-  );
+  )
+    .map(filterCustomerSentences)
+    .filter((value) => value.length > 0);
 
-  const warnings = requireStringArrayField(root, "warnings", provider, model);
+  // Model-authored warnings are sanitized the same way. Server-generated
+  // finalization warnings (which name only the model's own fabricated
+  // reference that was cleared) are appended afterwards and never treated as
+  // model prose.
+  const warnings = requireStringArrayField(root, "warnings", provider, model)
+    .map(filterCustomerSentences)
+    .filter((value) => value.length > 0);
   if (finalizationWarnings.length > 0) {
     warnings.unshift(...finalizationWarnings);
   }
@@ -631,9 +660,22 @@ export function validateStrategyOutput(
     );
   }
 
-  const actions = rawActions.map(
-    (rawAction) => validateAction(rawAction, context, provider, model)
-  );
+  // If an action loses its required title or explanation after syntactic
+  // filtering, drop the complete action rather than persisting a partial one.
+  const actions = rawActions
+    .map((rawAction) => validateAction(rawAction, context, provider, model))
+    .map((action) => ({
+      ...action,
+      title: filterCustomerSentences(action.title),
+      explanation: filterCustomerSentences(action.explanation),
+      deadline:
+        action.deadline === null
+          ? null
+          : filterCustomerSentences(action.deadline),
+    }))
+    .filter(
+      (action) => action.title.length > 0 && action.explanation.length > 0,
+    );
 
   const rawAlternatives = root.alternatives;
 
@@ -645,10 +687,22 @@ export function validateStrategyOutput(
     );
   }
 
-  const alternatives = rawAlternatives.map(
-    (rawAlternative) =>
+  // If an alternative loses its required title or tradeoff after syntactic
+  // filtering, drop the complete alternative rather than persisting a partial
+  // one.
+  const alternatives = rawAlternatives
+    .map((rawAlternative) =>
       validateAlternative(rawAlternative, context, provider, model)
-  );
+    )
+    .map((alternative) => ({
+      ...alternative,
+      title: filterCustomerSentences(alternative.title),
+      tradeoff: filterCustomerSentences(alternative.tradeoff),
+    }))
+    .filter(
+      (alternative) =>
+        alternative.title.length > 0 && alternative.tradeoff.length > 0,
+    );
 
   // flightOptions and hotelOptions are server-attached validated research
   // facts. They are attached deterministically from context.awardOptions and

@@ -12,6 +12,7 @@ import { createResearchInterpreter } from "./researchInterpreterFactory";
 import { createStrategyProvider } from "./strategyProviderFactory";
 import { buildStrategyResearchQueries } from "./strategyResearchQueries";
 import { buildSanitizedStrategyPayload } from "./sanitizedStrategyPayload";
+import { applyNarrativeTrustGateToNarrative } from "./strategyNarrativeTrustGate";
 import { buildResearchPlannerInput } from "./researchPlannerInputBuilder";
 import type { ResearchPlanQuery } from "./researchPlannerTypes";
 import {
@@ -326,13 +327,18 @@ export async function generateAutomatedStrategyFromResearchStages(
     generatedAt: context.generatedAt || new Date().toISOString(),
   };
 
-  // 5. Sanitize and generate the narrative once.
+  // 5. Sanitize and generate the narrative once, then apply the deterministic
+  // narrative trust gate. When only planning benchmarks exist, the model
+  // narrative is replaced with fixed server-owned copy before anything is
+  // merged or persisted.
   const strategyProvider = createStrategyProvider();
   const sanitizedPrompt = buildSanitizedStrategyPayload(
     enrichedContext,
     catalogRewardPrograms
   );
-  const strategy = await strategyProvider.generateStrategy(sanitizedPrompt);
+  const strategy = applyNarrativeTrustGateToNarrative(
+    await strategyProvider.generateStrategy(sanitizedPrompt),
+  );
 
   // 6. Deterministically attach points inventory and allocation scenarios.
   const pointsInventory = buildPointsInventory(

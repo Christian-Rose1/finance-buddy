@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildCustomerSafeStrategyPresentation } from "./customerSafeStrategyPresentation";
+import { STRUCTURED_EVIDENCE_SUMMARY } from "./strategyNarrativeTrustGate";
 import type { Goal } from "./types";
 import type {
+  CustomerVerifiedTravelOption,
   PersonalizedStrategy,
+  PublicExactCashCandidate,
   StrategyAction,
   StrategyAllocationScenario,
   StrategyAlternative,
@@ -166,6 +169,62 @@ function build(
   return buildCustomerSafeStrategyPresentation(goal, strategy, generatedAt);
 }
 
+/**
+ * Test-only exact-cash fixture proving the structured-evidence lane keeps its
+ * existing semantics: the record itself is displayed with its evidence label,
+ * but it never authorizes unrestricted model narrative. The production
+ * exact-cash lane is empty until a future server-side provider adapter exists.
+ */
+function exactCashFixture(): PublicExactCashCandidate {
+  return {
+    id: "cash-test-1",
+    kind: "flight",
+    evidenceLevel: "exact_cash_offer",
+    retrievedAt: "2027-01-01T00:00:00.000Z",
+    expiresAt: "2027-02-01T00:00:00.000Z",
+    search: {
+      origin: ["DEN"],
+      destinations: ["Paris"],
+      departureDate: "2027-04-03",
+      returnDate: "2027-04-11",
+      travelerCount: 2,
+      roomCount: null,
+      nightCount: 8,
+    },
+    coverage: { travelerCount: 2, roomCount: null, nightCount: 8 },
+    price: { currency: "USD", total: 900, base: 800, taxes: 100, mandatoryFees: null },
+    cancellationTerms: "Refundable",
+    baggageTerms: null,
+    paymentTiming: null,
+    unknownFields: [],
+    sourceLabel: "Test-only exact cash quote",
+  };
+}
+
+/** Attaches structured exact-cash evidence; narrative stays suppressed by design. */
+function withExactCash(strategy: PersonalizedStrategy): PersonalizedStrategy {
+  return { ...strategy, currentCashOptions: [exactCashFixture()] };
+}
+
+/**
+ * Test-only customer-verified fixture proving the structured lane keeps its
+ * semantics. The production lane is empty until a future verification flow.
+ */
+function verifiedFixture(): CustomerVerifiedTravelOption {
+  return {
+    id: "verified-test-1",
+    evidenceLevel: "customer_verified",
+    kind: "flight",
+    confirmedAt: "2027-01-01T00:00:00.000Z",
+    summary: "Customer confirmed this flight",
+    unknownFields: [],
+  };
+}
+
+function withVerified(strategy: PersonalizedStrategy): PersonalizedStrategy {
+  return { ...strategy, customerVerifiedOptions: [verifiedFixture()] };
+}
+
 function withExtras<T extends object>(value: T, extras: Record<string, unknown>): T {
   return Object.assign(value, extras);
 }
@@ -177,10 +236,14 @@ function serialized(value: unknown): string {
 test("builds strategy-first presentation with deterministic caps and safe labels", () => {
   const view = build();
 
-  assert.equal(view.strategy.headline, "A planning strategy");
+  // The default fixture carries only planning benchmarks, so the narrative
+  // gate replaces the model narrative with deterministic server-owned copy.
+  assert.equal(view.strategy.headline, "Planning benchmarks found");
+  assert.equal(view.strategy.summary.includes("Finance Buddy found planning benchmarks"), true);
+  assert.deepEqual(view.strategy.actions, []);
   assert.equal(view.flightEstimates.length, 3);
   assert.equal(view.hotelEstimates.length, 3);
-  assert.equal(view.alternatives.length, 2);
+  assert.equal(view.alternatives.length, 0);
   assert.equal(view.flightEstimates[0]?.evidenceLabel, "Planning estimate");
   assert.equal(view.details.evidenceLabels.includes("Planning estimate"), true);
   assert.equal(view.goal.dateWindowIsFlexible, true);
@@ -376,7 +439,7 @@ for (const [coverageStatus, expected] of coverageLabels) {
 }
 
 const statusLabels: Array<[StrategyAllocationScenario["status"], string]> = [
-  ["feasible", "Planning scenario"],
+  ["feasible", "Points balance could cover this benchmark"],
   ["gap", "We don’t see a confirmed rewards balance that can fund this option."],
   ["conditional", "Conditional planning scenario"],
   ["insufficient_information", "We can’t work out the full points requirement yet."],
@@ -418,8 +481,11 @@ test("uses fixed neutral labels for unknown runtime enum values", () => {
   }
 });
 
-test("filters unsafe model sentences without leaving fragments", () => {
-  const view = build(baseStrategy({
+test("syntactic filtering keeps cautionary sentences and drops unsafe sentences whole", () => {
+  // Structured exact-cash evidence is displayable, but the deterministic gate
+  // still suppresses the entire model narrative; the syntax filter is what
+  // guards residual assumption/warning/topic prose.
+  const view = build(withExactCash(baseStrategy({
     headline: "A safe headline. This is bookable and guaranteed.",
     summary: "Safe opening. This is available for booking. Safe middle. See https://example.test/source. Safe ending.",
     actions: [action({
@@ -430,44 +496,117 @@ test("filters unsafe model sentences without leaving fragments", () => {
       title: "Alternative with exact availability.",
       tradeoff: "A safe tradeoff remains.",
     })],
-    assumptions: ["Safe assumption. The provider payload says guaranteed results."],
-    warnings: ["Safe warning. See source-123 for validation details."],
+    assumptions: [
+      "Safe assumption. The provider payload says guaranteed results.",
+      "No live availability was verified.",
+    ],
+    warnings: ["Safe warning. See source-123 for validation details.", "Exact dates were not confirmed."],
     followUpQuestions: ["Safe topic. This stay is bookable."],
-  }));
+  })));
   const output = serialized(view);
 
-  assert.equal(view.strategy.headline, "A safe headline.");
-  assert.equal(view.strategy.summary, "Safe opening. Safe middle. Safe ending.");
-  assert.equal(view.strategy.actions[0]?.explanation, "Safe action context. Continue with the saved plan.");
-  assert.equal(view.alternatives[0]?.tradeoff, "A safe tradeoff remains.");
-  assert.deepEqual(view.details.assumptions, ["Safe assumption."]);
-  assert.deepEqual(view.details.warnings, ["Safe warning."]);
-  assert.deepEqual(view.refinementTopics, ["Safe topic."]);
-  for (const forbidden of ["bookable", "guaranteed", "available for booking", "https://example.test", "source-123", "payload", "validation", "Live results"]) {
+  // Model-authored narrative is never displayed: deterministic server copy
+  // only, in every evidence state.
+  assert.equal(view.strategy.headline, "Planning estimates found");
+  assert.equal(view.strategy.actions.length, 0);
+  assert.equal(view.alternatives.length, 0);
+  // Cautionary sentences containing ordinary semantic words survive syntactic
+  // filtering; claim truth is the evidence gate's job, not a blacklist.
+  assert.deepEqual(view.details.assumptions, ["Safe assumption.", "No live availability was verified."]);
+  assert.deepEqual(view.details.warnings, ["Safe warning.", "Exact dates were not confirmed."]);
+  assert.deepEqual(view.refinementTopics, ["Safe topic. This stay is bookable."]);
+  // Unsafe sentences are dropped whole, without fragments or raw fallbacks.
+  for (const forbidden of ["provider payload", "https://example.test", "source-123", "validation details", "Safe opening.", "Safe action", "Live results", "Safe ending."]) {
     assert.equal(output.includes(forbidden), false, forbidden);
   }
 });
 
-test("uses the fixed planning fallback when all narrative sentences are unsafe", () => {
-  const view = build(baseStrategy({
+test("deterministic copy replaces model narrative and unsafe residual text is dropped whole", () => {
+  const view = build(withExactCash(baseStrategy({
     headline: "This is live.",
     summary: "This exact availability is guaranteed and bookable.",
     actions: [action({ title: "This is live.", explanation: "Available for booking." })],
     alternatives: [alternative({ title: "This is bookable.", tradeoff: "This is guaranteed." })],
-    assumptions: ["https://example.test/source"],
+    assumptions: ["https://example.test/source", "See source-4 for details."],
     warnings: ["provider payload validation stage"],
-    followUpQuestions: ["This is live."],
-  }));
+    followUpQuestions: ["Compare request-7 options."],
+  })));
 
-  assert.equal(view.strategy.headline, "Your planning strategy");
-  assert.equal(view.strategy.summary, "Planning guidance based on your saved goal.");
-  assert.equal(view.strategy.actions[0]?.title, "Planning action");
-  assert.equal(view.strategy.actions[0]?.explanation, "");
-  assert.equal(view.alternatives[0]?.title, "Planning alternative");
-  assert.equal(view.alternatives[0]?.tradeoff, "");
+  // No fallback prose is ever taken from the model: the deterministic
+  // server-owned copy is used in every evidence state.
+  assert.equal(view.strategy.headline, "Planning estimates found");
+  assert.equal(view.strategy.summary, STRUCTURED_EVIDENCE_SUMMARY);
+  assert.deepEqual(view.strategy.actions, []);
+  assert.deepEqual(view.alternatives, []);
   assert.deepEqual(view.details.assumptions, []);
   assert.deepEqual(view.details.warnings, []);
   assert.deepEqual(view.refinementTopics, []);
+});
+
+test("benchmark-only strategy cannot display a model-authored recommendation narrative", () => {
+  const view = build(baseStrategy({
+    headline: "Paris Trip: Use 60k Chase Points for Flight",
+    summary: "Denver to Paris round trip for two travelers, fully funded within the $2,000 budget.",
+    actions: [action({ title: "Book the 60k flight", explanation: "Use your Chase points now." })],
+    alternatives: [alternative({ title: "Cash flights may exceed $2,000", tradeoff: "Consider other options." })],
+    assumptions: ["Model claim: see source-12 for the 30k rate on your exact dates."],
+    warnings: ["Model claim: award-9 space is available for booking."],
+  }));
+  const output = serialized(view);
+
+  assert.equal(view.strategy.headline, "Planning benchmarks found");
+  assert.equal(view.strategy.summary, "Finance Buddy found planning benchmarks, but not a route- and date-specific option strong enough to recommend yet. The estimates below can help compare possible points requirements, but they do not establish availability, affordability, or exact trip fit.");
+  assert.deepEqual(view.strategy.actions, []);
+  assert.deepEqual(view.alternatives, []);
+  // Residual model prose is dropped whole by syntax filtering — never
+  // fragmented, and never echoed as a raw fallback.
+  assert.deepEqual(view.details.assumptions, []);
+  assert.deepEqual(view.details.warnings, []);
+  for (const forbidden of ["60k", "Denver to Paris", "may exceed", "exact dates", "award space", "source-12", "award-9"]) {
+    assert.equal(output.includes(forbidden), false, forbidden);
+  }
+  // Deterministic value remains visible: saved-goal context, points balances,
+  // benchmark estimate cards, and planning paths.
+  assert.equal(view.goal.route, "DEN → Paris");
+  assert.equal(view.goal.budgetLabel, "Budget: USD 2,000");
+  assert.equal(view.flightEstimates.length, 3);
+  assert.equal(view.hotelEstimates.length, 3);
+  assert.equal(view.rewards.verified[0]?.balance, 80_000);
+  assert.equal(view.rewards.scenarios[0]?.statusLabel, "Points balance could cover this benchmark");
+});
+
+test("internal opaque references are blocked at presentation even with structured evidence", () => {
+  const view = build(withExactCash(baseStrategy({
+    headline: "Use award-1 now. Safe heading.",
+    summary: "Redeem award-9 and card-3. Keep the safe summary line.",
+    actions: [action({ title: "Check cash-2 rates", explanation: "Review the saved details." })],
+    alternatives: [alternative({ title: "source-4 option", tradeoff: "A safe tradeoff." })],
+    assumptions: ["Compare scenario-5 math.", "Balances are current."],
+    warnings: ["Review flight-estimate-1 details.", "Check current availability."],
+    followUpQuestions: ["Safe topic. Use allocation-1-1?"],
+  })));
+  const output = serialized(view);
+
+  // The deterministic gate suppresses the whole model narrative; the syntax
+  // filter removes residual internal references sentence-by-sentence.
+  assert.equal(view.strategy.headline, "Planning estimates found");
+  assert.equal(view.strategy.summary, STRUCTURED_EVIDENCE_SUMMARY);
+  assert.deepEqual(view.strategy.actions, []);
+  assert.deepEqual(view.alternatives, []);
+  assert.deepEqual(view.details.assumptions, ["Balances are current."]);
+  assert.deepEqual(view.details.warnings, ["Check current availability."]);
+  assert.deepEqual(view.refinementTopics, ["Safe topic."]);
+  // Structured exact-cash evidence remains visible with its own evidence
+  // label — displayable, but never a license for model prose.
+  assert.equal(view.currentCash.length, 1);
+  assert.equal(view.currentCash[0]?.evidenceLabel, "Exact cash quote");
+  assert.equal(view.currentCash[0]?.priceLabel, "USD 900 total");
+  // Projection-generated display keys (flight-estimate-1, allocation-1-1, ...)
+  // are client-safe identifiers created by the projection itself and are not
+  // internal references; only model-echoed tokens must be absent.
+  for (const forbidden of ["award-1", "award-9", "card-3", "cash-2", "source-4", "scenario-5"]) {
+    assert.equal(output.includes(forbidden), false, forbidden);
+  }
 });
 
 test("recursively allowlists every raw boundary and drops hostile sentinels", () => {
