@@ -9,6 +9,7 @@ import type { ResearchInterpreter } from "./researchInterpreter";
 import type { ResearchProvider, ResearchQuery, ResearchResponse } from "./researchTypes";
 import { signStrategyRunPayload } from "./strategyRunSigning";
 import { withStrategyStageActionDependenciesForTest } from "./strategyStageActionDependencies";
+import { withStrategyFinalizationDependenciesForTest } from "./strategyFinalizationDependencies";
 import type { PersonalizedStrategyContext } from "./strategyTypes";
 
 const SECRET = "actual-action-gateway-test-secret-012345";

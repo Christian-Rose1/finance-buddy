@@ -9,6 +9,7 @@ import {
 import { GoalForm } from "@/components/goal-form";
 import { GoalStrategyPanel } from "@/components/goal-strategy-panel";
 import { Target } from "lucide-react";
+import { buildCustomerSafeGoalSummary } from "@/lib/goals/customerSafeGoalSummary";
 
 async function loadGoalsData() {
   const supabase = await createServerClient();
@@ -104,32 +105,34 @@ export default async function GoalsPage() {
                 <p className="text-slate-400">You haven&apos;t created any goals yet.</p>
               </div>
             ) : (
-              goals.map((goal) => (
-                <div key={goal.id} className="fb-card p-4 sm:p-6">
+              goals.map((goal) => {
+                const summary = buildCustomerSafeGoalSummary(goal);
+                return <div key={goal.id} className="fb-card p-4 sm:p-6">
                   <div className="flex items-start justify-between">
                     <div>
-                      <h3 className="text-lg font-medium text-white">{goal.title}</h3>
-                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400">
-                        <span>
-                          {goal.origin.join(", ")} → {goal.destinations.join(", ")}
-                        </span>
+                      <h3 className="text-lg font-medium text-white">{summary.title}</h3>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400"><span>{summary.route}</span>
+                        {summary.dateWindow ? <><span>•</span><span>{summary.dateWindow}{summary.dateWindowIsFlexible ? " (flexible)" : ""}</span></> : null}
                         <span>•</span>
-                        <span className="capitalize">{goal.cabinPreference}</span>
+                        <span>{summary.cabin}</span>
                         <span>•</span>
-                        <span>{goal.travelerCount} {goal.travelerCount === 1 ? "traveler" : "travelers"}</span>
+                        <span>{summary.travelerLabel}</span>
                       </div>
                     </div>
-                    <div className="rounded-full bg-sky-400/10 px-2.5 py-0.5 text-xs font-medium text-sky-300 capitalize">
-                      {goal.status}
+                    {/* Compact cards show essential context; nights, budget, and priority remain in the expanded planning experience. */}
+                    <div className="rounded-full bg-sky-400/10 px-2.5 py-0.5 text-xs font-medium text-sky-300">
+                      {summary.status}
                     </div>
                   </div>
 
                   <GoalStrategyPanel
                     goalId={goal.id}
                     initialStrategy={savedStrategies[goal.id]?.strategy ?? null}
+                    initialGeneratedAt={savedStrategies[goal.id]?.generatedAt ?? null}
+                    goal={goal}
                   />
-                </div>
-              ))
+                </div>;
+              })
             )}
           </div>
         </section>

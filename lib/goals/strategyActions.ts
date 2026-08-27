@@ -34,7 +34,6 @@ import {
   buildStrategyRunStagePayload,
   validateStrategyRunStagePayload,
 } from "./strategyRunPayload";
-import { saveLatestStrategy } from "./strategyRepository";
 import type {
   PersonalizedStrategy,
   StrategyAwardOption,
@@ -44,6 +43,8 @@ import { toClientSafeResearch, toClientSafeStrategy } from "./travelEvidence";
 import type { VerifiedStageQueryExecutor } from "./providerExecutionGateway";
 import { startVerifiedResearchStageExecution } from "./authenticatedStageExecution";
 import { getStrategyStageActionDependencies } from "./strategyStageActionDependencies";
+import { getStrategyFinalizationDependencies } from "./strategyFinalizationDependencies";
+import { persistFinalizedStrategy } from "./finalizedStrategyPersistence";
 import type { ResearchInterpreter } from "./researchInterpreter";
 
 export type GenerateGoalStrategyResult =
@@ -51,6 +52,7 @@ export type GenerateGoalStrategyResult =
       success: true;
       strategy: PersonalizedStrategy;
       saved: boolean;
+      generatedAt: string;
       saveMessage: string | null;
     }
   | { success: false; message: string; retryable?: boolean };
@@ -474,8 +476,16 @@ export async function finalizeGoalStrategyRunAction(
 
       // Save the complete strategy. A save failure keeps the run for retry
       // and never overwrites/deletes a previous saved strategy.
+      let savedStrategy: Awaited<ReturnType<typeof persistFinalizedStrategy>>;
       try {
-        await saveLatestStrategy(goalId, userId, strategy, context.generatedAt, supabase);
+        const persisted = await persistFinalizedStrategy(
+          goalId,
+          userId,
+          strategy,
+          context.generatedAt,
+          getStrategyFinalizationDependencies().saveLatestStrategy,
+        );
+        savedStrategy = persisted;
       } catch (saveError) {
         await bestEffortMarkFinalFailed(runId, goalId, userId, supabase);
         const safeSaveMessage =
@@ -506,7 +516,13 @@ export async function finalizeGoalStrategyRunAction(
         logFinalCleanupError(cleanupError);
       }
 
-      return { success: true, strategy: toClientSafeStrategy(strategy), saved: true, saveMessage: null };
+      return {
+        success: true,
+        strategy: savedStrategy.strategy,
+        saved: true,
+        saveMessage: null,
+        generatedAt: savedStrategy.generatedAt,
+      };
     } catch (error) {
       await bestEffortMarkFinalFailed(runId, goalId, userId, supabase);
       return finalizeGenericFailure(error);

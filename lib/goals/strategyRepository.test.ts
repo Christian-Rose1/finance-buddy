@@ -179,6 +179,34 @@ test("get throws a generic error on database read error", async () => {
   );
 });
 
+test("save returns the persisted envelope timestamp rather than the input timestamp", async () => {
+  const { client } = mockClient({
+    data: validRow({ generated_at: "2027-01-03T04:05:06.000Z" }),
+    error: null,
+  });
+  const result = await saveLatestStrategy(
+    "goal-1",
+    "user-1",
+    validStrategy(),
+    "2027-01-01T00:00:00.000Z",
+    client,
+  );
+  assert.equal(result.generatedAt, "2027-01-03T04:05:06.000Z");
+});
+
+test("save rejects a missing or malformed persisted timestamp", async () => {
+  for (const generated_at of [undefined, null, "", "not-a-date"]) {
+    const row = validRow();
+    delete row.generated_at;
+    if (generated_at !== undefined) row.generated_at = generated_at;
+    const { client } = mockClient({ data: row, error: null });
+    await assert.rejects(
+      () => saveLatestStrategy("goal-1", "user-1", validStrategy(), "2027-01-01T00:00:00.000Z", client),
+      /Failed to save strategy\./,
+    );
+  }
+});
+
 test("save uses goal_id conflict upsert", async () => {
   const { client, builderRef } = mockClient({ data: validRow(), error: null });
 

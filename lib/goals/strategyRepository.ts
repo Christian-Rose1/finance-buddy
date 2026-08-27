@@ -68,6 +68,14 @@ function isValidSavedRow(row: unknown): row is Record<string, unknown> {
     return false;
   }
 
+  if (
+    typeof record.generated_at !== "string" ||
+    record.generated_at.trim().length === 0 ||
+    Number.isNaN(new Date(record.generated_at).getTime())
+  ) {
+    return false;
+  }
+
   const strategy = record.strategy_json;
   if (
     typeof strategy !== "object" ||

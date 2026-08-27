@@ -1,5 +1,29 @@
 # Finance Buddy Current Handoff
 
+## 2026-08-27 Deterministic Strategy Timestamp Rendering
+
+A live `/goals` hydration mismatch was observed because render-time
+`Intl.DateTimeFormat` produced different punctuation on server and browser.
+Saved strategy timestamps are now normalized and formatted by a pure UTC
+policy with fixed grammar, then rendered as deterministic `<time>` content.
+No client timestamp, locale, timezone, or hydration suppression is used.
+Source inspection and pure tests remove the identified locale-formatting mismatch.
+The user then manually reloaded `/goals` and verified that the hydration overlay
+was gone and the page rendered without the error. This was a reload of the
+existing saved strategy only; no Build or Refresh action or provider research
+was run.
+
+
+## 2026-08-27 Compact Goal Card Policy
+
+The compact parent goal card intentionally shows essential context only: safe
+ title, route, valid date window, cabin, traveler label, and status. Nights,
+budget, and optimization priority are intentionally omitted from compact cards
+for density and are now displayed as safe labels in the expanded saved-strategy
+view. These facts come from the saved goal and require no additional customer
+questions; no values are recomputed or inferred.
+
+
 Updated: 2026-08-27, America/New_York
 
 ## 2026-08-27 Executor Assertion and Request-Isolation Finalization
