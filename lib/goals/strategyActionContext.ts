@@ -1,13 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { createServerClient } from "@/lib/supabase-server";
-import { getGoalForUser } from "./repository";
-import { getRewardAccountsForUser } from "./rewardAccountsRepository";
-import { getWalletCardsForUser } from "@/lib/wallet/repository";
-import { getPurchasesForUser } from "@/lib/purchases/repository";
-import {
-  getRewardPrograms,
-  getCardProducts,
-} from "@/lib/rewards/catalogRepository";
+import { getStrategyActionContextDependencies } from "./strategyActionContextDependencies";
 import { buildPersonalizedStrategyContext } from "./strategyContextBuilder";
 import type { StrategyRewardProgram } from "./automatedStrategyPlanner";
 import type { PersonalizedStrategyContext } from "./strategyTypes";
@@ -43,7 +35,8 @@ export async function prepareGoalStrategyContext(
     return { success: false, message: "A valid goal is required." };
   }
 
-  const supabase = await createServerClient();
+  const dependencies = getStrategyActionContextDependencies();
+  const supabase = await dependencies.createServerClient();
   const { data: userData, error: userError } = await supabase.auth.getUser();
 
   if (userError || !userData.user) {
@@ -57,7 +50,7 @@ export async function prepareGoalStrategyContext(
 
   // Ownership-checked goal load. Returns null when the goal does not exist
   // or belongs to another user.
-  const goal = await getGoalForUser(goalId, userId);
+  const goal = await dependencies.getGoalForUser(goalId, userId);
   if (!goal) {
     return {
       success: false,
@@ -72,11 +65,11 @@ export async function prepareGoalStrategyContext(
     rewardPrograms,
     cardProducts,
   ] = await Promise.all([
-    getRewardAccountsForUser(userId),
-    getWalletCardsForUser(userId),
-    getPurchasesForUser(userId),
-    getRewardPrograms(),
-    getCardProducts({ activeOnly: true }),
+    dependencies.getRewardAccountsForUser(userId),
+    dependencies.getWalletCardsForUser(userId),
+    dependencies.getPurchasesForUser(userId),
+    dependencies.getRewardPrograms(),
+    dependencies.getCardProducts({ activeOnly: true }),
   ]);
 
   // Reward programs connected to the customer:

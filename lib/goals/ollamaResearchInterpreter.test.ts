@@ -180,13 +180,22 @@ test("sends goal, programs, and research evidence to Ollama", async () => {
   const userContent = body.messages[1].content as string;
   const jsonPart = userContent.split("\n")[0];
   const sentContext = JSON.parse(jsonPart);
-  assert.deepEqual(sentContext.goal, goal);
-  assert.deepEqual(sentContext.rewardPrograms, rewardPrograms);
-  assert.equal(sentContext.sources.length, 1);
-  assert.equal(sentContext.sources[0].id, "http://example.com/1");
-  assert.equal(sentContext.sources[0].label, "Title 1");
-  assert.equal(sentContext.sources[0].url, "http://example.com/1");
-  assert.equal(sentContext.sources[0].content, "Content 1");
+  assert.deepEqual(sentContext.goal, {
+    origin: goal.origin,
+    destinations: goal.destinations,
+    earliestDeparture: goal.earliestDeparture,
+    latestReturn: goal.latestReturn,
+    minimumNights: goal.minimumNights,
+    maximumNights: goal.maximumNights,
+    travelerCount: goal.travelerCount,
+    cabinPreference: goal.cabinPreference,
+  });
+  assert.deepEqual(sentContext.rewardPrograms, rewardPrograms.map(({ name }) => ({ name })));
+  assert.equal(sentContext.research.length, 1);
+  assert.equal(sentContext.research[0].requestRef, "research-1");
+  assert.equal(sentContext.research[0].results[0].id, "source-1");
+  assert.equal(sentContext.research[0].results[0].excerpt, "Content 1");
+  assert.ok(!userContent.includes("http://example.com/1"));
 });
 
 test("maps valid sourced output", async () => {
@@ -1816,8 +1825,9 @@ test("buildPublicResearchPayload includes minimal goal constraints without ident
     rewardPrograms.map((program) => ({ name: program.name }))
   );
   assert.equal(payload.research.length, 1);
-  assert.equal(payload.research[0].query, "query-1");
+  assert.equal(payload.research[0].requestRef, "research-1");
   assert.equal(payload.research[0].results[0].id, "source-1");
+  assert.equal(payload.research[0].results[0].excerpt, "Content");
 
   const serialized = JSON.stringify(payload);
   assert.ok(!serialized.includes("UNIQUE_HONEYMOON_VENICE_2027"));
@@ -1827,6 +1837,25 @@ test("buildPublicResearchPayload includes minimal goal constraints without ident
   assert.ok(serialized.includes("2027-07-15"));
   assert.ok(!serialized.includes(rewardPrograms[0].id));
   assert.ok(!serialized.includes("http://example.com"));
+  assert.ok(!serialized.includes("query-1"));
+  assert.ok(!serialized.includes("searchedAt"));
+  assert.ok(!serialized.includes('"content"'));
+});
+
+test("public research payload bounds and normalizes excerpts without provider metadata", () => {
+  const raw = `  fact\n\n${"x".repeat(2_100)}  `;
+  const input = makeInput({ research: [makeResearchResponse("SECRET_QUERY", [{
+    ...makeResearchResult("Title", "https://user.example/path", raw),
+    score: 0.99,
+    providerPayload: "SECRET_PROVIDER_FIELD",
+  } as ReturnType<typeof makeResearchResult>])] });
+  const serialized = buildPublicResearchPayload(input);
+  const payload = JSON.parse(serialized);
+  assert.equal(payload.research[0].results[0].excerpt.length, 2_000);
+  assert.ok(!payload.research[0].results[0].excerpt.includes("\n"));
+  for (const prohibited of ["SECRET_QUERY", "https://user.example/path", "SECRET_PROVIDER_FIELD", "searchedAt", '"score"', '"content"']) {
+    assert.ok(!serialized.includes(prohibited), prohibited);
+  }
 });
 
 test("cloud-safe opaque source references resolve only on the server", () => {

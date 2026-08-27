@@ -224,7 +224,8 @@ test("successful request posts to OpenRouter and validates content", async () =>
   assert.equal(userPayload.goal.travelerCount, 2);
   assert.equal(userPayload.goal.minimumNights, 10);
   assert.equal(userPayload.research.length, 1);
-  assert.equal(userPayload.research[0].query, "query-1");
+  assert.equal(userPayload.research[0].requestRef, "research-1");
+  assert.equal(userPayload.research[0].results[0].excerpt.length > 0, true);
 
   const serializedUser = JSON.stringify(userPayload);
   assert.ok(!serializedUser.includes("UNIQUE_HONEYMOON_VENICE_2027"));
@@ -232,6 +233,7 @@ test("successful request posts to OpenRouter and validates content", async () =>
   assert.ok(serializedUser.includes("UNIQUE_DEST_AIRPORT"));
   assert.ok(serializedUser.includes("2027-07-01"));
   assert.ok(serializedUser.includes("2027-07-15"));
+  assert.ok(!serializedUser.includes("query-1"));
 
   assert.equal(result.awardOptions.length, 1);
   assert.equal(result.awardOptions[0].programName, "Air France Flying Blue");

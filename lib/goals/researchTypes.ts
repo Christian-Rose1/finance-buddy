@@ -27,22 +27,34 @@ export interface ResearchProvider {
   search(input: ResearchQuery): Promise<ResearchResponse>;
 }
 
-export const OFFICIAL_DOMAINS: readonly string[] = Object.freeze([
+export const CARD_PROGRAM_DOMAINS: readonly string[] = Object.freeze([
   "chase.com",
   "americanexpress.com",
   "capitalone.com",
   "citi.com",
   "wellsfargo.com",
   "bilt.com",
+]);
+
+export const FLIGHT_OFFICIAL_DOMAINS: readonly string[] = Object.freeze([
   "united.com",
   "aircanada.com",
   "flyingblue.us",
   "britishairways.com",
   "southwest.com",
+]);
+
+export const HOTEL_OFFICIAL_DOMAINS: readonly string[] = Object.freeze([
   "hyatt.com",
   "marriott.com",
   "ihg.com",
   "hilton.com",
+]);
+
+export const OFFICIAL_DOMAINS: readonly string[] = Object.freeze([
+  ...CARD_PROGRAM_DOMAINS,
+  ...FLIGHT_OFFICIAL_DOMAINS,
+  ...HOTEL_OFFICIAL_DOMAINS,
 ]);
 
 export const SPECIALIST_DOMAINS: readonly string[] = Object.freeze([

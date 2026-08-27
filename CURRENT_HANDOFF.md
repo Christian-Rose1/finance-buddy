@@ -2,6 +2,277 @@
 
 Updated: 2026-08-27, America/New_York
 
+## 2026-08-27 Executor Assertion and Request-Isolation Finalization
+
+Implemented locally; no live provider search, browser automation, database
+action, migration, commit, or push was performed.
+
+- Both staged planner entry points now call the gateway-owned runtime assertion
+  before reading the goal, building a plan, or selecting an interpreter. The
+  assertion requires membership in the gateway-private executor `WeakMap`;
+  TypeScript additionally uses a non-exported `unique symbol` brand. Runtime
+  identity remains authoritative, so functions, casts, structural objects,
+  copies, and parsed serialized forms fail immediately. The frozen executor can
+  serialize as `{}`, but that copy has no capability identity and cannot run.
+- One-shot ordering is now: verify executor identity/unconsumed state and live
+  repository capability; synchronously validate plan shape, stage, queries,
+  domains, trip shapes, canonical membership, and duplicates; mark consumed;
+  then begin parallel provider work. There is no `await` before consumption.
+  Malformed input issues zero requests and leaves the executor available for
+  one subsequent valid batch. Once valid execution begins, concurrent and later
+  invocations make no additional requests while all first-batch siblings run.
+- Explicit `AsyncLocalStorage` tests cover successful and rejected callback
+  cleanup, overlapping operation isolation, nested override restoration, and
+  later default visibility for both action-composition and authenticated-
+  preparation dependency stores. Browser-facing actions still accept only
+  their goal/run arguments; production defaults bind them to the real
+  `prepareGoalStrategyContext()` path.
+- The focused preparation suite tests real authentication and owned-goal
+  preparation logic. The gateway action suite tests real action composition
+  after mocked successful preparation. Production defaults connect those two
+  paths.
+- Executor state and internal observations are request-scoped through weak
+  runtime ownership. They remain reachable only while the executor/request is
+  reachable and are then garbage-collection eligible. There is no explicit
+  persistence, replay, candidate, or browser lifecycle and no candidate
+  consumer.
+
+Verified locally: focused gateway/action/preparation/isolation/planner/
+repository/cloud tests passed (202 tests, 0 failed), and `npm test` passed (682
+tests, 0 failed). `npx tsc --noEmit`, `npm run build`, and `git diff --check`
+passed. The existing Next.js `<img>` performance warning in
+`components/receipt-upload-panel.tsx` remains. The separate finalization card-
+research lane remains outside this gateway and unchanged.
+
+## 2026-08-27 Branded One-Shot Stage Executor Correction
+
+Implemented locally; no live provider search, browser automation, database
+action, migration, commit, or push was performed.
+
+- Staged flight/hotel planners no longer accept an arbitrary execution
+  callback. They require a runtime-opaque `VerifiedStageQueryExecutor` whose
+  identity is held in a gateway-private `WeakMap` and which can be minted only
+  from a repository-minted `VerifiedRunningResearchStage` plus the server
+  provider dependency. Functions, structural lookalikes, copies, serialized
+  objects, and wrong-stage executors fail before provider execution.
+- Each executor represents one stage batch. The gateway now marks it consumed
+  synchronously after invariant validation and before provider awaits, so a
+  concurrent or later second invocation fails without another request while
+  malformed input does not consume it. The first valid invocation still runs
+  all of its selected siblings.
+- Selected queries are validated as a complete batch and then executed in
+  bounded parallel using the existing small deterministic stage budget. Each
+  query is attempted once; individual provider failures become null siblings,
+  successful siblings remain, and `Promise.all` reconstruction preserves
+  selected planned-query order regardless of completion order. No retry or
+  generic fallback was added.
+- Planner tests now obtain executors through the real repository capability and
+  gateway with mocked providers. Actual action-composition tests still mock
+  authenticated preparation and external provider/interpreter construction,
+  then exercise the real repository/capability/gateway/save/fail path.
+  Authentication and owned-goal preparation are separately tested against the
+  real `prepareGoalStrategyContext()` logic using request-local repository/auth
+  dependencies. Production action defaults point to that real preparation
+  function, and the browser-facing action signatures accept no dependencies.
+- Flight and hotel all-query-failure action tests each prove one failed-stage
+  update with no retry. Cloud privacy, query-domain, saved-goal, HMAC,
+  stage-order, and planning-benchmark protections remain covered.
+
+Verified locally: focused gateway/action/preparation/planner/repository/cloud
+tests passed (199 tests, 0 failed), and `npm test` passed (679 tests, 0 failed).
+`npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. The existing
+Next.js `<img>` performance warning in `components/receipt-upload-panel.tsx`
+remains. The separate finalization card-research lane is unchanged and still
+requires its future Card Research Trust Boundary review.
+
+## 2026-08-27 Gateway Action-Integration Proof and Scope Clarification
+
+Implemented locally; no live provider search, browser automation, database
+action, migration, commit, or push was performed.
+
+- Integration tests now exercise the actual exported flight and hotel server
+  actions through a request-local dependency seam. Authentication preparation
+  and provider/interpreter construction are mocked, while signed-run creation,
+  owned-run loading, optimistic stage transition, repository-minted capability,
+  gateway execution, stage save, and failure marking use the real production
+  implementations.
+- The tests prove create/load and `running` transition precede provider calls,
+  successful stages save once, each selected query runs at most once, partial
+  provider failures preserve siblings, and all-query failure marks the stage
+  failed exactly once without retry. Authentication, ownership, missing-run,
+  signature, expiry, stage-order, and optimistic-transition failures make zero
+  provider calls. Structural capability lookalikes remain rejected by the
+  gateway tests.
+- The capability inspector now returns only the gateway-used stage, expiry,
+  and revision view. Run, goal, and authenticated-user identifiers remain
+  captured privately in the repository-owned capability and do not enter
+  provider, cloud-interpreter, or browser payloads.
+- Approved domains are now constrained by travel query kind: cash flight,
+  award flight, cash hotel, and award hotel each receive their applicable
+  official/program/specialist policy set. The conservative hostname tests also
+  cover total host length, repeated labels, invalid hyphens, and explicit HTTP
+  and HTTPS default and non-default ports.
+- The verified-running-stage gateway covers staged flight and hotel public-web
+  research only. Initial-finalization card-offer research remains unchanged on
+  its separate pre-existing path. That path is technical debt requiring a
+  future Card Research Trust Boundary review and is not approved as web-
+  observed candidate evidence or for candidate, funding, or recommendation
+  decisions.
+- Gateway observations remain internal-only, ephemeral, and unused. No
+  candidate consumer exists, and this foundation requires no live run.
+
+Verified locally: focused action/gateway/repository/planner/interpreter tests
+passed (193 tests, 0 failed), and `npm test` passed (673 tests, 0 failed).
+`npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. The existing
+Next.js `<img>` performance warning in `components/receipt-upload-panel.tsx`
+remains. Candidate extraction, projection, persistence, booking, funding, and
+allocation remain out of scope.
+
+## 2026-08-27 Verified Running-Stage Execution Boundary
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- The repository operation that loads and verifies the signed owned run,
+  enforces expiry and stage order, and atomically transitions the exact stage
+  revision to `running` now mints the sole opaque
+  `VerifiedRunningResearchStage` capability. It captures the verified run,
+  goal, user, stage, expiry, and returned database revision in a private
+  `WeakMap`; structural lookalikes cannot be inspected or used.
+- Authenticated flight and hotel action paths compose that capability with the
+  provider to create a narrow same-request execution closure. The staged
+  planner requires this injected closure and has no provider import, direct
+  provider branch, synthetic context, or capability-free flight/hotel fallback.
+- Before each request, the gateway rechecks capability identity and expiry and
+  validates the complete selection against the deterministic plan. Canonical
+  planned-query identity includes plan position plus normalized query, sorted
+  domains, depth, stage category/kind, and ordered unique plan-owned trip-shape
+  references. Identical query text in distinct valid contexts stays distinct;
+  true duplicate contexts and duplicate selections fail before a provider call.
+- The hostname policy is deliberately ASCII-only. Configured domains and
+  provider source hosts reject Unicode, punycode IDN labels, credentials,
+  explicit ports, trailing dots, empty/repeated/oversized labels, overlong
+  hosts, and invalid label boundaries. Source URLs must be HTTP(S), and allowed
+  subdomains must match an approved domain on an exact DNS-label boundary.
+- Successful provider results are strictly normalized before ordinary planning-
+  benchmark interpretation. Both OpenRouter and Ollama receive only opaque
+  request/source references and bounded whitespace-normalized excerpts; raw
+  queries, URLs, titles, dates, scores, provider metadata/content tails, and
+  customer/account/financial/internal data remain outside the cloud payload.
+- Provider observations and fixed 500-character chunks remain request-scoped,
+  server-only, unpersisted, unprojected, and unused as claim evidence. They are
+  foundation data only; no candidate extraction or semantic validation exists.
+
+Verified locally: focused gateway/action/staged/interpreter/repository tests
+passed (176 tests, 0 failed), and `npm test` passed (669 tests, 0 failed).
+`npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. The existing
+Next.js `<img>` performance warning in `components/receipt-upload-panel.tsx`
+remains. No live browser, database, provider, or migration action was
+performed.
+
+The rejected candidate implementation's semantic, coverage, finalization, and
+client-projection tests were intentionally removed before this foundation and
+are not covered by the current suite. They must be restored with new
+capability-bound tests in the future candidate milestone. Candidate extraction,
+projection, rendering, persistence, booking, funding, and allocation remain
+out of scope and unimplemented.
+
+## 2026-08-27 Provider-Execution Provenance and Coverage Correction
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- Replaced exported signing/minting helpers with a closed server-side provider
+  wrapper. It creates a random opaque execution handle before each planned
+  request, normalizes returned results immediately after success, creates
+  bounded excerpt segments, then seals request/query/shape/result/excerpt/run/
+  stage metadata with a process-held HMAC. Provider-returned query text is
+  diagnostic only and never selects a plan binding.
+- Candidate evidence consumes a sealed aggregate exactly once. It rejects
+  replay, expired (15-minute) records, future-issued records beyond 60 seconds,
+  run/stage/query/shape mismatch, digest mismatch, malformed results/excerpts,
+  and integrity tampering. Freshness concerns only web-observation provenance;
+  it is not availability evidence.
+- Canonical hashing recursively sorts object keys and retains only documented
+  request/result/excerpt fields. Client evidence uses a specific signed excerpt
+  segment rather than unrestricted whole-result content.
+- Added independent journey/traveler and stay/room/guest coverage dimensions
+  alongside conservative legacy input compatibility. Incompatible or unknown
+  coverage/fees cannot make an observation exact and no totals are inferred.
+
+Verified locally: focused provenance/candidate/staged tests and `npm test`
+passed (657 tests, 0 failed); `npx tsc --noEmit`, `npm run build`, and `git
+diff --check` passed. The existing Next.js `<img>` warning in
+`components/receipt-upload-panel.tsx` remains. No live browser/database/provider
+flow was verified. The aggregate remains ephemeral, unpersisted, unrendered,
+and unused for booking or allocation.
+
+## 2026-08-27 Web-Observed Evidence Execution-Binding Correction
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- Candidate evidence no longer binds a result to a plan by the provider's
+  response query text. Immediately after each successful staged planned-query
+  invocation, the server mints signed execution/result records containing an
+  opaque execution reference, opaque planned-query and trip-shape references,
+  canonical query/result digests, retrieval time, and result reference.
+  Candidate context accepts only records whose HMAC, plan identity, trip shape,
+  and normalized result digest verify server-side.
+- Publisher domains are normalized from the signed result and must satisfy that
+  planned query's include-domain policy. Source tier and role are resolved from
+  server policy; provider-supplied tier is ignored. Domain metadata never
+  proves a candidate fact.
+- Flight coverage and fee state now prevent an exact candidate where a
+  one-way/per-person figure, unknown/excluded/partial fee state, or other
+  incompatible coverage is present. Hotel property/area and room requirements
+  remain unknown when no saved requirement exists; guest counts are compared
+  with saved travelers when both are supplied. No totals or multiplications are
+  introduced.
+- Candidate deduplication now uses signed underlying-result digest plus the
+  normalized supported-claim fingerprint. The client projection rebuilds each
+  supported-facts field individually, dropping extra nested data.
+
+Verified locally: focused execution/candidate/evidence/payload/planner tests
+and `npm test` passed (662 tests, 0 failed); `npx tsc --noEmit`, `npm run
+build`, and `git diff --check` passed. The existing Next.js `<img>` warning in
+`components/receipt-upload-panel.tsx` remains. No live browser/database/provider
+flow was verified. Execution records are intentionally ephemeral and are not
+yet persisted, rendered, or used in booking/allocation paths.
+
+## 2026-08-27 Source-Bound Web-Observed Candidate Extraction v1
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- Added a versioned, server-owned `web_observed_candidate` contract for
+  candidates-to-verify. Every accepted record is explicitly
+  `web_observed_not_live`, starts `not_started`, uses a fixed verify-before-
+  acting instruction, and is separate from planning benchmarks, exact cash,
+  customer verification, and allocation inputs.
+- The extractor only accepts an opaque source/excerpt reference created from a
+  retrieved result for the exact deterministic planned query and trip shape.
+  It rejects missing, forged, duplicate, malformed, URL-bearing, unsupported,
+  query-mismatched, or trip-mismatched proposals. Query text and an official
+  domain alone cannot establish a fact.
+- It preserves explicit amount coverage (`one_way`, `per_night`, etc.) and fee
+  treatment without calculating totals. Policy candidates are structurally
+  prohibited from carrying itinerary, property, availability, price, or award
+  claims. Deterministic source-supported match dimensions retain partial and
+  unknown results without making them primary recommendations.
+- The explicit client projection reconstructs only opaque IDs/references,
+  domain/title/category/tier/role, supported facts, coverage, unknowns, and
+  verification instructions. It drops raw URLs, source bodies, query text,
+  internal/provider/database IDs, signatures, model references, and unrelated
+  account data.
+
+Verified locally: focused extraction/evidence/staged-payload/planner tests and
+`npm test` passed (658 tests, 0 failed); `npx tsc --noEmit`, `npm run build`,
+and `git diff --check` passed. The existing Next.js `<img>` warning in
+`components/receipt-upload-panel.tsx` remains. No live browser/database/provider
+flow was verified. Candidate extraction is not yet rendered, persisted, used
+for booking handoff, or used in funding/allocation calculations.
+
 ## 2026-08-27 Staged Web-Research Failure Isolation Correction
 
 Implemented locally; no live Tavily/provider search, browser automation,

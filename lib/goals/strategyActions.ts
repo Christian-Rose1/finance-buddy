@@ -14,7 +14,6 @@
 
 import { prepareGoalStrategyContext } from "./strategyActionContext";
 import {
-  generateAutomatedStrategy,
   generateAutomatedStrategyFromResearchStages,
   type StrategyStageFinalizationMode,
   generateFlightResearchStage,
@@ -29,7 +28,6 @@ import {
   loadVerifiedGoalStrategyRunStage,
   failGoalStrategyRunStage,
   saveGoalStrategyRunStage,
-  startGoalStrategyRunStage,
   updateGoalStrategyRunFinalStatus,
 } from "./strategyRunRepository";
 import {
@@ -43,6 +41,10 @@ import type {
   StrategySource,
 } from "./strategyTypes";
 import { toClientSafeResearch, toClientSafeStrategy } from "./travelEvidence";
+import type { VerifiedStageQueryExecutor } from "./providerExecutionGateway";
+import { startVerifiedResearchStageExecution } from "./authenticatedStageExecution";
+import { getStrategyStageActionDependencies } from "./strategyStageActionDependencies";
+import type { ResearchInterpreter } from "./researchInterpreter";
 
 export type GenerateGoalStrategyResult =
   | {
@@ -91,94 +93,6 @@ const STRATEGY_RUN_UNAVAILABLE_MESSAGE =
   "This strategy run is no longer available. Rebuild your complete strategy to try again.";
 
 /**
- * Generate a personalized points strategy for one of the authenticated
- * user's goals.
- *
- * Data flow:
- *   authenticated user
- *   → owned goal + reward accounts + wallet cards + purchases
- *   → shared reward program / card product catalog
- *   → buildPersonalizedStrategyContext
- *   → generateAutomatedStrategy (research + interpretation + strategy)
- *
- * Only reward programs connected to the customer — through a reward account
- * or through a wallet card linked to a card product — are passed to the
- * planner as research targets. The complete reward-program catalog is passed
- * separately so sourced transfer-partner options may reference any real
- * catalog program without implying customer ownership.
- */
-export async function generateGoalStrategyAction(
-  goalId: string
-): Promise<GenerateGoalStrategyResult> {
-  try {
-    const preparedResult = await prepareGoalStrategyContext(goalId);
-
-    if (!preparedResult.success) {
-      return { success: false, message: preparedResult.message };
-    }
-
-    const {
-      supabase,
-      userId,
-      context,
-      customerRewardPrograms,
-      catalogRewardPrograms,
-    } = preparedResult.prepared;
-
-    const strategy = await generateAutomatedStrategy(
-      context,
-      customerRewardPrograms,
-      catalogRewardPrograms
-    );
-
-    // Persist the fully validated strategy as the latest saved strategy for
-    // this goal. A save failure is caught separately so the generated strategy
-    // is still returned and a previously saved strategy is never changed.
-    try {
-      await saveLatestStrategy(
-        goalId,
-        userId,
-        strategy,
-        context.generatedAt,
-        supabase
-      );
-      return { success: true, strategy: toClientSafeStrategy(strategy), saved: true, saveMessage: null };
-    } catch (saveError) {
-      const safeSaveMessage =
-        saveError instanceof Error
-          ? `${saveError.name}: ${saveError.message}`
-          : "Unknown error";
-      if (process.env.STRATEGY_DEBUG === "1") {
-        console.error("[strategy-save-error]", safeSaveMessage);
-      }
-      return {
-        success: true,
-        strategy: toClientSafeStrategy(strategy),
-        saved: false,
-        saveMessage:
-          "Your strategy was generated but couldn't be saved. Your previously saved strategy, if any, was not changed.",
-      };
-    }
-  } catch (error) {
-    const safeMessage =
-      error instanceof Error
-        ? `${error.name}: ${error.message}`
-        : "Unknown error";
-    if (process.env.STRATEGY_DEBUG === "1") {
-      console.error("[strategy-build-error]", safeMessage);
-    }
-    // Deliberately generic: never leak internal/database details to the client.
-    return {
-      success: false,
-      message:
-        process.env.STRATEGY_DEBUG === "1"
-          ? `[server-action-error] ${safeMessage}`
-          : "We couldn't build your strategy right now. Please try again in a moment.",
-    };
-  }
-}
-
-/**
  * Generate the signed flight research stage for a goal, creating a new
  * signed strategy run in the process.
  *
@@ -190,7 +104,8 @@ export async function generateGoalFlightStageAction(
   goalId: string
 ): Promise<GoalResearchStageResult> {
   try {
-    const preparedResult = await prepareGoalStrategyContext(goalId);
+    const dependencies = getStrategyStageActionDependencies();
+    const preparedResult = await dependencies.prepareContext(goalId);
 
     if (!preparedResult.success) {
       return { success: false, message: preparedResult.message };
@@ -208,12 +123,21 @@ export async function generateGoalFlightStageAction(
     const runId = run.id;
     const expiresAt = run.expiresAt;
 
-    await startGoalStrategyRunStage(runId, goalId, userId, "flight", supabase);
+    const executor = await startVerifiedResearchStageExecution(
+      runId,
+      goalId,
+      userId,
+      "flight",
+      dependencies.createProvider(),
+      supabase,
+    );
 
     const interpreted = await runFlightStageResearch(
       runId,
       goalId,
       userId,
+      executor,
+      dependencies.createInterpreter(),
       supabase,
       context,
       catalogRewardPrograms
@@ -267,7 +191,8 @@ export async function generateGoalHotelStageAction(
       return { success: false, message: "A valid strategy run is required." };
     }
 
-    const preparedResult = await prepareGoalStrategyContext(goalId);
+    const dependencies = getStrategyStageActionDependencies();
+    const preparedResult = await dependencies.prepareContext(goalId);
 
     if (!preparedResult.success) {
       return { success: false, message: preparedResult.message };
@@ -292,12 +217,21 @@ export async function generateGoalHotelStageAction(
       };
     }
 
-    await startGoalStrategyRunStage(runId, goalId, userId, "hotel", supabase);
+    const executor = await startVerifiedResearchStageExecution(
+      runId,
+      goalId,
+      userId,
+      "hotel",
+      dependencies.createProvider(),
+      supabase,
+    );
 
     const interpreted = await runHotelStageResearch(
       runId,
       goalId,
       userId,
+      executor,
+      dependencies.createInterpreter(),
       supabase,
       context,
       catalogRewardPrograms
@@ -354,6 +288,8 @@ async function runFlightStageResearch(
   runId: string,
   goalId: string,
   userId: string,
+  executor: VerifiedStageQueryExecutor,
+  interpreter: ResearchInterpreter,
   supabase: Parameters<typeof saveGoalStrategyRunStage>[5],
   context: Parameters<typeof generateFlightResearchStage>[0],
   catalogRewardPrograms: Parameters<typeof generateFlightResearchStage>[1]
@@ -361,7 +297,8 @@ async function runFlightStageResearch(
   try {
     const interpreted = await generateFlightResearchStage(
       context,
-      catalogRewardPrograms
+      catalogRewardPrograms,
+      { executor, interpreter },
     );
     return { kind: "succeeded", value: interpreted };
   } catch (err) {
@@ -385,6 +322,8 @@ async function runHotelStageResearch(
   runId: string,
   goalId: string,
   userId: string,
+  executor: VerifiedStageQueryExecutor,
+  interpreter: ResearchInterpreter,
   supabase: Parameters<typeof saveGoalStrategyRunStage>[5],
   context: Parameters<typeof generateHotelResearchStage>[0],
   catalogRewardPrograms: Parameters<typeof generateHotelResearchStage>[1]
@@ -392,7 +331,8 @@ async function runHotelStageResearch(
   try {
     const interpreted = await generateHotelResearchStage(
       context,
-      catalogRewardPrograms
+      catalogRewardPrograms,
+      { executor, interpreter },
     );
     return { kind: "succeeded", value: interpreted };
   } catch (err) {

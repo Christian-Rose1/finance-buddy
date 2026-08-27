@@ -6,7 +6,13 @@
  * availability claim.
  */
 
-import { OFFICIAL_DOMAINS, SPECIALIST_DOMAINS } from "./researchTypes";
+import {
+  CARD_PROGRAM_DOMAINS,
+  FLIGHT_OFFICIAL_DOMAINS,
+  HOTEL_OFFICIAL_DOMAINS,
+  OFFICIAL_DOMAINS,
+  SPECIALIST_DOMAINS,
+} from "./researchTypes";
 import type { OptimizationPriority } from "./types";
 import type {
   PlannerTransferPartner,
@@ -319,7 +325,7 @@ export function buildSavedGoalWebTravelDiscoveryPlan(input: SavedGoalWebDiscover
       `${origin} to ${destination} cash flights ${dates} ${travelers} ${cabinContext(input)}`,
       "cash_flight_discovery", "flight", shapes,
       "Saved-goal route and date-window cash-flight discovery.",
-      [...OFFICIAL_DOMAINS], "advanced",
+      [...FLIGHT_OFFICIAL_DOMAINS], "advanced",
     );
     if (cashFlight) candidates.set(cashFlight.kind, cashFlight);
 
@@ -328,7 +334,7 @@ export function buildSavedGoalWebTravelDiscoveryPlan(input: SavedGoalWebDiscover
         `${programs.join(" ")} award flight ${origin} to ${destination} ${dates} ${travelers} ${cabinContext(input)}`,
         "award_flight_discovery", "flight", shapes,
         "Saved-goal route, date-window, and known-program award-flight discovery.",
-        [...OFFICIAL_DOMAINS, ...SPECIALIST_DOMAINS], "advanced",
+        [...CARD_PROGRAM_DOMAINS, ...FLIGHT_OFFICIAL_DOMAINS, ...SPECIALIST_DOMAINS], "advanced",
       );
       if (awardFlight) candidates.set(awardFlight.kind, awardFlight);
     }
@@ -339,7 +345,7 @@ export function buildSavedGoalWebTravelDiscoveryPlan(input: SavedGoalWebDiscover
       `${destination} hotel cash stay ${dates} ${nights} ${travelers} room breakdown not specified`,
       "cash_hotel_discovery", "hotel", shapes,
       "Saved-goal destination, date-window, and night-range hotel discovery.",
-      [...OFFICIAL_DOMAINS], "advanced",
+      [...HOTEL_OFFICIAL_DOMAINS], "advanced",
     );
     if (cashHotel) candidates.set(cashHotel.kind, cashHotel);
 
@@ -348,7 +354,7 @@ export function buildSavedGoalWebTravelDiscoveryPlan(input: SavedGoalWebDiscover
         `${programs.join(" ")} award hotel ${destination} ${dates} ${nights} property preference not specified`,
         "award_hotel_discovery", "hotel", shapes,
         "Saved-goal destination, date-window, night-range, and known-program hotel-award discovery.",
-        [...OFFICIAL_DOMAINS, ...SPECIALIST_DOMAINS], "advanced",
+        [...CARD_PROGRAM_DOMAINS, ...HOTEL_OFFICIAL_DOMAINS, ...SPECIALIST_DOMAINS], "advanced",
       );
       if (awardHotel) candidates.set(awardHotel.kind, awardHotel);
     }

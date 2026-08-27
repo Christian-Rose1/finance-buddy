@@ -381,6 +381,7 @@ export function buildResearchSystemPrompt(focus: ResearchFocus): string {
 
 export function buildPublicResearchPayload(input: InterpretResearchInput): string {
   let sourceIndex = 0;
+  let requestIndex = 0;
   return JSON.stringify({
     focus: input.focus,
     // The interpreter needs only public program names. Internal catalog IDs
@@ -396,19 +397,18 @@ export function buildPublicResearchPayload(input: InterpretResearchInput): strin
       travelerCount: input.goal.travelerCount,
       cabinPreference: input.goal.cabinPreference,
     },
-    // URLs are source identity for server-side validation, not model-visible
-    // research content. The interpreter receives stable opaque references.
+    // Source identity, titles, dates, tiers, URLs, and provider metadata stay
+    // server-side. Cloud interpreters receive opaque references and bounded,
+    // whitespace-normalized public excerpts only.
     research: input.research.map((response) => ({
-      query: response.query,
-      searchedAt: response.searchedAt,
+      // Provider query text and response metadata remain server-side. The
+      // model needs only an opaque grouping reference and normalized excerpts.
+      requestRef: `research-${++requestIndex}`,
       results: response.results.map((result) => {
         sourceIndex += 1;
         return {
           id: `source-${sourceIndex}`,
-          label: result.title,
-          content: result.content,
-          publishedDate: result.publishedDate,
-          sourceTier: result.sourceTier,
+          excerpt: result.content.trim().replace(/\s+/g, " ").slice(0, 2_000),
         };
       }),
     })),
@@ -1577,19 +1577,7 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
   }
 
   async interpret(input: InterpretResearchInput): Promise<InterpretedResearch> {
-    const entries = buildSources(input.research);
-
-    const context = {
-      goal: input.goal,
-      rewardPrograms: input.rewardPrograms,
-      focus: input.focus,
-      sources: entries.map((e) => ({
-        id: e.source.id,
-        label: e.result.title,
-        url: e.result.url,
-        content: e.result.content,
-      })),
-    };
+    const publicPayload = buildPublicResearchPayload(input);
 
     if (process.env.STRATEGY_DEBUG === "1") {
       const totalResultCount = input.research.reduce(
@@ -1598,8 +1586,6 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
       );
       const resultDetails = input.research.flatMap((response) =>
         response.results.map((result) => ({
-          title: result.title,
-          url: result.url,
           contentLength: result.content.length,
         }))
       );
@@ -1614,23 +1600,19 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
       );
     }
 
-    const raw = await this.callOllama(context, input.focus);
+    const raw = await this.callOllama(publicPayload, input.focus);
 
     if (process.env.STRATEGY_DEBUG === "1") {
-      console.info(`[strategy-research-debug:${input.focus}]`, raw);
-    }
-
-    if (process.env.STRATEGY_DEBUG === "1" && input.focus === "hotel_options") {
-      console.log(
-        "[strategy-hotel-interpreter-raw]",
-        JSON.stringify({ focus: "hotel_options", rawContent: raw })
+      console.info(
+        `[strategy-research-debug:${input.focus}]`,
+        JSON.stringify({ responseLength: raw.length }),
       );
     }
 
     return validateResearchModelContent(raw, input, this.model);
   }
 
-  private async callOllama(context: unknown, focus: ResearchFocus): Promise<string> {
+  private async callOllama(publicPayload: string, focus: ResearchFocus): Promise<string> {
     const controller = new AbortController();
     const timeoutId = setTimeout(
       () => controller.abort(),
@@ -1647,7 +1629,7 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
           model: this.model,
           messages: [
             { role: "system", content: buildResearchSystemPrompt(focus) },
-            { role: "user", content: `${JSON.stringify(context)}\n${FOCUS_INSTRUCTIONS[focus]}` },
+            { role: "user", content: `${publicPayload}\n${FOCUS_INSTRUCTIONS[focus]}` },
           ],
           stream: false,
           format: "json",

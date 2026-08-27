@@ -10,6 +10,7 @@ import {
   loadVerifiedGoalStrategyRunStage,
   updateGoalStrategyRunFinalStatus,
   deleteGoalStrategyRun,
+  inspectVerifiedRunningResearchStage,
 } from "./strategyRunRepository";
 import {
   signStrategyRunPayload,
@@ -577,6 +578,15 @@ test("get rejects expired run", async () => {
   );
 });
 
+test("get rejects malformed run expiry before any execution capability can exist", async () => {
+  const row = validRunRow({ expires_at: "not-a-timestamp" });
+  const { client } = mockGetClient({ data: row, error: null });
+  await assert.rejects(
+    () => getGoalStrategyRun(row.id as string, row.goal_id as string, row.user_id as string, client),
+    /Failed to load strategy run\./,
+  );
+});
+
 test("get rejects unsupported version", async () => {
   const row = validRunRow({ signature_version: 2 });
   const { client } = mockGetClient({ data: row, error: null });
@@ -661,7 +671,7 @@ test("start flight changes only flight fields", async () => {
   const row = validRunRow();
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
 
-  await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client);
+  const started = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client);
 
   const p = updatePayloadRef.current;
   assert.ok(p);
@@ -671,10 +681,15 @@ test("start flight changes only flight fields", async () => {
   assert.equal("hotel_status" in p, false);
   assert.equal("hotel_payload" in p, false);
   assert.equal("hotel_signature" in p, false);
+  const runningStage = inspectVerifiedRunningResearchStage(started);
+  assert.equal(runningStage?.stage, "flight");
+  assert.equal(runningStage?.revision, updatePayloadRef.current?.updated_at);
+  assert.deepEqual(Object.keys(runningStage ?? {}).sort(), ["expiresAt", "revision", "stage"]);
+  assert.ok(Object.isFrozen(started));
 });
 
 test("start hotel changes only hotel fields", async () => {
-  const row = validRunRow();
+  const row = validRunRow({ flight_status: "failed" });
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
 
   await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", client);
@@ -699,6 +714,30 @@ test("start ownership filters are present on update", async () => {
   assert.ok(filters.some((f) => f.field === "id" && f.value === "run-abc-123"));
   assert.ok(filters.some((f) => f.field === "goal_id" && f.value === "goal-xyz-456"));
   assert.ok(filters.some((f) => f.field === "user_id" && f.value === "user-001"));
+  assert.ok(filters.some((f) => f.field === "flight_status" && f.value === "pending"));
+  assert.ok(filters.some((f) => f.field === "updated_at" && f.value === row.updated_at));
+});
+
+test("start mints no capability when stage order or transition fails", async () => {
+  const wrongOrder = validRunRow({ flight_status: "pending" });
+  const wrongOrderClient = mockStageClient({ data: wrongOrder, error: null }).client;
+  await assert.rejects(
+    startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", wrongOrderClient),
+    /Failed to update strategy-run stage\./,
+  );
+
+  const row = validRunRow();
+  const failedClient = {
+    from: () => ({
+      select() { return this; }, eq() { return this; }, maybeSingle() { return { data: row, error: null }; },
+      update() { return this; }, single() { return { data: null, error: { message: "synthetic" } }; },
+    }),
+  } as unknown as SupabaseClient;
+  await assert.rejects(
+    startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", failedClient),
+    /Failed to update strategy-run stage\./,
+  );
+  assert.equal(inspectVerifiedRunningResearchStage({}), null);
 });
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,13 @@ const CURRENT_SIGNATURE_VERSION = 1;
 
 /** Supported status values for staged runs. */
 const SUPPORTED_STATUSES = ["pending", "running", "succeeded", "failed"] as const;
+interface VerifiedRunningResearchStageContext {
+  runId: string;
+  goalId: string;
+  userId: string;
+  gatewayView: VerifiedRunningResearchStageInspection;
+}
+const runningStageCapabilities = new WeakMap<object, VerifiedRunningResearchStageContext>();
 
 export type StrategyRunStatus = "pending" | "running" | "succeeded" | "failed";
 export type StrategyResearchStage = "flight" | "hotel";
@@ -45,6 +52,27 @@ export interface SavedGoalStrategyRun {
   finalStatus: StrategyRunStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Opaque proof of an owned, verified, successfully started research stage. */
+export interface VerifiedRunningResearchStage { readonly _verifiedRunningStage?: never }
+
+export interface VerifiedRunningResearchStageInspection {
+  stage: StrategyResearchStage;
+  expiresAt: string;
+  revision: string;
+}
+
+function immutableSavedRun(run: SavedGoalStrategyRun): SavedGoalStrategyRun {
+  return Object.freeze(run);
+}
+
+/** Runtime inspection succeeds only for a repository-minted capability. */
+export function inspectVerifiedRunningResearchStage(
+  capability: VerifiedRunningResearchStage,
+): Readonly<VerifiedRunningResearchStageInspection> | null {
+  if (!capability || typeof capability !== "object") return null;
+  return runningStageCapabilities.get(capability as object)?.gatewayView ?? null;
 }
 
 const SELECT_COLUMNS =
@@ -172,7 +200,11 @@ function verifyStageSignature(
  * Verifies the run signature and expiration, and optionally the stage HMACs.
  */
 function verifyRunIntegrity(saved: SavedGoalStrategyRun, verifyStages: boolean): void {
-  const normalizedExpiresAt = new Date(saved.expiresAt).toISOString();
+  const expiresAtTimestamp = Date.parse(saved.expiresAt);
+  if (!Number.isFinite(expiresAtTimestamp)) {
+    throw new Error("Failed to load strategy run.");
+  }
+  const normalizedExpiresAt = new Date(expiresAtTimestamp).toISOString();
 
   const runVerified = verifyStrategyRunPayload(
     {
@@ -250,7 +282,7 @@ async function loadRunInternal(
 
   verifyRunIntegrity(saved, verifyStages);
 
-  return saved;
+  return immutableSavedRun(saved);
 }
 
 /**
@@ -356,7 +388,7 @@ export async function createGoalStrategyRun(
     throw new Error("Failed to create strategy run.");
   }
 
-  return saved;
+  return immutableSavedRun(saved);
 }
 
 /**
@@ -394,13 +426,27 @@ export async function startGoalStrategyRunStage(
   userId: string,
   stage: StrategyResearchStage,
   client?: SupabaseClient,
-): Promise<SavedGoalStrategyRun> {
+): Promise<VerifiedRunningResearchStage> {
+  if (stage !== "flight" && stage !== "hotel") {
+    throw new Error("Failed to update strategy-run stage.");
+  }
+
+  let existing: SavedGoalStrategyRun;
   try {
-    const existing = await getGoalStrategyRun(runId, goalId, userId, client);
-    if (!existing) {
+    const loaded = await getGoalStrategyRun(runId, goalId, userId, client);
+    if (!loaded) {
       throw new Error("Failed to update strategy-run stage.");
     }
+    existing = loaded;
   } catch {
+    throw new Error("Failed to update strategy-run stage.");
+  }
+
+  const stageOrderValid = stage === "flight"
+    ? (existing.flightStatus === "pending" || existing.flightStatus === "failed") && existing.hotelStatus === "pending"
+    : (existing.flightStatus === "succeeded" || existing.flightStatus === "failed") &&
+      (existing.hotelStatus === "pending" || existing.hotelStatus === "failed");
+  if (!stageOrderValid) {
     throw new Error("Failed to update strategy-run stage.");
   }
 
@@ -421,6 +467,8 @@ export async function startGoalStrategyRunStage(
     .eq("id", runId)
     .eq("goal_id", goalId)
     .eq("user_id", userId)
+    .eq(cols.status, stage === "flight" ? existing.flightStatus : existing.hotelStatus)
+    .eq("updated_at", existing.updatedAt)
     .select(SELECT_COLUMNS)
     .single();
 
@@ -439,8 +487,27 @@ export async function startGoalStrategyRunStage(
   }
 
   verifyRunIntegrity(saved, true);
+  if (
+    (stage === "flight" ? saved.flightStatus : saved.hotelStatus) !== "running" ||
+    !Number.isFinite(Date.parse(saved.updatedAt))
+  ) {
+    throw new Error("Failed to update strategy-run stage.");
+  }
 
-  return saved;
+  const gatewayView = Object.freeze({
+    stage,
+    expiresAt: saved.expiresAt,
+    revision: saved.updatedAt,
+  });
+  const context = Object.freeze({
+    runId: saved.id,
+    goalId: saved.goalId,
+    userId: saved.userId,
+    gatewayView,
+  });
+  const capability = Object.freeze({}) as VerifiedRunningResearchStage;
+  runningStageCapabilities.set(capability as object, context);
+  return capability;
 }
 
 /**
@@ -516,7 +583,7 @@ export async function saveGoalStrategyRunStage(
 
   verifyRunIntegrity(saved, true);
 
-  return saved;
+  return immutableSavedRun(saved);
 }
 
 /**
@@ -574,7 +641,7 @@ export async function failGoalStrategyRunStage(
 
   verifyRunIntegrity(saved, true);
 
-  return saved;
+  return immutableSavedRun(saved);
 }
 
 /**
@@ -721,7 +788,7 @@ export async function updateGoalStrategyRunFinalStatus(
 
   verifyRunIntegrity(saved, true);
 
-  return saved;
+  return immutableSavedRun(saved);
 }
 
 /**
