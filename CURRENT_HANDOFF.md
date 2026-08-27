@@ -1,6 +1,112 @@
 # Finance Buddy Current Handoff
 
-Updated: 2026-08-26, America/New_York
+Updated: 2026-08-27, America/New_York
+
+## 2026-08-27 Staged Web-Research Failure Isolation Correction
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- Flight and hotel stages now build one deterministic, minimized saved-goal
+  web-discovery plan per invocation. Each selected query is attempted once;
+  completed sibling responses remain available when another request fails, and
+  no stage-level template fallback, hidden retry, or broad replacement query
+  is issued.
+- When all selected queries in a stage fail, the stage throws the existing
+  `ResearchInterpreterError` convention once. The existing signed-run action
+  path records that as a failed stage; it does not fabricate availability,
+  prices, recovery, or a customer-verified result.
+- The staged planner receives a dedicated projection of the sanitized planner
+  input: goal travel facts, owned program names, and already validated transfer
+  relationships only. It excludes identifiers, owner data, balances, spending,
+  source content, provider payloads, and secrets. Ownership derivation remains
+  in the existing input builder. The redundant stage resolver parameter for
+  customer reward programs was removed.
+- Focused mocked integration tests cover one-request execution, partial
+  retention, all-failure behavior, corrupt runtime priority falling back to
+  `balanced` through the real builder/stage path, and serialized input/plan
+  privacy checks.
+
+Verified locally: focused tests and `npm test` passed (652 tests, 0 failed);
+`npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. The
+existing Next.js `<img>` warning in `components/receipt-upload-panel.tsx`
+remains. No live browser/database/provider flow was verified.
+
+## 2026-08-27 Legacy Priority Safety Hardening
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- Saved-goal priority lookup now treats persisted data as a runtime boundary:
+  only an own key in the approved profile map selects a profile. Absent,
+  legacy, malformed, and prototype-name values safely use the existing
+  `balanced` profile instead of causing a `.map` failure.
+- All four valid profiles retain their existing behavior, including the
+  cash-only `simplest` profile and cash-plus-award `lowest_cash` comparison.
+  No query budget, saved-goal workflow, transfer-policy rule, or evidence
+  semantics changed.
+- Focused tests force malformed and absent runtime priorities and verify no
+  throw, deterministic balanced fallback, no sensitive output, and unchanged
+  valid-priority behavior.
+
+Verified locally: focused tests and `npm test` passed (644 tests, 0 failed);
+`npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. The
+existing Next.js `<img>` warning in `components/receipt-upload-panel.tsx`
+remains. No live browser/database/provider flow was verified.
+
+## 2026-08-26 Saved Goal Priority Query-Selection Correction
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- The saved-goal planner now types `optimizationPriority` to the actual Goal
+  enum and applies deterministic profiles without using balances, transactions,
+  account IDs, owner data, or inferred transfer relationships:
+  - `lowest_cash`: cash flight, cash hotel, award flight, award hotel.
+  - `best_experience`: award flight, award hotel, cash flight, cash hotel.
+  - `simplest`: cash flight and cash hotel only.
+  - `balanced`: cash flight, award flight, cash hotel, award hotel.
+- A validated transfer relationship can still add its separate policy query
+  after the profile; program/catalog names alone cannot do so. Query planning,
+  flexible date shapes, unknown-detail metadata, and non-live evidence status
+  remain unchanged.
+- Focused tests cover every priority, determinism, material profile differences,
+  real duplicate-query handling, a real sanitized-input-builder integration,
+  and legacy/minimal goals with absent optional fields.
+
+Verified locally: focused tests and `npm test` passed (643 tests, 0 failed);
+`npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. The
+existing Next.js `<img>` warning in `components/receipt-upload-panel.tsx`
+remains. No live browser/database/provider flow was verified.
+
+## 2026-08-26 Saved-Goal-First Web Travel Discovery Foundation v1
+
+Implemented locally; no live Tavily/provider search, browser automation,
+database action, migration, commit, or push was performed.
+
+- Flight and hotel staged research now derives its public-web plan
+  deterministically from the existing sanitized saved-goal context. A model no
+  longer chooses routes, dates, properties, or query count for these paths.
+- The server-only planner creates at most three opaque, labeled flexible
+  planning trip shapes from the saved date window and night constraints.
+  Current persisted goals do not contain a separately confirmed date pair, so
+  these shapes remain `flexible_planning` and explicitly suppress exact-trip
+  claims.
+- It defaults to four route/destination-specific cash/award flight and hotel
+  discovery queries when saved program context exists; missing optional travel
+  detail remains explicit unknown/assumption metadata and does not stop
+  discovery. A separately bounded policy query is added only when a validated
+  transfer relationship is supplied. Generic candidate-lane fallback queries
+  are no longer used by staged flight/hotel research.
+- This milestone adds no observed-candidate extraction, ranking, UI,
+  verification handoff, new customer questions/preferences, or live-availability
+  semantics. Existing planning-benchmark/evidence separation is unchanged.
+
+Verified locally: focused planner/evidence tests and `npm test` passed (638
+tests, 0 failed); `npx tsc --noEmit`, `npm run build`, and `git diff --check`
+passed. The existing Next.js `<img>` warning in
+`components/receipt-upload-panel.tsx` remains. No live browser/database/provider
+flow was verified.
 
 ## 2026-08-26 Evidence Separation v1 boundary correction
 

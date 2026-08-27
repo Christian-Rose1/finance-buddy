@@ -216,7 +216,6 @@ export async function generateGoalFlightStageAction(
       userId,
       supabase,
       context,
-      customerRewardPrograms,
       catalogRewardPrograms
     );
 
@@ -278,7 +277,6 @@ export async function generateGoalHotelStageAction(
       supabase,
       userId,
       context,
-      customerRewardPrograms,
       catalogRewardPrograms,
     } = preparedResult.prepared;
 
@@ -302,7 +300,6 @@ export async function generateGoalHotelStageAction(
       userId,
       supabase,
       context,
-      customerRewardPrograms,
       catalogRewardPrograms
     );
 
@@ -359,13 +356,11 @@ async function runFlightStageResearch(
   userId: string,
   supabase: Parameters<typeof saveGoalStrategyRunStage>[5],
   context: Parameters<typeof generateFlightResearchStage>[0],
-  customerRewardPrograms: Parameters<typeof generateFlightResearchStage>[1],
-  catalogRewardPrograms: Parameters<typeof generateFlightResearchStage>[2]
+  catalogRewardPrograms: Parameters<typeof generateFlightResearchStage>[1]
 ): Promise<StageResearchResult> {
   try {
     const interpreted = await generateFlightResearchStage(
       context,
-      customerRewardPrograms,
       catalogRewardPrograms
     );
     return { kind: "succeeded", value: interpreted };
@@ -392,13 +387,11 @@ async function runHotelStageResearch(
   userId: string,
   supabase: Parameters<typeof saveGoalStrategyRunStage>[5],
   context: Parameters<typeof generateHotelResearchStage>[0],
-  customerRewardPrograms: Parameters<typeof generateHotelResearchStage>[1],
-  catalogRewardPrograms: Parameters<typeof generateHotelResearchStage>[2]
+  catalogRewardPrograms: Parameters<typeof generateHotelResearchStage>[1]
 ): Promise<StageResearchResult> {
   try {
     const interpreted = await generateHotelResearchStage(
       context,
-      customerRewardPrograms,
       catalogRewardPrograms
     );
     return { kind: "succeeded", value: interpreted };

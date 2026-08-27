@@ -1,3 +1,5 @@
+import type { OptimizationPriority } from "./types";
+
 /**
  * Types for the AI-driven research planner.
  *
@@ -115,7 +117,7 @@ export interface ResearchPlannerInput {
     maximumNights: number | null;
     travelerCount: number;
     cabinPreference: string;
-    optimizationPriority: string;
+    optimizationPriority: OptimizationPriority;
     maximumCashBudget: number | null;
     currency: string;
     allowNewCards: boolean;

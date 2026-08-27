@@ -7,14 +7,18 @@ import { buildStrategyAllocationScenarios } from "./strategyAllocationBuilder";
 import { TRUSTED_DOMAINS } from "./researchTypes";
 import { TavilyResearchProvider } from "./tavilyResearchProvider";
 import { ResearchInterpreterError } from "./researchInterpreter";
-import type { InterpretedResearch } from "./researchInterpreter";
+import type { InterpretedResearch, ResearchInterpreter } from "./researchInterpreter";
 import { createResearchInterpreter } from "./researchInterpreterFactory";
 import { createStrategyProvider } from "./strategyProviderFactory";
 import { buildStrategyResearchQueries } from "./strategyResearchQueries";
 import { buildSanitizedStrategyPayload } from "./sanitizedStrategyPayload";
-import { createResearchPlanner } from "./researchPlanner";
 import { buildResearchPlannerInput } from "./researchPlannerInputBuilder";
 import type { ResearchPlan, ResearchPlanQuery } from "./researchPlannerTypes";
+import type { ResearchProvider, ResearchResponse } from "./researchTypes";
+import {
+  buildSavedGoalWebTravelDiscoveryPlan,
+  toSavedGoalWebDiscoveryInput,
+} from "./webTravelDiscoveryPlanner";
 
 export interface StrategyRewardProgram {
   id: string;
@@ -40,44 +44,54 @@ async function executePlannedQueries(
   );
 }
 
+/** Dependencies are injectable only for deterministic staged-execution tests. */
+export interface StagedResearchDependencies {
+  researchProvider: ResearchProvider;
+  interpreter: ResearchInterpreter;
+}
+
 /**
- * Builds a research plan for the goal, using the AI planner when configured
- * and falling back to the deterministic template plan on any planner error.
- * Never throws for planner failures.
+ * Runs each staged query once. A failed query is omitted while completed
+ * siblings remain available for interpretation; no query is retried here.
+ */
+export async function executeStagedPlannedQueries(
+  queries: ResearchPlanQuery[],
+  researchProvider: ResearchProvider,
+): Promise<ResearchResponse[]> {
+  const settled = await Promise.all(
+    queries.map(async (query) => {
+      try {
+        return await researchProvider.search({
+          query: query.query,
+          includeDomains: [...query.includeDomains],
+          searchDepth: query.searchDepth,
+        });
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return settled.filter((response): response is ResearchResponse => response !== null);
+}
+
+/**
+ * Builds the public-web discovery plan entirely from saved, sanitized goal
+ * facts. Models never select routes, dates, properties, or query count.
  */
 async function resolveResearchPlan(
   context: PersonalizedStrategyContext,
-  customerRewardPrograms: StrategyRewardProgram[],
   catalogRewardPrograms: StrategyRewardProgram[]
 ): Promise<ResearchPlan> {
-  const planner = createResearchPlanner();
   const plannerInput = buildResearchPlannerInput(context, [
     ...catalogRewardPrograms,
   ]);
-
-  try {
-    const plan = await planner.generateResearchPlan(plannerInput);
-
-    if (process.env.STRATEGY_DEBUG === "1") {
-      console.log(
-        "[strategy-research-plan]",
-        JSON.stringify({
-          queryCount: plan.queries.length,
-        })
-      );
-    }
-
-    return plan;
-  } catch (err) {
-    if (process.env.STRATEGY_DEBUG === "1") {
-      console.log("[strategy-research-plan-fallback]");
-    }
-
-    // Fallback: deterministic template plan. Import lazily to avoid a
-    // circular dependency at module load time.
-    const { buildFallbackResearchPlan } = await import("./researchPlannerCore");
-    return buildFallbackResearchPlan(plannerInput);
+  const plan = buildSavedGoalWebTravelDiscoveryPlan(
+    toSavedGoalWebDiscoveryInput(plannerInput),
+  );
+  if (process.env.STRATEGY_DEBUG === "1") {
+    console.log("[strategy-research-plan]", JSON.stringify({ queryCount: plan.queries.length }));
   }
+  return plan;
 }
 
 /**
@@ -96,14 +110,10 @@ export async function generateAutomatedStrategy(
 ): Promise<PersonalizedStrategy> {
   const goal = context.goal;
 
-  // 1. Build a personalized research plan. When OPENROUTER_API_KEY is set
-  // the AI research planner generates targeted queries from the full user
-  // context; otherwise (or on any planner error) the deterministic template
-  // plan is used. The plan is bounded (max 8 queries) and every query's
-  // domains are validated against the trusted-domain whitelist.
+  // 1. Build a deterministic saved-goal public-web plan. The plan is bounded
+  // and models do not select routes, dates, properties, or query count.
   const researchPlan = await resolveResearchPlan(
     context,
-    customerRewardPrograms,
     catalogRewardPrograms
   );
 
@@ -417,46 +427,27 @@ export async function generateAutomatedStrategy(
  * Researches and interprets flight options for a goal in isolation.
  *
  * @param context Complete PersonalizedStrategyContext containing the customer's goal.
- * @param customerRewardPrograms Reward programs the customer actually owns. Used to build research queries.
  * @param catalogRewardPrograms Complete reward-program catalog. Passed to the research interpreter so sourced options may reference any real catalog program.
  * @returns The validated flight-focused InterpretedResearch.
  */
 export async function generateFlightResearchStage(
   context: PersonalizedStrategyContext,
-  customerRewardPrograms: StrategyRewardProgram[],
-  catalogRewardPrograms: StrategyRewardProgram[]
+  catalogRewardPrograms: StrategyRewardProgram[],
+  dependencies?: StagedResearchDependencies,
 ): Promise<InterpretedResearch> {
-  // Use the research plan when available; fall back to template queries on
-  // any planner error so this stage never fails because of planning.
-  let flightResponses: Awaited<ReturnType<TavilyResearchProvider["search"]>>[];
-  const tavily = new TavilyResearchProvider();
-
-  try {
-    const plan = await resolveResearchPlan(
-      context,
-      customerRewardPrograms,
-      catalogRewardPrograms
-    );
-    const flightPlanQueries = plan.queries.filter(
-      (q) => q.category === "flight"
-    );
-    flightResponses = await executePlannedQueries(flightPlanQueries, tavily);
-  } catch {
-    const { flightQueries } = buildStrategyResearchQueries(
-      context.goal,
-      customerRewardPrograms
-    );
-    flightResponses = await Promise.all(
-      flightQueries.map((q) =>
-        tavily.search({
-          query: q,
-          includeDomains: [...TRUSTED_DOMAINS],
-        })
-      )
+  const plan = await resolveResearchPlan(context, catalogRewardPrograms);
+  const flightPlanQueries = plan.queries.filter((q) => q.category === "flight");
+  const researchProvider = dependencies?.researchProvider ?? new TavilyResearchProvider();
+  const flightResponses = await executeStagedPlannedQueries(flightPlanQueries, researchProvider);
+  if (flightPlanQueries.length > 0 && flightResponses.length === 0) {
+    throw new ResearchInterpreterError(
+      "No planned flight research queries completed.",
+      "tavily",
+      "unknown",
     );
   }
 
-  const interpreter = createResearchInterpreter();
+  const interpreter = dependencies?.interpreter ?? createResearchInterpreter();
   return interpreter.interpret({
     goal: context.goal,
     rewardPrograms: catalogRewardPrograms,
@@ -469,42 +460,23 @@ export async function generateFlightResearchStage(
  * Researches and interprets hotel options for a goal in isolation.
  *
  * @param context Complete PersonalizedStrategyContext containing the customer's goal.
- * @param customerRewardPrograms Reward programs the customer actually owns. Used to build research queries.
  * @param catalogRewardPrograms Complete reward-program catalog. Passed to the research interpreter so sourced options may reference any real catalog program.
  * @returns The validated hotel-focused InterpretedResearch.
  */
 export async function generateHotelResearchStage(
   context: PersonalizedStrategyContext,
-  customerRewardPrograms: StrategyRewardProgram[],
-  catalogRewardPrograms: StrategyRewardProgram[]
+  catalogRewardPrograms: StrategyRewardProgram[],
+  dependencies?: StagedResearchDependencies,
 ): Promise<InterpretedResearch> {
-  // Use the research plan when available; fall back to template queries on
-  // any planner error so this stage never fails because of planning.
-  let hotelResponses: Awaited<ReturnType<TavilyResearchProvider["search"]>>[];
-  const tavily = new TavilyResearchProvider();
-
-  try {
-    const plan = await resolveResearchPlan(
-      context,
-      customerRewardPrograms,
-      catalogRewardPrograms
-    );
-    const hotelPlanQueries = plan.queries.filter(
-      (q) => q.category === "hotel"
-    );
-    hotelResponses = await executePlannedQueries(hotelPlanQueries, tavily);
-  } catch {
-    const { hotelQueries } = buildStrategyResearchQueries(
-      context.goal,
-      customerRewardPrograms
-    );
-    hotelResponses = await Promise.all(
-      hotelQueries.map((q) =>
-        tavily.search({
-          query: q,
-          includeDomains: [...TRUSTED_DOMAINS],
-        })
-      )
+  const plan = await resolveResearchPlan(context, catalogRewardPrograms);
+  const hotelPlanQueries = plan.queries.filter((q) => q.category === "hotel");
+  const researchProvider = dependencies?.researchProvider ?? new TavilyResearchProvider();
+  const hotelResponses = await executeStagedPlannedQueries(hotelPlanQueries, researchProvider);
+  if (hotelPlanQueries.length > 0 && hotelResponses.length === 0) {
+    throw new ResearchInterpreterError(
+      "No planned hotel research queries completed.",
+      "tavily",
+      "unknown",
     );
   }
 
@@ -519,7 +491,7 @@ export async function generateHotelResearchStage(
     }
   }
 
-  const interpreter = createResearchInterpreter();
+  const interpreter = dependencies?.interpreter ?? createResearchInterpreter();
   return interpreter.interpret({
     goal: context.goal,
     rewardPrograms: catalogRewardPrograms,
@@ -578,7 +550,6 @@ export async function generateAutomatedStrategyFromResearchStages(
     try {
       const plan = await resolveResearchPlan(
         context,
-        customerRewardPrograms,
         catalogRewardPrograms
       );
       cardPlanQueries = plan.queries.filter((q) => q.category === "card");
