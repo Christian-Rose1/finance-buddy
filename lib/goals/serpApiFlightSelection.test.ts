@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  selectSerpApiFlightOutbound,
   selectSerpApiFlightRoundTrip,
   type SerpApiFlightSelectionInput,
   type SerpApiFlightSelectionResult,
@@ -63,6 +64,16 @@ function input(
 ): SerpApiFlightSelectionInput {
   return { outboundResults, request, returnOptionsForSelectedOutbound };
 }
+
+test("selects outbound in two phases and preserves its original source index", () => {
+  const selected = selectSerpApiFlightOutbound(
+    [outboundResult({ roundTripPrice: Number.NaN }), outboundResult({ roundTripPrice: 1700 })],
+    request,
+  );
+  assert.ok(selected);
+  assert.equal(selected.sourceIndex, 1);
+  assert.equal(selected.outboundSegments[0].marketingFlightNumber, "EA123");
+});
 
 test("selects the lowest searched-party-total outbound and compatible return", () => {
   const result = selectSerpApiFlightRoundTrip(

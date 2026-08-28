@@ -138,17 +138,42 @@ function compareResults(a: SerpApiFlightSelectionResult, b: SerpApiFlightSelecti
   return durationDifference;
 }
 
+interface SelectedFlightCandidate {
+  result: SerpApiFlightSelectionResult;
+  segments: NormalizedSerpApiFlightSegment[];
+  sourceIndex: number;
+}
+
 function choose(
   results: readonly SerpApiFlightSelectionResult[],
   request: SerpApiFlightSelectionRequest,
   outbound: boolean,
-): SerpApiFlightSelectionResult | null {
-  let selected: SerpApiFlightSelectionResult | null = null;
-  for (const result of results) {
-    if (!compatible(result, request, outbound)) continue;
-    if (selected === null || compareResults(result, selected) < 0) selected = result;
-  }
+): SelectedFlightCandidate | null {
+  let selected: SelectedFlightCandidate | null = null;
+  results.forEach((result, sourceIndex) => {
+    if (!compatible(result, request, outbound)) return;
+    const segments = normalizeSegments(outbound ? result.outboundSegments : result.returnSegments);
+    if (!segments) return;
+    if (selected === null || compareResults(result, selected.result) < 0) {
+      selected = { result, segments, sourceIndex };
+    }
+  });
   return selected;
+}
+
+export interface SelectedOutboundFlight {
+  outboundSegments: NormalizedSerpApiFlightSegment[];
+  sourceIndex: number;
+}
+
+export function selectSerpApiFlightOutbound(
+  outboundResults: readonly SerpApiFlightSelectionResult[],
+  request: SerpApiFlightSelectionRequest,
+): SelectedOutboundFlight | null {
+  if (!isValidRequest(request)) return null;
+  const selected = choose(outboundResults, request, true);
+  if (!selected) return null;
+  return { outboundSegments: selected.segments, sourceIndex: selected.sourceIndex };
 }
 
 /**
@@ -164,9 +189,8 @@ export function selectSerpApiFlightRoundTrip(
   const selectedReturn = choose(input.returnOptionsForSelectedOutbound, input.request, false);
   if (!outbound || !selectedReturn) return null;
 
-  const outboundSegments = normalizeSegments(outbound.outboundSegments);
-  const returnSegments = normalizeSegments(selectedReturn.returnSegments);
-  if (!outboundSegments || !returnSegments) return null;
+  const outboundSegments = outbound.segments;
+  const returnSegments = selectedReturn.segments;
   const normalizedInput: SerpApiFlightNormalizerInput = {
     origin: input.request.origin,
     destination: input.request.destination,
@@ -177,8 +201,8 @@ export function selectSerpApiFlightRoundTrip(
     currency: input.request.currency,
     outboundSegments,
     returnSegments,
-    roundTripPrice: selectedReturn.roundTripPrice,
-    retrievedAt: selectedReturn.retrievedAt,
+    roundTripPrice: selectedReturn.result.roundTripPrice,
+    retrievedAt: selectedReturn.result.retrievedAt,
   };
   return normalizedInput;
 }
