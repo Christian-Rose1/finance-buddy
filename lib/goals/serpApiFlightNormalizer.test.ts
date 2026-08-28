@@ -4,19 +4,24 @@ import {
   normalizeSerpApiFlightPartyTotal,
   type SerpApiFlightNormalizerInput,
 } from "./serpApiFlightNormalizer";
+import {
+  selectSerpApiFlightRoundTrip,
+  type SerpApiFlightSelectionInput,
+} from "./serpApiFlightSelection";
 
 const segment = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
-  departure_airport: { id: "JFK", name: "New York", hostile: { token: "nested-token" } },
-  arrival_airport: { id: "CDG", name: "Paris" },
-  departure: { airport: { id: "JFK" }, token: "nested-token" },
-  arrival: { airport: { id: "CDG" } },
-  airline: "Example Air",
-  flight_number: "EA123",
-  travel_class: "economy",
-  operating_carrier: "Example Air",
+  departureAirport: "JFK",
+  departureTime: "2027-04-03 08:00",
+  arrivalAirport: "CDG",
+  arrivalTime: "2027-04-03 20:00",
+  marketingCarrier: "Example Air",
+  marketingFlightNumber: "EA123",
+  cabin: "economy",
+  operatingCarrier: "Example Air",
   url: "https://provider.example/flight",
   search_id: "search-123",
   provider_metadata: { secret: "hostile nested value" },
+  nested: { token: "nested-token" },
   ...overrides,
 });
 
@@ -31,31 +36,33 @@ const baseInput = (): SerpApiFlightNormalizerInput => ({
   outboundSegments: [segment()],
   returnSegments: [
     segment({
-      departure_airport: { id: "CDG" },
-      arrival_airport: { id: "JFK" },
-      departure: { airport: { id: "CDG" } },
-      arrival: { airport: { id: "JFK" } },
-      departure_time: "2027-04-12 09:00",
-      arrival_time: "2027-04-12 11:30",
+      departureAirport: "CDG",
+      departureTime: "2027-04-12 09:00",
+      arrivalAirport: "JFK",
+      arrivalTime: "2027-04-12 11:30",
     }),
   ],
   roundTripPrice: 1736,
   retrievedAt: "2026-08-28T12:34:56.000Z",
 });
 
-// The normalizer consumes SerpApi's airport-object timestamps.
+// The normalizer consumes canonical selector-shaped segments.
 const validInput = (): SerpApiFlightNormalizerInput => {
   const input = baseInput();
   input.outboundSegments = [
     segment({
-      departure_airport: { id: "JFK", time: "2027-04-03 08:00" },
-      arrival_airport: { id: "CDG", time: "2027-04-03 20:00" },
+      departureAirport: "JFK",
+      departureTime: "2027-04-03 08:00",
+      arrivalAirport: "CDG",
+      arrivalTime: "2027-04-03 20:00",
     }),
   ];
   input.returnSegments = [
     segment({
-      departure_airport: { id: "CDG", time: "2027-04-12 09:00" },
-      arrival_airport: { id: "JFK", time: "2027-04-12 11:30" },
+      departureAirport: "CDG",
+      departureTime: "2027-04-12 09:00",
+      arrivalAirport: "JFK",
+      arrivalTime: "2027-04-12 11:30",
     }),
   ];
   return input;
@@ -74,11 +81,7 @@ test("preserves the searched party-total price without multiplying it", () => {
 test("accepts a missing segment cabin and preserves it as unknown", () => {
   const input = validInput();
   input.outboundSegments = [
-    segment({
-      departure_airport: { id: "JFK", time: "2027-04-03 08:00" },
-      arrival_airport: { id: "CDG", time: "2027-04-03 20:00" },
-      travel_class: undefined,
-    }),
+    segment({ cabin: null }),
   ];
   const observation = normalizeSerpApiFlightPartyTotal(input);
   assert.ok(observation);
@@ -88,13 +91,49 @@ test("accepts a missing segment cabin and preserves it as unknown", () => {
 test("rejects an explicitly conflicting segment cabin", () => {
   const input = validInput();
   input.returnSegments = [
-    segment({
-      departure_airport: { id: "CDG", time: "2027-04-12 09:00" },
-      arrival_airport: { id: "JFK", time: "2027-04-12 11:30" },
-      travel_class: "business",
-    }),
+    segment({ cabin: "business" }),
   ];
   assert.equal(normalizeSerpApiFlightPartyTotal(input), null);
+});
+
+test("normalizes the real selector-produced completed-round-trip input directly", () => {
+  const selectorInput: SerpApiFlightSelectionInput = {
+    outboundResults: [
+      {
+        outboundSegments: validInput().outboundSegments,
+        returnSegments: validInput().returnSegments,
+        roundTripPrice: 1736,
+        retrievedAt: "2026-08-28T12:34:56.000Z",
+        durationMinutes: 500,
+      },
+    ],
+    request: {
+      origin: "JFK",
+      destination: "CDG",
+      outboundDate: "2027-04-03",
+      returnDate: "2027-04-12",
+      travelers: 2,
+      cabin: "economy",
+      currency: "USD",
+    },
+    returnOptionsForSelectedOutbound: [
+      {
+        outboundSegments: validInput().outboundSegments,
+        returnSegments: validInput().returnSegments,
+        roundTripPrice: 1736,
+        retrievedAt: "2026-08-28T12:34:56.000Z",
+        durationMinutes: 500,
+      },
+    ],
+  };
+  const selected = selectSerpApiFlightRoundTrip(selectorInput);
+  assert.ok(selected);
+  const observation = normalizeSerpApiFlightPartyTotal(selected);
+  assert.ok(observation);
+  assert.equal(observation.travelers, 2);
+  assert.equal(observation.price.amount, 1736);
+  assert.equal(observation.outboundSegments.length, 1);
+  assert.equal(observation.returnSegments.length, 1);
 });
 
 test("does not create a per-traveler price", () => {
@@ -103,6 +142,25 @@ test("does not create a per-traveler price", () => {
   assert.equal("perTravelerPrice" in observation, false);
   assert.equal("pricePerTraveler" in observation, false);
   assert.equal(JSON.stringify(observation).includes("868"), false);
+});
+
+test("accepts canonical selector-shaped segments and ignores input sequence", () => {
+  const input = validInput();
+  input.outboundSegments = [
+    segment({ sequence: 99, marketingFlightNumber: "EA-raw", arrivalAirport: "LHR", arrivalTime: "2027-04-03 10:00", hostile: { token: "bad" } }),
+    segment({ sequence: 100, departureAirport: "LHR", departureTime: "2027-04-03 12:00", arrivalAirport: "CDG", arrivalTime: "2027-04-03 20:00" }),
+  ];
+  const observation = normalizeSerpApiFlightPartyTotal(input);
+  assert.ok(observation);
+  assert.deepEqual(observation.outboundSegments.map((item) => item.sequence), [1, 2]);
+  assert.equal("flight_number" in observation.outboundSegments[0], false);
+  assert.equal(observation.outboundSegments[0].marketingFlightNumber, "EA-raw");
+});
+
+test("rejects raw snake-case-only segments", () => {
+  const input = validInput();
+  input.outboundSegments = [{ departure_airport: { id: "JFK", time: "2027-04-03 08:00" }, arrival_airport: { id: "CDG", time: "2027-04-03 20:00" }, airline: "Example Air", flight_number: "EA123", travel_class: "economy" }];
+  assert.equal(normalizeSerpApiFlightPartyTotal(input), null);
 });
 
 test("preserves valid reconstructed outbound and return segments", () => {
@@ -143,8 +201,8 @@ test("rejects route and date mismatches", () => {
     { outboundDate: "2027-04-04" },
     { returnDate: "2027-04-13" },
     { returnDate: "2027-04-02" },
-    { outboundSegments: [segment({ departure_airport: { id: "LAX", time: "2027-04-03 08:00" }, arrival_airport: { id: "CDG", time: "2027-04-03 20:00" } })] },
-    { returnSegments: [segment({ departure_airport: { id: "CDG", time: "2027-04-12 09:00" }, arrival_airport: { id: "LAX", time: "2027-04-12 11:30" } })] },
+    { outboundSegments: [segment({ departureAirport: "LAX" })] },
+    { returnSegments: [segment({ departureAirport: "CDG", arrivalAirport: "LAX" })] },
   ]) {
     assert.equal(normalizeSerpApiFlightPartyTotal({ ...validInput(), ...mutation }), null);
   }
@@ -167,11 +225,7 @@ test("rejects invalid traveler counts, numeric values, currency, and missing seg
 test("reconstructs an explicit unknown operating carrier when absent", () => {
   const input = validInput();
   input.outboundSegments = [
-    segment({
-      departure_airport: { id: "JFK", time: "2027-04-03 08:00" },
-      arrival_airport: { id: "CDG", time: "2027-04-03 20:00" },
-      operating_carrier: undefined,
-    }),
+    segment({ operatingCarrier: null }),
   ];
   const observation = normalizeSerpApiFlightPartyTotal(input);
   assert.ok(observation);

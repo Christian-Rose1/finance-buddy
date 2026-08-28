@@ -181,12 +181,10 @@ interface RawSegmentFields {
 
 function extractSegmentFields(raw: unknown): RawSegmentFields | null {
   if (!isPlainObject(raw)) return null;
-  const departure = isPlainObject(raw.departure_airport) ? raw.departure_airport : null;
-  const arrival = isPlainObject(raw.arrival_airport) ? raw.arrival_airport : null;
-  const departureAirport = exactAirportCode(departure?.id);
-  const arrivalAirport = exactAirportCode(arrival?.id);
-  const departureTime = exactProviderTimestamp(departure?.time);
-  const arrivalTime = exactProviderTimestamp(arrival?.time);
+  const departureAirport = exactAirportCode(raw.departureAirport);
+  const arrivalAirport = exactAirportCode(raw.arrivalAirport);
+  const departureTime = exactProviderTimestamp(raw.departureTime);
+  const arrivalTime = exactProviderTimestamp(raw.arrivalTime);
   if (!departureAirport || !arrivalAirport || !departureTime || !arrivalTime) {
     return null;
   }
@@ -195,10 +193,10 @@ function extractSegmentFields(raw: unknown): RawSegmentFields | null {
     departureTime,
     arrivalAirport,
     arrivalTime,
-    marketingCarrier: sanitizeBoundedText(raw.airline, MAX_TEXT_LENGTH),
-    marketingFlightNumber: sanitizeBoundedText(raw.flight_number, 16),
-    cabin: sanitizeBoundedText(raw.travel_class, 40),
-    operatingCarrier: sanitizeBoundedText(raw.operating_carrier, MAX_TEXT_LENGTH),
+    marketingCarrier: sanitizeBoundedText(raw.marketingCarrier, MAX_TEXT_LENGTH),
+    marketingFlightNumber: sanitizeBoundedText(raw.marketingFlightNumber, 16),
+    cabin: sanitizeBoundedText(raw.cabin, 40),
+    operatingCarrier: sanitizeBoundedText(raw.operatingCarrier, MAX_TEXT_LENGTH),
   };
 }
 
