@@ -1,5 +1,27 @@
 # Finance Buddy Current Handoff
 
+## 2026-08-28 SerpApi Price-Coverage Interpretation Correction (authoritative)
+
+The 2026-08-28 bounded SerpApi price-coverage proof is reinterpreted before any
+implementation consumes it. The earlier reading recorded in the live session
+report is rejected.
+
+- **Rejected: "the listed round-trip price is per traveler."** The structured
+  Google Flights price is the total returned for the searched party. An
+  identical itinerary priced $868 in the `adults=1` search and $1,736 in the
+  `adults=2` search demonstrates passenger-count sensitivity: the field scales
+  with the party the request searched.
+- The structured price represents the searched party total. The two-adult
+  response must be used directly as the two-adult price. **Never multiply an
+  `adults=2` response by the traveler count.**
+- The observed ratios near 2.0 prove passenger-count sensitivity; they do not
+  establish a per-traveler output field. No explicit per-traveler field existed
+  in the observed responses, and none may be inferred.
+- Acquisition consequence: every exact-cash candidate must bind its price to
+  the exact searched traveler count through the authenticated execution
+  record, and any future provider-supplied per-person amount must be preserved
+  separately if such a field ever appears.
+
 ## 2026-08-27 Narrative Trust Stop Final Hardening
 
 Implemented locally on top of Narrative Trust Stop v1; no live provider search,
