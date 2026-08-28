@@ -90,15 +90,23 @@ const VALID_REQUEST: SerpApiFlightRequest = {
   currency: "USD",
 };
 
+function mockJsonResponse(body: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => body,
+  } as Response;
+}
+
 function mockFetchSuccess(initialBody: unknown, returnBody: unknown) {
   let callCount = 0;
   return {
     fetch: async (_url: string, _init: RequestInit) => {
       callCount += 1;
       if (callCount === 1) {
-        return { json: async () => initialBody } as Response;
+        return mockJsonResponse(initialBody);
       }
-      return { json: async () => returnBody } as Response;
+      return mockJsonResponse(returnBody);
     },
     getCallCount: () => callCount,
   };
@@ -131,9 +139,9 @@ test("sends exact approved parameters in the first request", async () => {
     callCount += 1;
     if (callCount === 1) {
       capturedUrl = url;
-      return { json: async () => makeInitialResponse() } as Response;
+      return mockJsonResponse(makeInitialResponse());
     }
-    return { json: async () => makeReturnResponse() } as Response;
+    return mockJsonResponse(makeReturnResponse());
   };
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
@@ -164,9 +172,9 @@ test("omits departure token from the first request", async () => {
     callCount += 1;
     if (callCount === 1) {
       capturedFirstUrl = url;
-      return { json: async () => makeInitialResponse() } as Response;
+      return mockJsonResponse(makeInitialResponse());
     }
-    return { json: async () => makeReturnResponse() } as Response;
+    return mockJsonResponse(makeReturnResponse());
   };
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
@@ -184,10 +192,10 @@ test("passes departure token from selector to second request", async () => {
   const fetch = async (url: string, _init: RequestInit) => {
     callCount += 1;
     if (callCount === 1) {
-      return { json: async () => makeInitialResponse({ departureToken: token }) } as Response;
+      return mockJsonResponse(makeInitialResponse({ departureToken: token }));
     }
     capturedSecondUrl = url;
-    return { json: async () => makeReturnResponse() } as Response;
+    return mockJsonResponse(makeReturnResponse());
   };
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
@@ -213,9 +221,9 @@ for (const [cabin, expectedClass] of cabinMappings) {
       callCount += 1;
       if (callCount === 1) {
         capturedUrl = url;
-        return { json: async () => makeInitialResponse() } as Response;
+        return mockJsonResponse(makeInitialResponse());
       }
-      return { json: async () => makeReturnResponse() } as Response;
+      return mockJsonResponse(makeReturnResponse());
     };
 
     const client = buildSerpApiFlightClient("test-api-key", fetch);
@@ -232,7 +240,7 @@ test("makes zero calls for an invalid request", async () => {
   let callCount = 0;
   const fetch = async () => {
     callCount += 1;
-    return { json: async () => ({}) } as Response;
+    return mockJsonResponse({});
   };
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
@@ -255,7 +263,7 @@ test("makes zero calls when API key is empty", async () => {
   let callCount = 0;
   const fetch = async () => {
     callCount += 1;
-    return { json: async () => ({}) } as Response;
+    return mockJsonResponse({});
   };
 
   const client = buildSerpApiFlightClient("", fetch);
@@ -270,7 +278,7 @@ test("makes zero calls when API key is blank", async () => {
   let callCount = 0;
   const fetch = async () => {
     callCount += 1;
-    return { json: async () => ({}) } as Response;
+    return mockJsonResponse({});
   };
 
   const client = buildSerpApiFlightClient("   ", fetch);
@@ -297,10 +305,61 @@ test("returns http_failure and never retries on thrown fetch", async () => {
   assert.equal(callCount, 1);
 });
 
+test("returns http_failure without reading or retrying an initial non-success response", async () => {
+  let callCount = 0;
+  let jsonCallCount = 0;
+  const fetch = async () => {
+    callCount += 1;
+    return {
+      ok: false,
+      status: 429,
+      json: async () => {
+        jsonCallCount += 1;
+        return makeInitialResponse();
+      },
+    } as Response;
+  };
+
+  const client = buildSerpApiFlightClient("test-api-key", fetch);
+  const result = await client.fetchFlight(VALID_REQUEST);
+
+  assert.deepEqual(result, { observation: null, error: "http_failure" });
+  assert.equal(callCount, 1);
+  assert.equal(jsonCallCount, 0);
+});
+
+test("returns http_failure without reading or retrying a return non-success response", async () => {
+  let callCount = 0;
+  let returnJsonCallCount = 0;
+  const fetch = async () => {
+    callCount += 1;
+    if (callCount === 1) {
+      return mockJsonResponse(makeInitialResponse());
+    }
+    return {
+      ok: false,
+      status: 500,
+      json: async () => {
+        returnJsonCallCount += 1;
+        return makeReturnResponse();
+      },
+    } as Response;
+  };
+
+  const client = buildSerpApiFlightClient("test-api-key", fetch);
+  const result = await client.fetchFlight(VALID_REQUEST);
+
+  assert.deepEqual(result, { observation: null, error: "http_failure" });
+  assert.equal(callCount, 2);
+  assert.equal(returnJsonCallCount, 0);
+});
+
 // 8. Successful response whose json() throws fails safely
 test("returns malformed_initial_response when first json() throws", async () => {
   const fetch = async () =>
     ({
+      ok: true,
+      status: 200,
       json: async () => {
         throw new SyntaxError("Unexpected token");
       },
@@ -318,9 +377,11 @@ test("returns malformed_return_response when second json() throws", async () => 
   const fetch = async () => {
     callCount += 1;
     if (callCount === 1) {
-      return { json: async () => makeInitialResponse() } as Response;
+      return mockJsonResponse(makeInitialResponse());
     }
     return {
+      ok: true,
+      status: 200,
       json: async () => {
         throw new SyntaxError("Unexpected token");
       },
@@ -336,8 +397,7 @@ test("returns malformed_return_response when second json() throws", async () => 
 
 // 9. JSON null / malformed initial response maps correctly
 test("returns malformed_initial_response when JSON is null", async () => {
-  const fetch = async () =>
-    ({ json: async () => null }) as unknown as Response;
+  const fetch = async () => mockJsonResponse(null);
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
   const result = await client.fetchFlight(VALID_REQUEST);
@@ -347,8 +407,7 @@ test("returns malformed_initial_response when JSON is null", async () => {
 });
 
 test("returns malformed_initial_response when JSON is malformed object", async () => {
-  const fetch = async () =>
-    ({ json: async () => ({ wrong_key: true }) }) as unknown as Response;
+  const fetch = async () => mockJsonResponse({ wrong_key: true });
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
   const result = await client.fetchFlight(VALID_REQUEST);
@@ -362,9 +421,7 @@ test("makes no second request when no eligible outbound", async () => {
   let callCount = 0;
   const fetch = async () => {
     callCount += 1;
-    return {
-      json: async () => ({ best_flights: [], other_flights: [] }),
-    } as Response;
+    return mockJsonResponse({ best_flights: [], other_flights: [] });
   };
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
@@ -381,9 +438,9 @@ test("returns malformed_return_response when return JSON is null", async () => {
   const fetch = async () => {
     callCount += 1;
     if (callCount === 1) {
-      return { json: async () => makeInitialResponse() } as Response;
+      return mockJsonResponse(makeInitialResponse());
     }
-    return { json: async () => null } as Response;
+    return mockJsonResponse(null);
   };
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
@@ -399,11 +456,9 @@ test("returns no_compatible_return when return has no options", async () => {
   const fetch = async () => {
     callCount += 1;
     if (callCount === 1) {
-      return { json: async () => makeInitialResponse() } as Response;
+      return mockJsonResponse(makeInitialResponse());
     }
-    return {
-      json: async () => ({ best_flights: [], other_flights: [] }),
-    } as Response;
+    return mockJsonResponse({ best_flights: [], other_flights: [] });
   };
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);

@@ -144,6 +144,10 @@ export function buildSerpApiFlightClient(apiKey: string, fetchFn?: FetchFn, cloc
       return { observation: null, error: "http_failure" };
     }
 
+    if (!initialResponse.ok) {
+      return { observation: null, error: "http_failure" };
+    }
+
     // 5. Capture injected server clock immediately after response
     const initialReceivedAt = clock();
 
@@ -193,6 +197,10 @@ export function buildSerpApiFlightClient(apiKey: string, fetchFn?: FetchFn, cloc
     try {
       returnResponse = await fetch(returnUrl, { method: "GET" });
     } catch {
+      return { observation: null, error: "http_failure" };
+    }
+
+    if (!returnResponse.ok) {
       return { observation: null, error: "http_failure" };
     }
 
