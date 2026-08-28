@@ -41,28 +41,47 @@ function isAirportCode(value: unknown): value is string {
   return typeof value === "string" && /^[A-Z]{3}$/.test(value);
 }
 
-function isDate(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
 function isCurrency(value: unknown): value is string {
   return typeof value === "string" && /^[A-Z]{3}$/.test(value);
 }
 
-function isValidRequest(request: SerpApiFlightSelectionRequest): boolean {
+export function serpApiTravelClassForCabin(cabin: unknown): string | null {
+  if (typeof cabin !== "string") return null;
+  switch (cabin) {
+    case "economy": return "1";
+    case "premium_economy": return "2";
+    case "business": return "3";
+    case "first": return "4";
+    default: return null;
+  }
+}
+
+export function isValidSerpApiFlightSelectionRequest(request: unknown): request is SerpApiFlightSelectionRequest {
+  if (!isPlainObject(request)) return false;
   return (
     isAirportCode(request.origin) &&
     isAirportCode(request.destination) &&
     request.origin !== request.destination &&
-    isDate(request.outboundDate) &&
-    isDate(request.returnDate) &&
+    isCalendarDate(request.outboundDate) &&
+    isCalendarDate(request.returnDate) &&
     request.returnDate >= request.outboundDate &&
+    typeof request.travelers === "number" &&
     Number.isInteger(request.travelers) &&
     request.travelers >= 1 &&
     request.travelers <= MAX_TRAVELERS &&
-    typeof request.cabin === "string" &&
-    request.cabin.trim().length > 0 &&
-    isCurrency(request.currency)
+    isCurrency(request.currency) &&
+    serpApiTravelClassForCabin(request.cabin) !== null
   );
 }
 
@@ -166,7 +185,7 @@ export function selectSerpApiFlightOutbound(
   outboundResults: readonly SerpApiFlightSelectionResult[],
   request: SerpApiFlightSelectionRequest,
 ): SelectedOutboundFlight | null {
-  if (!isValidRequest(request)) return null;
+  if (!isValidSerpApiFlightSelectionRequest(request)) return null;
   const selected = choose(outboundResults, request, true);
   if (!selected) return null;
   return { outboundSegments: selected.segments, sourceIndex: selected.sourceIndex };
@@ -181,7 +200,7 @@ export function selectSerpApiFlightOutbound(
 export function selectSerpApiFlightRoundTrip(
   input: SerpApiFlightSelectionInput,
 ): SerpApiFlightNormalizerInput | null {
-  if (!isValidRequest(input.request)) return null;
+  if (!isValidSerpApiFlightSelectionRequest(input.request)) return null;
   const outbound = choose(input.outboundResults, input.request, true);
   const selectedReturn = choose(input.returnOptionsForSelectedOutbound, input.request, false);
   if (!outbound || !selectedReturn) return null;

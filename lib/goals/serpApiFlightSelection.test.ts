@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  isValidSerpApiFlightSelectionRequest,
   selectSerpApiFlightOutbound,
   selectSerpApiFlightRoundTrip,
+  serpApiTravelClassForCabin,
   type SerpApiFlightSelectionInput,
   type SerpApiFlightSelectionResult,
   type SerpApiFlightSelectionRequest,
@@ -65,6 +67,35 @@ function input(
 ): SerpApiFlightSelectionInput {
   return { outboundResults, request, returnOptionsForSelectedOutbound };
 }
+
+test("validates exact requests and maps all supported cabins", () => {
+  assert.equal(isValidSerpApiFlightSelectionRequest(request), true);
+  assert.deepEqual(
+    ["economy", "premium_economy", "business", "first"].map(serpApiTravelClassForCabin),
+    ["1", "2", "3", "4"],
+  );
+  assert.equal(serpApiTravelClassForCabin(" premium_economy"), null);
+});
+
+test("rejects impossible or malformed request values without normalization", () => {
+  for (const mutation of [
+    { outboundDate: "2027-02-29" },
+    { outboundDate: "2027-04-03T00:00:00Z" },
+    { returnDate: "2027-04-02" },
+    { origin: "jfk" },
+    { destination: "CD" },
+    { origin: "JFK", destination: "JFK" },
+    { travelers: 0 },
+    { travelers: 1.5 },
+    { currency: "usd" },
+    { cabin: "premium economy" },
+  ]) {
+    const invalid = { ...request, ...mutation };
+    assert.equal(isValidSerpApiFlightSelectionRequest(invalid), false);
+    assert.equal(selectSerpApiFlightOutbound([outboundResult()], invalid), null);
+    assert.equal(selectSerpApiFlightRoundTrip({ ...input(), request: invalid }), null);
+  }
+});
 
 test("selects an outbound-only candidate and preserves its original source index", () => {
   const selected = selectSerpApiFlightOutbound(
