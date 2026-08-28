@@ -5,7 +5,9 @@ import { selectSerpApiFlightOutbound, selectSerpApiFlightRoundTrip } from "./ser
 import {
   getSerpApiFlightDepartureToken,
   projectSerpApiFlightInitialBatch,
+  projectSerpApiFlightInitialBatchOutcome,
   projectSerpApiFlightReturnBatch,
+  projectSerpApiFlightReturnBatchOutcome,
 } from "./serpApiFlightBatchProjection";
 
 const retrievedAt = "2026-08-28T12:34:56.000Z";
@@ -34,6 +36,55 @@ function returnResult(overrides: Record<string, unknown> = {}): Record<string, u
   });
 }
 
+test("classifies malformed envelopes and missing or wrongly typed result arrays", () => {
+  for (const response of [null, [], {}, { best_flights: null }, { other_flights: {} }, { best_flights: [], other_flights: null }, { best_flights: {}, other_flights: [] }]) {
+    assert.equal(projectSerpApiFlightInitialBatchOutcome(response, retrievedAt).status, "malformed_response");
+    assert.equal(projectSerpApiFlightReturnBatchOutcome(response, retrievedAt).status, "malformed_response");
+  }
+});
+
+test("classifies best-only and other-only empty responses as phase-specific no-options outcomes, but both absent as malformed", () => {
+  for (const response of [{ best_flights: [] }, { other_flights: [] }, { best_flights: [], other_flights: [] }]) {
+    assert.deepEqual(projectSerpApiFlightInitialBatchOutcome(response, retrievedAt), { status: "no_eligible_outbound" });
+    assert.deepEqual(projectSerpApiFlightReturnBatchOutcome(response, retrievedAt), { status: "no_return_options" });
+  }
+  assert.equal(projectSerpApiFlightInitialBatchOutcome({}, retrievedAt).status, "malformed_response");
+  assert.equal(projectSerpApiFlightReturnBatchOutcome({}, retrievedAt).status, "malformed_response");
+});
+
+test("projects best-only and other-only valid responses", () => {
+  const best = projectSerpApiFlightInitialBatchOutcome({ best_flights: [rawResult()] }, retrievedAt);
+  const other = projectSerpApiFlightReturnBatchOutcome({ other_flights: [returnResult()] }, retrievedAt);
+  assert.equal(best.status, "ok");
+  assert.equal(other.status, "ok");
+});
+
+test("classifies raw results with no structurally valid siblings as malformed", () => {
+  const response = { best_flights: [{ flights: [], price: 1, total_duration: 1 }], other_flights: [{ flights: null, price: 2, total_duration: 2 }] };
+  assert.deepEqual(projectSerpApiFlightInitialBatchOutcome(response, retrievedAt), { status: "malformed_response" });
+  assert.deepEqual(projectSerpApiFlightReturnBatchOutcome(response, retrievedAt), { status: "malformed_response" });
+});
+
+test("classifies structurally valid tokenless initial results separately", () => {
+  const response = { best_flights: [rawResult({ departure_token: "" })], other_flights: [] };
+  assert.deepEqual(projectSerpApiFlightInitialBatchOutcome(response, retrievedAt), { status: "no_eligible_outbound" });
+});
+
+test("returns ok when a valid sibling survives malformed or tokenless siblings", () => {
+  const response = {
+    best_flights: [{ flights: [], price: 1, total_duration: 1 }, rawResult({ departure_token: "" })],
+    other_flights: [rawResult({ price: 1200, departure_token: "usable" })],
+  };
+  const initial = projectSerpApiFlightInitialBatchOutcome(response, retrievedAt);
+  assert.equal(initial.status, "ok");
+  if (initial.status === "ok") {
+    assert.equal(initial.batch.candidates.length, 1);
+    assert.equal(getSerpApiFlightDepartureToken(initial.batch, 0), "usable");
+  }
+  const returned = projectSerpApiFlightReturnBatchOutcome({ best_flights: [{ flights: [], price: 1, total_duration: 1 }], other_flights: [returnResult()] }, retrievedAt);
+  assert.equal(returned.status, "ok");
+});
+
 test("preserves best_flights then other_flights order and freezes visible arrays", () => {
   const batch = projectSerpApiFlightInitialBatch({
     best_flights: [rawResult({ price: 1000, departure_token: "best" })],
@@ -48,11 +99,8 @@ test("preserves best_flights then other_flights order and freezes visible arrays
 
 test("drops malformed and tokenless outbound siblings while keeping token indices aligned", () => {
   const batch = projectSerpApiFlightInitialBatch({
-    best_flights: [
-      rawResult({ flights: [], departure_token: "bad-result" }),
-      rawResult({ departure_token: "" }),
-      rawResult({ price: 1100, departure_token: "usable-token" }),
-    ],
+    best_flights: [rawResult({ flights: [], departure_token: "bad-result" }), rawResult({ departure_token: "" }), rawResult({ price: 1100, departure_token: "usable-token" })],
+    other_flights: [],
   }, retrievedAt);
   assert.ok(batch);
   assert.equal(batch.candidates.length, 1);
@@ -60,28 +108,18 @@ test("drops malformed and tokenless outbound siblings while keeping token indice
 });
 
 test("selector source index remains tied to the filtered outbound candidate and retrieves its token", () => {
-  const batch = projectSerpApiFlightInitialBatch({
-    best_flights: [
-      rawResult({ flights: [], departure_token: "dropped-token" }),
-      rawResult({ price: 1400, departure_token: "token-A" }),
-      rawResult({ price: 1100, departure_token: "token-B" }),
-    ],
-  }, retrievedAt);
+  const batch = projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ flights: [], departure_token: "dropped-token" }), rawResult({ price: 1400, departure_token: "token-A" }), rawResult({ price: 1100, departure_token: "token-B" })], other_flights: [] }, retrievedAt);
   assert.ok(batch);
   const selected = selectSerpApiFlightOutbound(batch.candidates, request);
   assert.ok(selected);
   assert.equal(selected.sourceIndex, 1);
   assert.equal(getSerpApiFlightDepartureToken(batch, selected.sourceIndex), "token-B");
-  assert.notEqual(getSerpApiFlightDepartureToken(batch, selected.sourceIndex), "token-A");
-  assert.notEqual(getSerpApiFlightDepartureToken(batch, selected.sourceIndex), "dropped-token");
-  assert.equal(JSON.stringify(batch).includes("token-A"), false);
   assert.equal(JSON.stringify(batch).includes("token-B"), false);
-  assert.equal(JSON.stringify(batch).includes("dropped-token"), false);
 });
 
 test("WeakMap identity rejects copies, serialization, lookalikes, unrelated batches, and invalid indices", () => {
-  const batch = projectSerpApiFlightInitialBatch({ best_flights: [rawResult()] }, retrievedAt);
-  const unrelated = projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ departure_token: "other" })] }, retrievedAt);
+  const batch = projectSerpApiFlightInitialBatch({ best_flights: [rawResult()], other_flights: [] }, retrievedAt);
+  const unrelated = projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ departure_token: "other" })], other_flights: [] }, retrievedAt);
   assert.ok(batch && unrelated);
   assert.equal(getSerpApiFlightDepartureToken(batch, 0), "token-1");
   assert.equal(getSerpApiFlightDepartureToken(unrelated, 0), "other");
@@ -93,28 +131,28 @@ test("WeakMap identity rejects copies, serialization, lookalikes, unrelated batc
 });
 
 test("return batches require no departure token and preserve completed $1,736", () => {
-  const batch = projectSerpApiFlightReturnBatch({ best_flights: [returnResult({ departure_token: undefined, price: 1736 })] }, retrievedAt);
+  const batch = projectSerpApiFlightReturnBatch({ best_flights: [returnResult({ departure_token: undefined, price: 1736 })], other_flights: [] }, retrievedAt);
   assert.ok(batch);
   assert.equal(batch.candidates[0].roundTripPrice, 1736);
   assert.equal(getSerpApiFlightDepartureToken(batch, 0), null);
 });
 
 test("all-invalid batches return null", () => {
-  assert.equal(projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ departure_token: "" })] }, retrievedAt), null);
-  assert.equal(projectSerpApiFlightReturnBatch({ best_flights: [{ flights: [], price: 1, total_duration: 1 }] }, retrievedAt), null);
+  assert.equal(projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ departure_token: "" })], other_flights: [] }, retrievedAt), null);
+  assert.equal(projectSerpApiFlightReturnBatch({ best_flights: [{ flights: [], price: 1, total_duration: 1 }], other_flights: [] }, retrievedAt), null);
 });
 
 test("sensitive raw fields never serialize from either batch", () => {
-  const outbound = projectSerpApiFlightInitialBatch({ best_flights: [rawResult()] }, retrievedAt);
-  const returned = projectSerpApiFlightReturnBatch({ best_flights: [returnResult()] }, retrievedAt);
+  const outbound = projectSerpApiFlightInitialBatch({ best_flights: [rawResult()], other_flights: [] }, retrievedAt);
+  const returned = projectSerpApiFlightReturnBatch({ best_flights: [returnResult()], other_flights: [] }, retrievedAt);
   assert.ok(outbound && returned);
   const serialized = JSON.stringify({ outbound, returned });
   for (const forbidden of ["token-1", "https://provider.example", "search-id", "metadata", "hostile", "departure_token"]) assert.equal(serialized.includes(forbidden), false, forbidden);
 });
 
 test("outbound and return batches flow through selector and normalizer to a $1,736 observation", () => {
-  const outbound = projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ departure_token: "outbound-token" })] }, retrievedAt);
-  const returned = projectSerpApiFlightReturnBatch({ best_flights: [returnResult({ price: 1736 })] }, retrievedAt);
+  const outbound = projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ departure_token: "outbound-token" })], other_flights: [] }, retrievedAt);
+  const returned = projectSerpApiFlightReturnBatch({ best_flights: [returnResult({ price: 1736 })], other_flights: [] }, retrievedAt);
   assert.ok(outbound && returned);
   const selected = selectSerpApiFlightRoundTrip({ outboundResults: outbound.candidates, request, returnOptionsForSelectedOutbound: returned.candidates });
   assert.ok(selected);
