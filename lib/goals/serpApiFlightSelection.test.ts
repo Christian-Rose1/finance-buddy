@@ -41,8 +41,7 @@ function rawSegment(
 
 function outboundResult(overrides: Partial<SerpApiFlightSelectionResult> = {}): SerpApiFlightSelectionResult {
   return {
-    outboundSegments: [rawSegment("JFK", "2027-04-03 08:00", "CDG", "2027-04-03 20:00")],
-    returnSegments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")],
+    segments: [rawSegment("JFK", "2027-04-03 08:00", "CDG", "2027-04-03 20:00")],
     roundTripPrice: 1800,
     retrievedAt: "2026-08-28T12:34:56.000Z",
     durationMinutes: 500,
@@ -51,11 +50,13 @@ function outboundResult(overrides: Partial<SerpApiFlightSelectionResult> = {}): 
 }
 
 function returnResult(overrides: Partial<SerpApiFlightSelectionResult> = {}): SerpApiFlightSelectionResult {
-  return outboundResult({
-    outboundSegments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")],
-    returnSegments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")],
+  return {
+    segments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")],
+    roundTripPrice: 1800,
+    retrievedAt: "2026-08-28T12:34:56.000Z",
+    durationMinutes: 500,
     ...overrides,
-  });
+  };
 }
 
 function input(
@@ -65,9 +66,12 @@ function input(
   return { outboundResults, request, returnOptionsForSelectedOutbound };
 }
 
-test("selects outbound in two phases and preserves its original source index", () => {
+test("selects an outbound-only candidate and preserves its original source index", () => {
   const selected = selectSerpApiFlightOutbound(
-    [outboundResult({ roundTripPrice: Number.NaN }), outboundResult({ roundTripPrice: 1700 })],
+    [
+      { ...outboundResult({ roundTripPrice: Number.NaN }), sourceLabel: "invalid" },
+      outboundResult({ roundTripPrice: 1700 }),
+    ],
     request,
   );
   assert.ok(selected);
@@ -75,16 +79,27 @@ test("selects outbound in two phases and preserves its original source index", (
   assert.equal(selected.outboundSegments[0].marketingFlightNumber, "EA123");
 });
 
-test("selects the lowest searched-party-total outbound and compatible return", () => {
+test("selects a return-only candidate without requiring an opposite leg", () => {
   const result = selectSerpApiFlightRoundTrip(
     input(
-      [outboundResult({ roundTripPrice: 1900 }), outboundResult({ roundTripPrice: 1700 })],
-      [returnResult({ roundTripPrice: 1800 }), returnResult({ roundTripPrice: 1600 })],
+      [outboundResult({ roundTripPrice: 1700 })],
+      [returnResult({ roundTripPrice: 1736 })],
     ),
   );
   assert.ok(result);
-  assert.equal((result.outboundSegments as Array<Record<string, unknown>>)[0].marketingFlightNumber, "EA123");
-  assert.equal(result.roundTripPrice, 1600);
+  assert.equal(result.roundTripPrice, 1736);
+  assert.equal((result.returnSegments as Array<Record<string, unknown>>)[0].arrivalAirport, "JFK");
+});
+
+test("selects the lowest searched-party-total return and preserves the completed price", () => {
+  const result = selectSerpApiFlightRoundTrip(
+    input(
+      [outboundResult({ roundTripPrice: 1900 })],
+      [returnResult({ roundTripPrice: 1800 }), returnResult({ roundTripPrice: 1736 })],
+    ),
+  );
+  assert.ok(result);
+  assert.equal(result.roundTripPrice, 1736);
 });
 
 test("uses duration and then original result order as deterministic tie-breakers", () => {
@@ -92,90 +107,67 @@ test("uses duration and then original result order as deterministic tie-breakers
   const shortest = outboundResult({
     roundTripPrice: 1700,
     durationMinutes: 500,
-    outboundSegments: [rawSegment("JFK", "2027-04-03 09:00", "CDG", "2027-04-03 20:00")],
+    segments: [rawSegment("JFK", "2027-04-03 09:00", "CDG", "2027-04-03 20:00")],
   });
   const returnFirst = returnResult({
     roundTripPrice: 1600,
     durationMinutes: 600,
-    returnSegments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")],
+    segments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")],
   });
   const returnShortest = returnResult({
     roundTripPrice: 1600,
     durationMinutes: 500,
-    returnSegments: [rawSegment("CDG", "2027-04-12 10:00", "JFK", "2027-04-12 12:30")],
+    segments: [rawSegment("CDG", "2027-04-12 10:00", "JFK", "2027-04-12 12:30")],
   });
   const selected = selectSerpApiFlightRoundTrip(input([first, shortest], [returnFirst, returnShortest]));
   assert.ok(selected);
   assert.equal((selected.outboundSegments as Array<Record<string, unknown>>)[0].departureTime, "2027-04-03 09:00");
   assert.equal((selected.returnSegments as Array<Record<string, unknown>>)[0].departureTime, "2027-04-12 10:00");
 
-  const sourceFirst = outboundResult({ roundTripPrice: 1700, durationMinutes: 500, retrievedAt: "2026-08-28T01:00:00.000Z", outboundSegments: [rawSegment("JFK", "2027-04-03 08:00", "CDG", "2027-04-03 20:00")] });
-  const sourceSecond = outboundResult({ roundTripPrice: 1700, durationMinutes: 500, retrievedAt: "2026-08-28T02:00:00.000Z", outboundSegments: [rawSegment("JFK", "2027-04-03 09:00", "CDG", "2027-04-03 21:00")] });
-  const selectedSource = selectSerpApiFlightRoundTrip(input([sourceFirst, sourceSecond], [returnResult()]));
+  const sourceFirst = outboundResult({ roundTripPrice: 1700, durationMinutes: 500, retrievedAt: "2026-08-28T01:00:00.000Z" });
+  const sourceSecond = outboundResult({ roundTripPrice: 1700, durationMinutes: 500, retrievedAt: "2026-08-28T02:00:00.000Z", segments: [rawSegment("JFK", "2027-04-03 09:00", "CDG", "2027-04-03 21:00")] });
+  const selectedSource = selectSerpApiFlightRoundTrip(input([sourceFirst, sourceSecond]));
   assert.ok(selectedSource);
   assert.equal((selectedSource.outboundSegments as Array<Record<string, unknown>>)[0].departureTime, "2027-04-03 08:00");
 
-  const returnSourceFirst = returnResult({
-    roundTripPrice: 1600,
-    durationMinutes: 500,
-    returnSegments: [rawSegment("CDG", "2027-04-12 08:00", "JFK", "2027-04-12 10:30")],
-  });
-  const returnSourceSecond = returnResult({
-    roundTripPrice: 1600,
-    durationMinutes: 500,
-    returnSegments: [rawSegment("CDG", "2027-04-12 10:00", "JFK", "2027-04-12 12:30")],
-  });
+  const returnSourceFirst = returnResult({ roundTripPrice: 1600, durationMinutes: 500, segments: [rawSegment("CDG", "2027-04-12 08:00", "JFK", "2027-04-12 10:30")] });
+  const returnSourceSecond = returnResult({ roundTripPrice: 1600, durationMinutes: 500, segments: [rawSegment("CDG", "2027-04-12 10:00", "JFK", "2027-04-12 12:30")] });
   const selectedReturnSource = selectSerpApiFlightRoundTrip(input([outboundResult()], [returnSourceFirst, returnSourceSecond]));
   assert.ok(selectedReturnSource);
   assert.equal((selectedReturnSource.returnSegments as Array<Record<string, unknown>>)[0].departureTime, "2027-04-12 08:00");
 });
 
-test("rejects wrong route or dates", () => {
-  assert.equal(
-    selectSerpApiFlightRoundTrip(input([outboundResult({ outboundSegments: [rawSegment("LAX", "2027-04-03 08:00", "CDG", "2027-04-03 20:00")] })])),
-    null,
-  );
-  assert.equal(
-    selectSerpApiFlightRoundTrip(input([outboundResult({ outboundSegments: [rawSegment("JFK", "2027-04-04 08:00", "CDG", "2027-04-04 20:00")] })])),
-    null,
-  );
+test("rejects wrong-phase routes or dates", () => {
+  assert.equal(selectSerpApiFlightRoundTrip(input([outboundResult({ segments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")] })])), null);
+  assert.equal(selectSerpApiFlightRoundTrip(input([outboundResult({ segments: [rawSegment("JFK", "2027-04-04 08:00", "CDG", "2027-04-04 20:00")] })])), null);
+  assert.equal(selectSerpApiFlightRoundTrip(input([outboundResult()], [returnResult({ segments: [rawSegment("JFK", "2027-04-03 09:00", "CDG", "2027-04-03 11:30")] })])), null);
+  assert.equal(selectSerpApiFlightRoundTrip(input([outboundResult()], [returnResult({ segments: [rawSegment("CDG", "2027-04-13 09:00", "JFK", "2027-04-13 11:30")] })])), null);
 });
 
 test("accepts missing optional cabin and rejects conflicting cabin", () => {
-  const missing = selectSerpApiFlightRoundTrip(
-    input([outboundResult({ outboundSegments: [rawSegment("JFK", "2027-04-03 08:00", "CDG", "2027-04-03 20:00", null)] })]),
-  );
+  const missing = selectSerpApiFlightRoundTrip(input([outboundResult({ segments: [rawSegment("JFK", "2027-04-03 08:00", "CDG", "2027-04-03 20:00", null)] })]));
   assert.ok(missing);
   assert.equal((missing.outboundSegments as Array<Record<string, unknown>>)[0].cabin, null);
 
-  const conflicting = selectSerpApiFlightRoundTrip(
-    input([outboundResult({ outboundSegments: [rawSegment("JFK", "2027-04-03 08:00", "CDG", "2027-04-03 20:00", "business")] })]),
-  );
+  const conflicting = selectSerpApiFlightRoundTrip(input([outboundResult({ segments: [rawSegment("JFK", "2027-04-03 08:00", "CDG", "2027-04-03 20:00", "business")] })]));
   assert.equal(conflicting, null);
 });
 
-test("rejects disconnected outbound and return segments", () => {
+test("rejects disconnected segments in either phase", () => {
   const disconnectedOutbound = outboundResult({
-    outboundSegments: [
+    segments: [
       rawSegment("JFK", "2027-04-03 08:00", "LHR", "2027-04-03 10:00"),
       rawSegment("CDG", "2027-04-03 12:00", "CDG", "2027-04-03 20:00"),
     ],
   });
   const disconnectedReturn = returnResult({
-    returnSegments: [
+    segments: [
       rawSegment("CDG", "2027-04-12 09:00", "LHR", "2027-04-12 10:00"),
       rawSegment("JFK", "2027-04-12 11:00", "JFK", "2027-04-12 11:30"),
     ],
   });
   assert.equal(selectSerpApiFlightRoundTrip(input([disconnectedOutbound])), null);
   assert.equal(selectSerpApiFlightRoundTrip(input([outboundResult()], [disconnectedReturn])), null);
-});
-
-test("rejects an incompatible return result", () => {
-  const result = selectSerpApiFlightRoundTrip(
-    input([outboundResult()], [returnResult({ returnSegments: [rawSegment("CDG", "2027-04-13 09:00", "JFK", "2027-04-13 11:30")] })]),
-  );
-  assert.equal(result, null);
 });
 
 test("preserves the selected complete round-trip party total without per-traveler math", () => {

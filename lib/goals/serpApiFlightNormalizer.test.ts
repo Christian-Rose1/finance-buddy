@@ -100,8 +100,7 @@ test("normalizes the real selector-produced completed-round-trip input directly"
   const selectorInput: SerpApiFlightSelectionInput = {
     outboundResults: [
       {
-        outboundSegments: validInput().outboundSegments,
-        returnSegments: validInput().returnSegments,
+        segments: validInput().outboundSegments,
         roundTripPrice: 1736,
         retrievedAt: "2026-08-28T12:34:56.000Z",
         durationMinutes: 500,
@@ -118,8 +117,7 @@ test("normalizes the real selector-produced completed-round-trip input directly"
     },
     returnOptionsForSelectedOutbound: [
       {
-        outboundSegments: validInput().outboundSegments,
-        returnSegments: validInput().returnSegments,
+        segments: validInput().returnSegments,
         roundTripPrice: 1736,
         retrievedAt: "2026-08-28T12:34:56.000Z",
         durationMinutes: 500,

@@ -15,8 +15,7 @@ export interface SerpApiFlightSelectionRequest {
 }
 
 export interface SerpApiFlightSelectionResult {
-  outboundSegments: unknown;
-  returnSegments: unknown;
+  segments: unknown;
   roundTripPrice: unknown;
   retrievedAt: unknown;
   durationMinutes: unknown;
@@ -115,27 +114,25 @@ function compatible(
   result: SerpApiFlightSelectionResult,
   request: SerpApiFlightSelectionRequest,
   outbound: boolean,
-): boolean {
-  if (!validPrice(result.roundTripPrice) || !validDuration(result.durationMinutes)) return false;
-  const outboundSegments = normalizeSegments(result.outboundSegments);
-  const returnSegments = normalizeSegments(result.returnSegments);
-  if (!outboundSegments || !returnSegments) return false;
-  const segments = outbound ? outboundSegments : returnSegments;
+): NormalizedSerpApiFlightSegment[] | null {
+  if (!validPrice(result.roundTripPrice) || !validDuration(result.durationMinutes)) return null;
+  const segments = normalizeSegments(result.segments);
+  if (!segments) return null;
   const first = segments[0];
   const last = segments[segments.length - 1];
   const expectedStart = outbound ? request.origin : request.destination;
   const expectedEnd = outbound ? request.destination : request.origin;
   const expectedDate = outbound ? request.outboundDate : request.returnDate;
-  if (first.departureAirport !== expectedStart || last.arrivalAirport !== expectedEnd) return false;
-  if (segmentDate(first.departureTime) !== expectedDate) return false;
-  return segments.every((segment) => !explicitCabinConflicts(segment, request.cabin));
+  if (first.departureAirport !== expectedStart || last.arrivalAirport !== expectedEnd) return null;
+  if (segmentDate(first.departureTime) !== expectedDate) return null;
+  if (segments.some((segment) => explicitCabinConflicts(segment, request.cabin))) return null;
+  return segments;
 }
 
 function compareResults(a: SerpApiFlightSelectionResult, b: SerpApiFlightSelectionResult): number {
   const priceDifference = (a.roundTripPrice as number) - (b.roundTripPrice as number);
   if (priceDifference !== 0) return priceDifference;
-  const durationDifference = (a.durationMinutes as number) - (b.durationMinutes as number);
-  return durationDifference;
+  return (a.durationMinutes as number) - (b.durationMinutes as number);
 }
 
 interface SelectedFlightCandidate {
@@ -151,8 +148,7 @@ function choose(
 ): SelectedFlightCandidate | null {
   let selected: SelectedFlightCandidate | null = null;
   results.forEach((result, sourceIndex) => {
-    if (!compatible(result, request, outbound)) return;
-    const segments = normalizeSegments(outbound ? result.outboundSegments : result.returnSegments);
+    const segments = compatible(result, request, outbound);
     if (!segments) return;
     if (selected === null || compareResults(result, selected.result) < 0) {
       selected = { result, segments, sourceIndex };
@@ -177,9 +173,10 @@ export function selectSerpApiFlightOutbound(
 }
 
 /**
- * Selects one complete round trip without exposing provider identity or
- * opaque selection values. Returns the exact input contract of the approved
- * party-total normalizer, or null when no safe complete trip exists.
+ * Selects one complete round trip from independently shaped phase results
+ * without exposing provider identity or opaque selection values. Returns the
+ * exact input contract of the approved party-total normalizer, or null when no
+ * safe complete trip exists.
  */
 export function selectSerpApiFlightRoundTrip(
   input: SerpApiFlightSelectionInput,
@@ -189,9 +186,7 @@ export function selectSerpApiFlightRoundTrip(
   const selectedReturn = choose(input.returnOptionsForSelectedOutbound, input.request, false);
   if (!outbound || !selectedReturn) return null;
 
-  const outboundSegments = outbound.segments;
-  const returnSegments = selectedReturn.segments;
-  const normalizedInput: SerpApiFlightNormalizerInput = {
+  return {
     origin: input.request.origin,
     destination: input.request.destination,
     outboundDate: input.request.outboundDate,
@@ -199,12 +194,11 @@ export function selectSerpApiFlightRoundTrip(
     travelers: input.request.travelers,
     cabin: input.request.cabin,
     currency: input.request.currency,
-    outboundSegments,
-    returnSegments,
+    outboundSegments: outbound.segments,
+    returnSegments: selectedReturn.segments,
     roundTripPrice: selectedReturn.result.roundTripPrice,
     retrievedAt: selectedReturn.result.retrievedAt,
   };
-  return normalizedInput;
 }
 
 export { normalizeSerpApiFlightPartyTotal };
