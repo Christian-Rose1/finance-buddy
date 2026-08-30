@@ -44,7 +44,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function safeLocationText(value: unknown): string | null {
+export function normalizeSerpApiFlightLocationInput(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.replace(/\s+/g, " ").trim();
   if (
@@ -91,7 +91,7 @@ function projectCitySuggestion(
 ): SerpApiFlightLocationCandidate | null {
   if (!isPlainObject(value) || value.type !== "city") return null;
 
-  const name = safeLocationText(value.name);
+  const name = normalizeSerpApiFlightLocationInput(value.name);
   if (!name || !matchesSavedLocation(name, savedLocation)) return null;
   if (typeof value.id !== "string" || !LOCATION_ID.test(value.id)) return null;
 
@@ -108,7 +108,7 @@ function projectCitySuggestion(
 
 function isStructurallyValidSuggestion(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
-  const name = safeLocationText(value.name);
+  const name = normalizeSerpApiFlightLocationInput(value.name);
   if (!name || typeof value.id !== "string" || !LOCATION_ID.test(value.id)) return false;
   if (value.type === "region") return true;
   return value.type === "city" && projectAirportIds(value.airports).length > 0;
@@ -135,7 +135,7 @@ export function projectSerpApiFlightLocation(
   savedLocation: unknown,
   rawResponse?: unknown,
 ): SerpApiFlightLocationProjection {
-  const location = safeLocationText(savedLocation);
+  const location = normalizeSerpApiFlightLocationInput(savedLocation);
   if (!location) {
     return emptyProjection("unresolved");
   }
