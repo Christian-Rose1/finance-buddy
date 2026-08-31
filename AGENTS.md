@@ -52,6 +52,17 @@ installed, use a narrow alternative without changing project dependencies.
   accepted the tradeoff.
 - Prefer focused, reviewable edits over broad refactors.
 
+## Pull-request workflow
+
+- Treat the linked GitHub implementation-milestone issue as the authoritative
+  scope and acceptance contract for pull-request work.
+- Work on a dedicated branch and open a draft pull request before review; do
+  not merge, deploy, or grant yourself merge authority.
+- Record actual verification commands and results in the pull request. A green
+  status from an earlier run or an agent summary is not sufficient evidence.
+- Hermes and Freebuff reviews are read-only evidence. Neither replaces the
+  repository owner's explicit approval to merge.
+
 ## Verification and evidence
 
 After implementation, run:

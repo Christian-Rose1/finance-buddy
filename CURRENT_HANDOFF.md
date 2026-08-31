@@ -1,5 +1,43 @@
 # Finance Buddy Current Handoff
 
+## 2026-08-31 GitHub Agent Workflow Control Plane (uncommitted)
+
+The repository now contains an initial GitHub-native control plane for the
+ChatGPT architect → Codex implementation → Hermes evidence review → Freebuff
+adversarial review → owner approval workflow. It deliberately changes no
+application behavior, database schema, provider configuration, or secret
+handling.
+
+- `.github/workflows/verify.yml` runs the repository's locked dependency
+  install, full test suite, TypeScript check, production build, and whitespace
+  check for pull requests targeting `main` and pushes to `main`. It has
+  read-only GitHub permissions and contains no agent, merge, deploy, or secret
+  access.
+- `.github/ISSUE_TEMPLATE/implementation-milestone.yml` makes scope,
+  allowlisted files, acceptance criteria, verification, risk flags, and stop
+  conditions explicit before implementation.
+- `.github/pull_request_template.md` requires actual verification evidence,
+  Freebuff review, and repository-owner approval without granting an agent
+  authority to merge.
+- `docs/automation/` documents the workflow plus the read-only Hermes and
+  Freebuff review contracts. The Hermes contract is a source document to load
+  into Hermes when its local GitHub/`gh` setup is complete; it is not an active
+  cron job or GitHub App configuration.
+- `AGENTS.md` now records the pull-request workflow alongside the durable
+  existing editing and trust rules.
+
+Both new YAML files parsed successfully with local PyYAML. Full project
+verification was not run in the extracted snapshot because `npm ci` could not
+download a locked transitive package from the restricted registry environment
+(HTTP 403). Run the normal checks locally before committing. The archive did
+not include `.git`, so no Git-status or Git-diff verification can be claimed
+for the extracted copy.
+
+Next setup steps: copy the added files into the real local repository,
+configure the documented `main` protection settings in GitHub, install/load the
+Hermes review contract, and run one draft-PR review manually before creating a
+scheduled Hermes job. Do not grant automatic merge or deployment permissions.
+
 ## 2026-08-28 SerpApi Price-Coverage Interpretation Correction (authoritative)
 
 The 2026-08-28 bounded SerpApi price-coverage proof is reinterpreted before any
