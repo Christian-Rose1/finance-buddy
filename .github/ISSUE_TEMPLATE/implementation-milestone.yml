@@ -1,0 +1,82 @@
+name: Implementation milestone
+description: Create a small, bounded Finance Buddy implementation task.
+title: "[Milestone]: "
+labels:
+  - implementation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is the authoritative implementation brief. Keep it small enough for one reviewable pull request.
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: State the customer or system outcome in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: State the adjacent behavior this milestone must not change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: allowed-files
+    attributes:
+      label: Allowed files
+      description: List the exact files or directories Codex may edit. If another file is necessary, work must stop and report why.
+      placeholder: |
+        - lib/goals/example.ts
+        - lib/goals/example.test.ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: Write observable, testable outcomes. Include trust and ownership constraints where relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Required verification
+      description: List the focused tests and required broader checks.
+      placeholder: |
+        - npx tsx --test lib/goals/example.test.ts
+        - npm test
+        - npx tsc --noEmit
+        - npm run build
+        - git diff --check
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: elevated-risk
+    attributes:
+      label: Elevated-risk confirmation
+      description: Check every category this task touches. A checked category requires explicit human review before merge.
+      options:
+        - label: Authentication, authorization, RLS, or ownership boundaries
+        - label: Customer financial data, recommendations, or research evidence
+        - label: Database migration or persistence contract
+        - label: External provider, secret, or deployment configuration
+
+  - type: textarea
+    id: stop-conditions
+    attributes:
+      label: Stop conditions
+      description: Record conditions that require Codex to stop rather than broaden scope.
+      placeholder: |
+        - Another file outside the allowlist is required.
+        - The existing contract conflicts with this brief.
+        - A migration, secret, or live-provider test is needed.
+    validations:
+      required: true
