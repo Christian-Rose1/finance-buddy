@@ -39,6 +39,9 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Build production application
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://ci-placeholder.invalid
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-build-placeholder
         run: npm run build
 
       - name: Reject whitespace errors in the reviewed diff
