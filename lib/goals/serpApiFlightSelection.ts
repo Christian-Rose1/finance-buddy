@@ -5,13 +5,15 @@ import {
 } from "./serpApiFlightNormalizer";
 
 export interface SerpApiFlightSelectionRequest {
-  origin: string;
-  destination: string;
-  outboundDate: string;
-  returnDate: string;
-  travelers: number;
-  cabin: string;
-  currency: string;
+  readonly origin: string;
+  readonly destination: string;
+  readonly outboundDate: string;
+  readonly returnDate: string;
+  readonly travelers: number;
+  readonly cabin: string;
+  readonly currency: string;
+  readonly originAirportIds?: readonly string[];
+  readonly destinationAirportIds?: readonly string[];
 }
 
 export interface SerpApiFlightSelectionResult {
@@ -32,13 +34,55 @@ export interface SerpApiFlightSelectionInput {
 const MAX_TRAVELERS = 9;
 const MAX_PRICE = 1_000_000;
 const MAX_SEGMENTS_PER_LEG = 8;
+const MAX_AIRPORTS = 12;
+const AIRPORT_ID = /^[A-Z]{3}$/;
+const LOCATION_ID = /^\/[mg]\/[A-Za-z0-9_-]{1,100}$/;
+
+type AirportScope = readonly string[];
+
+interface FlightSelectionScopeInput {
+  readonly origin?: unknown;
+  readonly destination?: unknown;
+  readonly originAirportIds?: unknown;
+  readonly destinationAirportIds?: unknown;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isAirportCode(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Z]{3}$/.test(value);
+  return typeof value === "string" && AIRPORT_ID.test(value);
+}
+
+function isSearchIdentifier(value: unknown): value is string {
+  return isAirportCode(value) || (typeof value === "string" && LOCATION_ID.test(value));
+}
+
+function validAirportScope(value: unknown): value is AirportScope {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= MAX_AIRPORTS &&
+    value.every((airportId) => isAirportCode(airportId)) &&
+    new Set(value).size === value.length
+  );
+}
+
+function scopeFor(
+  identifier: string,
+  scope: unknown,
+): AirportScope | null {
+  if (isAirportCode(identifier)) {
+    if (scope === undefined) return [identifier];
+    return Array.isArray(scope) &&
+      scope.length === 1 &&
+      scope[0] === identifier
+      ? [identifier]
+      : null;
+  }
+  if (!validAirportScope(scope)) return null;
+  return [...scope];
 }
 
 function isCalendarDate(value: unknown): value is string {
@@ -67,22 +111,33 @@ export function serpApiTravelClassForCabin(cabin: unknown): string | null {
   }
 }
 
+function validatedScopes(request: FlightSelectionScopeInput): {
+  origin: AirportScope;
+  destination: AirportScope;
+} | null {
+  if (!isSearchIdentifier(request.origin) || !isSearchIdentifier(request.destination)) return null;
+  if (request.origin === request.destination) return null;
+
+  const origin = scopeFor(request.origin, request.originAirportIds);
+  const destination = scopeFor(request.destination, request.destinationAirportIds);
+  if (!origin || !destination || origin.some((airportId) => destination.includes(airportId))) return null;
+  return { origin, destination };
+}
+
 export function isValidSerpApiFlightSelectionRequest(request: unknown): request is SerpApiFlightSelectionRequest {
   if (!isPlainObject(request)) return false;
-  return (
-    isAirportCode(request.origin) &&
-    isAirportCode(request.destination) &&
-    request.origin !== request.destination &&
-    isCalendarDate(request.outboundDate) &&
-    isCalendarDate(request.returnDate) &&
-    request.returnDate >= request.outboundDate &&
-    typeof request.travelers === "number" &&
-    Number.isInteger(request.travelers) &&
-    request.travelers >= 1 &&
-    request.travelers <= MAX_TRAVELERS &&
-    isCurrency(request.currency) &&
-    serpApiTravelClassForCabin(request.cabin) !== null
-  );
+  if (
+    !isCalendarDate(request.outboundDate) ||
+    !isCalendarDate(request.returnDate) ||
+    request.returnDate < request.outboundDate ||
+    typeof request.travelers !== "number" ||
+    !Number.isInteger(request.travelers) ||
+    request.travelers < 1 ||
+    request.travelers > MAX_TRAVELERS ||
+    !isCurrency(request.currency) ||
+    serpApiTravelClassForCabin(request.cabin) === null
+  ) return false;
+  return validatedScopes(request) !== null;
 }
 
 function validPrice(value: unknown): value is number {
@@ -133,16 +188,17 @@ function compatible(
   result: SerpApiFlightSelectionResult,
   request: SerpApiFlightSelectionRequest,
   outbound: boolean,
+  scopes: { origin: AirportScope; destination: AirportScope },
 ): NormalizedSerpApiFlightSegment[] | null {
   if (!validPrice(result.roundTripPrice) || !validDuration(result.durationMinutes)) return null;
   const segments = normalizeSegments(result.segments);
   if (!segments) return null;
   const first = segments[0];
   const last = segments[segments.length - 1];
-  const expectedStart = outbound ? request.origin : request.destination;
-  const expectedEnd = outbound ? request.destination : request.origin;
+  const startScope = outbound ? scopes.origin : scopes.destination;
+  const endScope = outbound ? scopes.destination : scopes.origin;
   const expectedDate = outbound ? request.outboundDate : request.returnDate;
-  if (first.departureAirport !== expectedStart || last.arrivalAirport !== expectedEnd) return null;
+  if (!startScope.includes(first.departureAirport) || !endScope.includes(last.arrivalAirport)) return null;
   if (segmentDate(first.departureTime) !== expectedDate) return null;
   if (segments.some((segment) => explicitCabinConflicts(segment, request.cabin))) return null;
   return segments;
@@ -164,10 +220,11 @@ function choose(
   results: readonly SerpApiFlightSelectionResult[],
   request: SerpApiFlightSelectionRequest,
   outbound: boolean,
+  scopes: { origin: AirportScope; destination: AirportScope },
 ): SelectedFlightCandidate | null {
   let selected: SelectedFlightCandidate | null = null;
   results.forEach((result, sourceIndex) => {
-    const segments = compatible(result, request, outbound);
+    const segments = compatible(result, request, outbound, scopes);
     if (!segments) return;
     if (selected === null || compareResults(result, selected.result) < 0) {
       selected = { result, segments, sourceIndex };
@@ -186,28 +243,25 @@ export function selectSerpApiFlightOutbound(
   request: SerpApiFlightSelectionRequest,
 ): SelectedOutboundFlight | null {
   if (!isValidSerpApiFlightSelectionRequest(request)) return null;
-  const selected = choose(outboundResults, request, true);
+  const scopes = validatedScopes(request)!;
+  const selected = choose(outboundResults, request, true, scopes);
   if (!selected) return null;
   return { outboundSegments: selected.segments, sourceIndex: selected.sourceIndex };
 }
 
-/**
- * Selects one complete round trip from independently shaped phase results
- * without exposing provider identity or opaque selection values. Returns the
- * exact input contract of the approved party-total normalizer, or null when no
- * safe complete trip exists.
- */
+/** Selects one complete round trip without exposing provider metadata or search identifiers. */
 export function selectSerpApiFlightRoundTrip(
   input: SerpApiFlightSelectionInput,
 ): SerpApiFlightNormalizerInput | null {
   if (!isValidSerpApiFlightSelectionRequest(input.request)) return null;
-  const outbound = choose(input.outboundResults, input.request, true);
-  const selectedReturn = choose(input.returnOptionsForSelectedOutbound, input.request, false);
+  const scopes = validatedScopes(input.request)!;
+  const outbound = choose(input.outboundResults, input.request, true, scopes);
+  const selectedReturn = choose(input.returnOptionsForSelectedOutbound, input.request, false, scopes);
   if (!outbound || !selectedReturn) return null;
 
   return {
-    origin: input.request.origin,
-    destination: input.request.destination,
+    origin: outbound.segments[0].departureAirport,
+    destination: outbound.segments[outbound.segments.length - 1].arrivalAirport,
     outboundDate: input.request.outboundDate,
     returnDate: input.request.returnDate,
     travelers: input.request.travelers,
