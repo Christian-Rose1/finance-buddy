@@ -1,5 +1,29 @@
 # Finance Buddy Current Handoff
 
+## 2026-09-02 City-Aware SerpApi Flight HTTP Client v1
+
+Implemented on `feat/city-aware-flight-selection-v1` without live SerpApi,
+browser, database, commit, or push activity. The bounded two-request client
+accepts validated server-held resolved locations and legacy uppercase airport
+strings only; raw city IDs are rejected. It sends resolved search IDs to both
+requests, passes acceptable-airport scopes to selection, and returns actual
+selected airport endpoints. Malformed top-level input, malformed locations,
+and overlaps fail closed before provider access. Focused client tests (35),
+focused related tests, full suite, TypeScript, production build, and whitespace
+checks passed; the existing Next.js `<img>` warning remains.
+
+Snapshot correction: synchronous preflight now reconstructs frozen private
+location objects and airport-scope arrays before the first provider await.
+Caller mutation of a valid city location during the initial request cannot
+change the token-bound return search IDs or selector scopes. The mutation proof
+passed in the focused client suite (36 tests).
+
+Exception-safe preflight correction: the public boundary now catches only
+runtime normalization/field-extraction failures and returns the fixed
+`invalid_request` result without a provider call or error detail. Throwing
+top-level and nested getters plus a revoked Proxy are covered (37 focused
+client tests).
+
 ## 2026-09-01 City-Aware Flight Selection Contract v1
 
 Implemented and independently reviewed locally; no live SerpApi request,
