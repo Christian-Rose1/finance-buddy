@@ -1,5 +1,26 @@
 # Finance Buddy Current Handoff
 
+## 2026-09-02 SerpApi Departure-Token Compatibility Correction
+
+The bounded departure-token maximum is now 1024 characters. This finite cap is
+documented as a conservative runtime bound: a safe aggregate-only DEN → CDG
+probe returned HTTP 200 with 23 flight candidates, all 23 passing projection,
+and observed departure-token lengths of 276–356 characters. No raw token, URL,
+response body, key, or price was retained or displayed.
+
+Local tests retain an opaque token longer than the former 160-character limit,
+reject over-limit tokens, preserve candidate/source-index alignment, and keep
+tokens private through projection and client-facing output. A subsequent
+bounded live two-request probe through the corrected client used Denver to
+Paris city search ID `/m/05qtj` for two travelers and completed the token-bound
+return path. It selected actual endpoints `DEN` to `CDG` with two segments in
+each direction. The safe result exposed only normalized endpoints, traveler and
+segment counts, currency, and explicit unknowns (`offer_expiry`,
+`tax_inclusion`, `operating_carrier`); it did not retain or display a raw
+response, token, URL, key, or price. This proves one runtime city-ID and
+long-token return path, not availability, bookability, or customer
+verification.
+
 ## 2026-09-02 City-Aware SerpApi Flight HTTP Client v1
 
 Implemented on `feat/city-aware-flight-selection-v1` without live SerpApi,

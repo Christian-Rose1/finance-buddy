@@ -209,6 +209,27 @@ test("passes departure token from selector to second request", async () => {
   assert.ok(capturedSecondUrl.includes(`departure_token=${encodeURIComponent(token)}`));
 });
 
+test("passes a long opaque departure token through the two-request client privately", async () => {
+  const token = `opaque-${"x".repeat(270)}`;
+  const urls: string[] = [];
+  const fetch = async (url: string, _init: RequestInit) => {
+    urls.push(url);
+    return mockJsonResponse(urls.length === 1
+      ? makeInitialResponse({ departureToken: token })
+      : makeReturnResponse({ price: 1736 }));
+  };
+
+  const result = await buildSerpApiFlightClient("test-api-key", fetch).fetchFlight(VALID_REQUEST);
+
+  assert.equal(token.length > 160 && token.length <= 1024, true);
+  assert.equal(urls.length, 2);
+  assert.equal(new URL(urls[1]).searchParams.get("departure_token"), token);
+  assert.equal(result.error, null);
+  assert.deepEqual(result.observation?.price, { amount: 1736, currency: "USD" });
+  assert.equal(result.observation?.travelers, 2);
+  assert.equal(JSON.stringify(result).includes(token), false);
+});
+
 // 5. All four cabin mappings
 const cabinMappings: [string, string][] = [
   ["economy", "1"],
