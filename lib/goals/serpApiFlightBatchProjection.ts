@@ -1,7 +1,10 @@
 import type { SerpApiFlightSelectionResult } from "./serpApiFlightSelection";
 import { projectSerpApiFlightResult } from "./serpApiFlightResultProjection";
 
-const MAX_TOKEN_LENGTH = 160;
+// SerpApi departure tokens are opaque runtime values. The 1024-character cap
+// is finite and comfortably covers the observed 276–356-character tokens
+// while still bounding memory and request construction.
+const MAX_TOKEN_LENGTH = 1024;
 
 export interface SerpApiFlightProjectedBatch {
   readonly candidates: readonly SerpApiFlightSelectionResult[];

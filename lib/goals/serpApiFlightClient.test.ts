@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildSerpApiFlightClient } from "./serpApiFlightClient";
 import type { SerpApiFlightClientErrorCategory, SerpApiFlightRequest } from "./serpApiFlightClient";
+import type { SerpApiFlightSearchLocation } from "./serpApiFlightSearchLocation";
 
 // ---------------------------------------------------------------------------
 // Helpers: realistic SerpApi response fixtures
@@ -80,9 +81,12 @@ function makeReturnResponse(args?: {
   };
 }
 
+const AIRPORT_JFK: SerpApiFlightSearchLocation = { searchId: "JFK", kind: "airport", acceptableAirportIds: ["JFK"] };
+const AIRPORT_CDG: SerpApiFlightSearchLocation = { searchId: "CDG", kind: "airport", acceptableAirportIds: ["CDG"] };
+const PARIS: SerpApiFlightSearchLocation = { searchId: "/m/05qtj", kind: "city", acceptableAirportIds: ["CDG", "ORY"] };
 const VALID_REQUEST: SerpApiFlightRequest = {
-  origin: "JFK",
-  destination: "CDG",
+  origin: AIRPORT_JFK,
+  destination: AIRPORT_CDG,
   outboundDate: "2026-09-15",
   returnDate: "2026-09-22",
   travelers: 2,
@@ -205,6 +209,27 @@ test("passes departure token from selector to second request", async () => {
   assert.ok(capturedSecondUrl.includes(`departure_token=${encodeURIComponent(token)}`));
 });
 
+test("passes a long opaque departure token through the two-request client privately", async () => {
+  const token = `opaque-${"x".repeat(270)}`;
+  const urls: string[] = [];
+  const fetch = async (url: string, _init: RequestInit) => {
+    urls.push(url);
+    return mockJsonResponse(urls.length === 1
+      ? makeInitialResponse({ departureToken: token })
+      : makeReturnResponse({ price: 1736 }));
+  };
+
+  const result = await buildSerpApiFlightClient("test-api-key", fetch).fetchFlight(VALID_REQUEST);
+
+  assert.equal(token.length > 160 && token.length <= 1024, true);
+  assert.equal(urls.length, 2);
+  assert.equal(new URL(urls[1]).searchParams.get("departure_token"), token);
+  assert.equal(result.error, null);
+  assert.deepEqual(result.observation?.price, { amount: 1736, currency: "USD" });
+  assert.equal(result.observation?.travelers, 2);
+  assert.equal(JSON.stringify(result).includes(token), false);
+});
+
 // 5. All four cabin mappings
 const cabinMappings: [string, string][] = [
   ["economy", "1"],
@@ -245,8 +270,8 @@ test("makes zero calls for an invalid request", async () => {
 
   const client = buildSerpApiFlightClient("test-api-key", fetch);
   const result = await client.fetchFlight({
-    origin: "INVALID",
-    destination: "CDG",
+    origin: { searchId: "INVALID", kind: "airport", acceptableAirportIds: ["INVALID"] },
+    destination: AIRPORT_CDG,
     outboundDate: "2026-09-15",
     returnDate: "2026-09-22",
     travelers: 2,
@@ -257,6 +282,69 @@ test("makes zero calls for an invalid request", async () => {
   assert.equal(result.observation, null);
   assert.equal(result.error, "invalid_request");
   assert.equal(callCount, 0);
+});
+
+test("fails closed for malformed top-level requests without throwing or fetching", async () => {
+  let calls = 0;
+  const client = buildSerpApiFlightClient("test-api-key", async () => {
+    calls += 1;
+    return mockJsonResponse(makeInitialResponse());
+  });
+  for (const input of [null, undefined, [], 1, "request", true, {}, { origin: "JFK" }]) {
+    await assert.doesNotReject(async () => {
+      assert.deepEqual(await client.fetchFlight(input), { observation: null, error: "invalid_request" });
+    });
+  }
+  assert.equal(calls, 0);
+});
+
+test("fails closed when preflight property access throws", async () => {
+  let calls = 0;
+  const client = buildSerpApiFlightClient("test-api-key", async () => {
+    calls += 1;
+    return mockJsonResponse(makeInitialResponse());
+  });
+  const throwingOrigin = { ...VALID_REQUEST } as Record<string, unknown>;
+  Object.defineProperty(throwingOrigin, "origin", { get: () => { throw new Error("hostile origin"); } });
+  const throwingLocation = {} as Record<string, unknown>;
+  Object.defineProperty(throwingLocation, "searchId", { get: () => { throw new Error("hostile location"); } });
+  const nestedThrow = { ...VALID_REQUEST, origin: throwingLocation };
+  const revocable = Proxy.revocable({ ...VALID_REQUEST }, {});
+  revocable.revoke();
+
+  for (const input of [throwingOrigin, nestedThrow, revocable.proxy]) {
+    await assert.doesNotReject(async () => {
+      assert.deepEqual(await client.fetchFlight(input), { observation: null, error: "invalid_request" });
+    });
+  }
+  assert.equal(calls, 0);
+});
+
+test("accepts legacy airport strings and sends their exact request parameters", async () => {
+  const urls: string[] = [];
+  const { fetch } = mockFetchSuccess(makeInitialResponse(), makeReturnResponse());
+  const client = buildSerpApiFlightClient("test-api-key", async (url, init) => {
+    urls.push(url);
+    return fetch(url, init);
+  });
+  const result = await client.fetchFlight({ ...VALID_REQUEST, origin: "JFK", destination: "CDG" });
+  assert.equal(result.error, null);
+  assert.equal(urls.length, 2);
+  for (const url of urls) {
+    assert.ok(url.includes("departure_id=JFK"));
+    assert.ok(url.includes("arrival_id=CDG"));
+  }
+});
+
+test("rejects raw city identifiers with zero fetches", async () => {
+  let calls = 0;
+  const client = buildSerpApiFlightClient("test-api-key", async () => {
+    calls += 1;
+    return mockJsonResponse(makeInitialResponse());
+  });
+  const result = await client.fetchFlight({ ...VALID_REQUEST, destination: "/m/05qtj" });
+  assert.deepEqual(result, { observation: null, error: "invalid_request" });
+  assert.equal(calls, 0);
 });
 
 test("makes zero calls when API key is empty", async () => {
@@ -544,4 +632,123 @@ test("never exposes API key, tokens, URLs, raw metadata, or search IDs in result
   assert.ok(!serialized.includes("departure_token"), "departure_token key must not serialize");
   assert.ok(!serialized.includes("airline_logo"), "airline_logo must not serialize");
   assert.ok(!serialized.includes("other_flights"), "other_flights must not serialize");
+});
+
+for (const [label, origin, destination] of [
+  ["city-to-airport", PARIS, AIRPORT_JFK],
+  ["airport-to-city", AIRPORT_JFK, PARIS],
+  ["city-to-city", PARIS, { searchId: "/g/new-york", kind: "city", acceptableAirportIds: ["JFK", "EWR"] }],
+] as const) {
+  test(`uses resolved search IDs and scopes for ${label} in both requests`, async () => {
+    const urls: string[] = [];
+    const { fetch } = mockFetchSuccess(
+      makeInitialResponse({ flights: [makeFlightEntry({ depAirport: origin.acceptableAirportIds[0], depTime: VALID_REQUEST.outboundDate + " 10:30", arrAirport: destination.acceptableAirportIds[0], arrTime: VALID_REQUEST.outboundDate + " 22:45" })] }),
+      makeReturnResponse({ flights: [makeFlightEntry({ depAirport: destination.acceptableAirportIds[0], depTime: VALID_REQUEST.returnDate + " 08:15", arrAirport: origin.acceptableAirportIds[0], arrTime: VALID_REQUEST.returnDate + " 11:00" })] }),
+    );
+    const client = buildSerpApiFlightClient("test-api-key", async (url, init) => {
+      urls.push(url);
+      return fetch(url, init);
+    });
+    const result = await client.fetchFlight({ ...VALID_REQUEST, origin, destination });
+    assert.equal(result.error, null);
+    assert.equal(urls.length, 2);
+    for (const url of urls) {
+      assert.ok(url.includes(`departure_id=${encodeURIComponent(origin.searchId)}`));
+      assert.ok(url.includes(`arrival_id=${encodeURIComponent(destination.searchId)}`));
+    }
+  });
+}
+
+test("rejects malformed and overlapping resolved locations before fetching", async () => {
+  let calls = 0;
+  const client = buildSerpApiFlightClient("test-api-key", async () => {
+    calls += 1;
+    return mockJsonResponse(makeInitialResponse());
+  });
+  const invalidRequests: unknown[] = [
+    { ...VALID_REQUEST, origin: { searchId: "/m/city", kind: "city", acceptableAirportIds: ["cdg"] } },
+    { ...VALID_REQUEST, origin: { searchId: "/m/city", kind: "city", acceptableAirportIds: [] } },
+    { ...VALID_REQUEST, origin: { searchId: "/m/city", kind: "city", acceptableAirportIds: ["CDG", "CDG"] } },
+    { ...VALID_REQUEST, origin: { searchId: "/m/city", kind: "city", acceptableAirportIds: Array(13).fill("CDG") } },
+    { ...VALID_REQUEST, origin: { searchId: "JFK", kind: "airport", acceptableAirportIds: ["JFK", "EWR"] } },
+    { ...VALID_REQUEST, origin: PARIS, destination: { searchId: "/g/other", kind: "city", acceptableAirportIds: ["CDG"] } },
+  ];
+  for (const invalid of invalidRequests) {
+    assert.deepEqual(await client.fetchFlight(invalid), { observation: null, error: "invalid_request" });
+  }
+  assert.equal(calls, 0);
+});
+
+test("accepts a city outbound endpoint only when the reversed return is also scoped", async () => {
+  const { fetch } = mockFetchSuccess(
+    makeInitialResponse({ flights: [makeFlightEntry({ depAirport: "JFK", depTime: "2026-09-15 10:30", arrAirport: "CDG", arrTime: "2026-09-15 22:45" })] }),
+    makeReturnResponse({ flights: [makeFlightEntry({ depAirport: "CDG", depTime: "2026-09-22 08:15", arrAirport: "JFK", arrTime: "2026-09-22 11:00" })] }),
+  );
+  const result = await buildSerpApiFlightClient("test-api-key", fetch).fetchFlight({ ...VALID_REQUEST, destination: PARIS });
+  assert.equal(result.error, null);
+  assert.equal(result.observation?.origin, "JFK");
+  assert.equal(result.observation?.destination, "CDG");
+  assert.equal(result.observation?.price.amount, 1736);
+});
+
+for (const airport of ["CDG", "ORY"]) {
+  test(`accepts ${airport} as a city-scoped endpoint and rejects an out-of-scope endpoint`, async () => {
+    const { fetch } = mockFetchSuccess(
+      makeInitialResponse({ flights: [makeFlightEntry({ depAirport: "JFK", depTime: "2026-09-15 10:30", arrAirport: airport, arrTime: "2026-09-15 22:45" })] }),
+      makeReturnResponse({ flights: [makeFlightEntry({ depAirport: airport, depTime: "2026-09-22 08:15", arrAirport: "JFK", arrTime: "2026-09-22 11:00" })] }),
+    );
+    const result = await buildSerpApiFlightClient("test-api-key", fetch).fetchFlight({ ...VALID_REQUEST, destination: PARIS });
+    assert.equal(result.error, null);
+
+    const outOfScope = await buildSerpApiFlightClient("test-api-key", mockFetchSuccess(
+      makeInitialResponse({ flights: [makeFlightEntry({ depAirport: "JFK", depTime: "2026-09-15 10:30", arrAirport: "LHR", arrTime: "2026-09-15 22:45" })] }),
+      makeReturnResponse(),
+    ).fetch).fetchFlight({ ...VALID_REQUEST, destination: PARIS });
+    assert.equal(outOfScope.error, "no_eligible_outbound");
+  });
+}
+
+test("uses a private location snapshot when caller locations mutate during the initial request", async () => {
+  const origin = { searchId: "/m/new-york", kind: "city" as const, acceptableAirportIds: ["JFK", "EWR"] };
+  const destination = { searchId: "/g/paris", kind: "city" as const, acceptableAirportIds: ["CDG", "ORY"] };
+  const token = "PRIVATE_DEPARTURE_TOKEN";
+  const mutatedSearchId = "/m/mutated-city";
+  const mutatedAirport = "LHR";
+  const urls: string[] = [];
+  let calls = 0;
+  const fetch = async (url: string) => {
+    urls.push(url);
+    calls += 1;
+    if (calls === 1) {
+      origin.searchId = mutatedSearchId;
+      origin.acceptableAirportIds.splice(0, origin.acceptableAirportIds.length, mutatedAirport);
+      destination.searchId = "/g/mutated-destination";
+      destination.acceptableAirportIds.splice(0, destination.acceptableAirportIds.length, mutatedAirport);
+      return mockJsonResponse(makeInitialResponse({
+        departureToken: token,
+        flights: [makeFlightEntry({ depAirport: "JFK", depTime: "2026-09-15 10:30", arrAirport: "CDG", arrTime: "2026-09-15 22:45" })],
+      }));
+    }
+    return mockJsonResponse(makeReturnResponse({
+      flights: [makeFlightEntry({ depAirport: "CDG", depTime: "2026-09-22 08:15", arrAirport: "JFK", arrTime: "2026-09-22 11:00" })],
+    }));
+  };
+
+  const result = await buildSerpApiFlightClient("test-api-key", fetch).fetchFlight({
+    ...VALID_REQUEST,
+    origin,
+    destination,
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(calls, 2);
+  assert.ok(urls[1].includes("departure_id=%2Fm%2Fnew-york"));
+  assert.ok(urls[1].includes("arrival_id=%2Fg%2Fparis"));
+  assert.ok(!urls[1].includes(encodeURIComponent(mutatedSearchId)));
+  assert.equal(result.observation?.origin, "JFK");
+  assert.equal(result.observation?.destination, "CDG");
+  const serialized = JSON.stringify(result);
+  for (const sensitive of [mutatedSearchId, mutatedAirport, token, "https://", "departure_token", "other_flights"]) {
+    assert.ok(!serialized.includes(sensitive));
+  }
 });

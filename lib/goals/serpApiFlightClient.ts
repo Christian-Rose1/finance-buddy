@@ -28,14 +28,15 @@ import {
   normalizeSerpApiFlightPartyTotal,
   type NormalizedSerpApiFlightObservation,
 } from "./serpApiFlightNormalizer";
+import type { SerpApiFlightSearchLocation } from "./serpApiFlightSearchLocation";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface SerpApiFlightRequest {
-  origin: string;
-  destination: string;
+  origin: SerpApiFlightSearchLocation | string;
+  destination: SerpApiFlightSearchLocation | string;
   outboundDate: string;
   returnDate: string;
   travelers: number;
@@ -60,6 +61,15 @@ export interface SerpApiFlightClientResult {
 
 type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 type ClockFn = () => Date;
+interface EffectiveSerpApiFlightRequest {
+  origin: SerpApiFlightSearchLocation;
+  destination: SerpApiFlightSearchLocation;
+  outboundDate: string;
+  returnDate: string;
+  travelers: number;
+  cabin: string;
+  currency: string;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,16 +79,93 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const AIRPORT_ID = /^[A-Z]{3}$/;
+const LOCATION_ID = /^\/[mg]\/[A-Za-z0-9_-]{1,100}$/;
+const MAX_AIRPORTS = 12;
+
+function isValidSearchLocation(value: unknown): value is SerpApiFlightSearchLocation {
+  if (!isPlainObject(value)) return false;
+  const searchId = value.searchId;
+  const kind = value.kind;
+  const airports = value.acceptableAirportIds;
+  if (
+    typeof searchId !== "string" ||
+    (kind !== "airport" && kind !== "city") ||
+    !Array.isArray(airports) ||
+    airports.length === 0 ||
+    airports.length > MAX_AIRPORTS ||
+    !airports.every((airportId) => typeof airportId === "string" && AIRPORT_ID.test(airportId)) ||
+    new Set(airports).size !== airports.length
+  ) return false;
+  if (kind === "airport") return AIRPORT_ID.test(searchId) && airports.length === 1 && airports[0] === searchId;
+  return LOCATION_ID.test(searchId);
+}
+
+function effectiveLocation(value: unknown): SerpApiFlightSearchLocation | null {
+  if (typeof value === "string") {
+    if (!AIRPORT_ID.test(value)) return null;
+    return Object.freeze({
+      searchId: value,
+      kind: "airport" as const,
+      acceptableAirportIds: Object.freeze([value]),
+    });
+  }
+  if (!isValidSearchLocation(value)) return null;
+  return Object.freeze({
+    searchId: value.searchId,
+    kind: value.kind,
+    acceptableAirportIds: Object.freeze([...value.acceptableAirportIds]),
+  });
+}
+
+function normalizeRequest(value: unknown): EffectiveSerpApiFlightRequest | null {
+  if (!isPlainObject(value)) return null;
+  const origin = effectiveLocation(value.origin);
+  const destination = effectiveLocation(value.destination);
+  if (!origin || !destination) return null;
+  const request: EffectiveSerpApiFlightRequest = {
+    origin,
+    destination,
+    outboundDate: value.outboundDate as string,
+    returnDate: value.returnDate as string,
+    travelers: value.travelers as number,
+    cabin: value.cabin as string,
+    currency: value.currency as string,
+  };
+  if (!validLocations(request)) return null;
+  return isValidSerpApiFlightSelectionRequest({
+    origin: request.origin.searchId,
+    destination: request.destination.searchId,
+    originAirportIds: request.origin.acceptableAirportIds,
+    destinationAirportIds: request.destination.acceptableAirportIds,
+    outboundDate: request.outboundDate,
+    returnDate: request.returnDate,
+    travelers: request.travelers,
+    cabin: request.cabin,
+    currency: request.currency,
+  }) ? request : null;
+}
+
+function validLocations(
+  request: EffectiveSerpApiFlightRequest,
+): boolean {
+  if (!isValidSearchLocation(request.origin) || !isValidSearchLocation(request.destination)) return false;
+  return request.origin.searchId !== request.destination.searchId &&
+    !request.origin.acceptableAirportIds.some((airportId) =>
+      request.destination.acceptableAirportIds.includes(airportId),
+    );
+}
+
 function buildRequestParams(
-  req: SerpApiFlightRequest,
+  req: EffectiveSerpApiFlightRequest,
   apiKey: string,
   departureToken?: string | null,
 ): Record<string, string> {
   const params: Record<string, string> = {
     engine: "google_flights",
     type: "1",
-    departure_id: req.origin,
-    arrival_id: req.destination,
+    departure_id: req.origin.searchId,
+    arrival_id: req.destination.searchId,
     outbound_date: req.outboundDate,
     return_date: req.returnDate,
     adults: String(req.travelers),
@@ -114,10 +201,16 @@ export function buildSerpApiFlightClient(apiKey: string, fetchFn?: FetchFn, cloc
   const clock = clockFn ?? (() => new Date());
 
   async function fetchFlight(
-    request: SerpApiFlightRequest,
+    input: unknown,
   ): Promise<SerpApiFlightClientResult> {
     // 1. Validate runtime request
-    if (!isValidSerpApiFlightSelectionRequest(request)) {
+    let request: EffectiveSerpApiFlightRequest | null;
+    try {
+      request = normalizeRequest(input);
+    } catch {
+      return { observation: null, error: "invalid_request" };
+    }
+    if (!request) {
       return { observation: null, error: "invalid_request" };
     }
 
@@ -174,10 +267,18 @@ export function buildSerpApiFlightClient(apiKey: string, fetchFn?: FetchFn, cloc
     }
 
     // 9. Select outbound
-    const outboundSelection = selectSerpApiFlightOutbound(
-      initialOutcome.batch.candidates,
-      request,
-    );
+    const selectorRequest = {
+      origin: request.origin.searchId,
+      destination: request.destination.searchId,
+      originAirportIds: request.origin.acceptableAirportIds,
+      destinationAirportIds: request.destination.acceptableAirportIds,
+      outboundDate: request.outboundDate,
+      returnDate: request.returnDate,
+      travelers: request.travelers,
+      cabin: request.cabin,
+      currency: request.currency,
+    };
+    const outboundSelection = selectSerpApiFlightOutbound(initialOutcome.batch.candidates, selectorRequest);
     if (!outboundSelection) {
       return { observation: null, error: "no_eligible_outbound" };
     }
@@ -232,7 +333,7 @@ export function buildSerpApiFlightClient(apiKey: string, fetchFn?: FetchFn, cloc
     // 16. Select completed round trip
     const roundTripSelection = selectSerpApiFlightRoundTrip({
       outboundResults: initialOutcome.batch.candidates,
-      request,
+      request: selectorRequest,
       returnOptionsForSelectedOutbound: returnOutcome.batch.candidates,
     });
 

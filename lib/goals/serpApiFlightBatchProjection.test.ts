@@ -107,6 +107,30 @@ test("drops malformed and tokenless outbound siblings while keeping token indice
   assert.equal(getSerpApiFlightDepartureToken(batch, 0), "usable-token");
 });
 
+test("retains a realistic opaque token above the legacy cap privately and by source index", () => {
+  const longToken = `opaque-${"x".repeat(270)}`;
+  const batch = projectSerpApiFlightInitialBatch({
+    best_flights: [rawResult({ flights: [], departure_token: "dropped-token" }), rawResult({ departure_token: longToken })],
+    other_flights: [],
+  }, retrievedAt);
+  assert.ok(batch);
+  assert.equal(batch.candidates.length, 1);
+  const selected = selectSerpApiFlightOutbound(batch.candidates, request);
+  assert.ok(selected);
+  assert.equal(selected.sourceIndex, 0);
+  assert.equal(getSerpApiFlightDepartureToken(batch, selected.sourceIndex), longToken);
+  assert.equal(JSON.stringify(batch).includes(longToken), false);
+});
+
+test("rejects an opaque departure token over the bounded maximum", () => {
+  const overLimitToken = "x".repeat(1025);
+  const outcome = projectSerpApiFlightInitialBatchOutcome({
+    best_flights: [rawResult({ departure_token: overLimitToken })],
+    other_flights: [],
+  }, retrievedAt);
+  assert.deepEqual(outcome, { status: "no_eligible_outbound" });
+});
+
 test("selector source index remains tied to the filtered outbound candidate and retrieves its token", () => {
   const batch = projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ flights: [], departure_token: "dropped-token" }), rawResult({ price: 1400, departure_token: "token-A" }), rawResult({ price: 1100, departure_token: "token-B" })], other_flights: [] }, retrievedAt);
   assert.ok(batch);
@@ -148,6 +172,20 @@ test("sensitive raw fields never serialize from either batch", () => {
   assert.ok(outbound && returned);
   const serialized = JSON.stringify({ outbound, returned });
   for (const forbidden of ["token-1", "https://provider.example", "search-id", "metadata", "hostile", "departure_token"]) assert.equal(serialized.includes(forbidden), false, forbidden);
+});
+
+test("opaque departure tokens never appear in projected candidates or client-facing results", () => {
+  const longToken = `opaque-${"y".repeat(300)}`;
+  const outbound = projectSerpApiFlightInitialBatch({ best_flights: [rawResult({ departure_token: longToken })], other_flights: [] }, retrievedAt);
+  const returned = projectSerpApiFlightReturnBatch({ best_flights: [returnResult()], other_flights: [] }, retrievedAt);
+  assert.ok(outbound && returned);
+  const selected = selectSerpApiFlightRoundTrip({ outboundResults: outbound.candidates, request, returnOptionsForSelectedOutbound: returned.candidates });
+  assert.ok(selected);
+  const observation = normalizeSerpApiFlightPartyTotal(selected);
+  assert.ok(observation);
+  const serialized = JSON.stringify({ outbound, returned, observation });
+  assert.equal(serialized.includes(longToken), false);
+  assert.equal(serialized.includes("departure_token"), false);
 });
 
 test("outbound and return batches flow through selector and normalizer to a $1,736 observation", () => {
