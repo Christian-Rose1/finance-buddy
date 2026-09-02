@@ -1,5 +1,34 @@
 # Finance Buddy Current Handoff
 
+## 2026-09-01 City-Aware Flight Selection Contract v1
+
+Implemented and independently reviewed locally; no live SerpApi request,
+browser operation, database action, migration, or provider call was performed.
+
+- Flight selection retains strict airport-only endpoints and now accepts
+  documented `/m/...` and `/g/...` search identifiers only with non-empty,
+  unique, uppercase-IATA, bounded acceptable-airport scopes. Malformed,
+  duplicate, oversized, conflicting, and origin/destination-overlapping scopes
+  fail closed.
+- Outbound segments must match origin scope to destination scope, and return
+  segments validate the reverse direction. The normalizer receives the actual
+  selected segment airport endpoints, never a city search identifier or a
+  silently selected first scoped airport.
+- SerpApi Google Flights `roundTripPrice` remains the exact total for the
+  searched party. It is copied without multiplication, division, or inferred
+  per-traveler pricing. Normalized output excludes provider metadata, URLs,
+  opaque tokens, and search IDs.
+- Freebuff's read-only adversarial review found no blocking defects. Duplicate
+  scope rejection is intentional for this contract.
+- Verification: focused selection test (19), relevant flight tests (51), and
+  `npm test` (885) passed; `npx tsc --noEmit`, `npm run build`, and `git diff
+  --check` passed. The existing unrelated Next.js `<img>` warning in
+  `components/receipt-upload-panel.tsx` remains.
+
+Live provider acceptance of city IDs and live returned-airport behavior remain
+unverified. This milestone supplies safe local selection only; it does not
+establish availability, bookability, or customer verification.
+
 ## 2026-08-28 SerpApi Price-Coverage Interpretation Correction (authoritative)
 
 The 2026-08-28 bounded SerpApi price-coverage proof is reinterpreted before any

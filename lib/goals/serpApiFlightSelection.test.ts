@@ -64,8 +64,9 @@ function returnResult(overrides: Partial<SerpApiFlightSelectionResult> = {}): Se
 function input(
   outboundResults: readonly SerpApiFlightSelectionResult[] = [outboundResult()],
   returnOptionsForSelectedOutbound: readonly SerpApiFlightSelectionResult[] = [returnResult()],
+  selectedRequest: SerpApiFlightSelectionRequest = request,
 ): SerpApiFlightSelectionInput {
-  return { outboundResults, request, returnOptionsForSelectedOutbound };
+  return { outboundResults, request: selectedRequest, returnOptionsForSelectedOutbound };
 }
 
 test("validates exact requests and maps all supported cabins", () => {
@@ -75,6 +76,123 @@ test("validates exact requests and maps all supported cabins", () => {
     ["1", "2", "3", "4"],
   );
   assert.equal(serpApiTravelClassForCabin(" premium_economy"), null);
+});
+
+test("accepts airport-only DEN to CDG requests unchanged", () => {
+  const airportRequest = { ...request, origin: "DEN", destination: "CDG" };
+  assert.equal(isValidSerpApiFlightSelectionRequest(airportRequest), true);
+  assert.ok(selectSerpApiFlightRoundTrip(input(
+    [outboundResult({ segments: [rawSegment("DEN", "2027-04-03 08:00", "CDG", "2027-04-03 20:00")] })],
+    [returnResult({ segments: [rawSegment("CDG", "2027-04-12 09:00", "DEN", "2027-04-12 11:30")] })],
+    airportRequest,
+  )));
+});
+
+test("accepts city scopes for CDG or ORY and rejects LHR", () => {
+  const parisRequest = { ...request, destination: "/m/05qtj", destinationAirportIds: ["CDG", "ORY"] };
+  for (const airport of ["CDG", "ORY"]) {
+    assert.ok(selectSerpApiFlightOutbound([outboundResult({ segments: [rawSegment("JFK", "2027-04-03 08:00", airport, "2027-04-03 20:00")] })], parisRequest));
+  }
+  assert.equal(selectSerpApiFlightOutbound([outboundResult({ segments: [rawSegment("JFK", "2027-04-03 08:00", "LHR", "2027-04-03 20:00")] })], parisRequest), null);
+});
+
+test("reverses city scopes for return selection and returns actual outbound endpoints", () => {
+  const parisRequest = { ...request, destination: "/m/05qtj", destinationAirportIds: ["CDG", "ORY"] };
+  const result = selectSerpApiFlightRoundTrip(input(
+    [outboundResult({ segments: [rawSegment("JFK", "2027-04-03 08:00", "ORY", "2027-04-03 20:00")] })],
+    [returnResult({ segments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")] })],
+    parisRequest,
+  ));
+  assert.ok(result);
+  assert.equal(result.origin, "JFK");
+  assert.equal(result.destination, "ORY");
+  assert.equal((result.returnSegments as Array<Record<string, unknown>>)[0].departureAirport, "CDG");
+  assert.notEqual(result.destination, "/m/05qtj");
+});
+
+test("accepts /g/ city identifiers with a valid scope", () => {
+  const cityRequest = { ...request, destination: "/g/example", destinationAirportIds: ["CDG"] };
+  assert.equal(isValidSerpApiFlightSelectionRequest(cityRequest), true);
+  assert.ok(selectSerpApiFlightOutbound([outboundResult()], cityRequest));
+});
+
+test("uses multi-airport city scopes at both outbound endpoints", () => {
+  const cityRequest = {
+    ...request,
+    origin: "/m/new-york",
+    originAirportIds: ["JFK", "EWR"],
+    destination: "/g/paris",
+    destinationAirportIds: ["CDG", "ORY"],
+  };
+  const valid = selectSerpApiFlightRoundTrip(input(
+    [outboundResult({ segments: [rawSegment("EWR", "2027-04-03 08:00", "ORY", "2027-04-03 20:00")] })],
+    [returnResult({ segments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")] })],
+    cityRequest,
+  ));
+  assert.ok(valid);
+  assert.equal(valid.origin, "EWR");
+  assert.equal(valid.destination, "ORY");
+
+  assert.equal(selectSerpApiFlightRoundTrip(input(
+    [outboundResult({ segments: [rawSegment("BOS", "2027-04-03 08:00", "ORY", "2027-04-03 20:00")] })],
+    [returnResult({ segments: [rawSegment("CDG", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")] })],
+    cityRequest,
+  )), null);
+  assert.equal(selectSerpApiFlightRoundTrip(input(
+    [outboundResult({ segments: [rawSegment("EWR", "2027-04-03 08:00", "ORY", "2027-04-03 20:00")] })],
+    [returnResult({ segments: [rawSegment("LHR", "2027-04-12 09:00", "JFK", "2027-04-12 11:30")] })],
+    cityRequest,
+  )), null);
+});
+
+test("requires valid city scopes and rejects malformed scopes", () => {
+  const invalidRequests: unknown[] = [
+    { ...request, destination: "/m/05qtj" },
+    { ...request, destination: "/m/05qtj", destinationAirportIds: [] },
+    { ...request, destination: "/m/05qtj", destinationAirportIds: "CDG" },
+    { ...request, destination: "/m/05qtj", destinationAirportIds: ["cdg"] },
+    { ...request, destination: "/m/05qtj", destinationAirportIds: ["CDG", "CDG"] },
+    { ...request, destination: "/m/05qtj", destinationAirportIds: ["CDG", "ORY", ...Array(11).fill("BOS")] },
+    { ...request, destination: "not-a-location", destinationAirportIds: ["CDG"] },
+  ];
+  for (const invalid of invalidRequests) assert.equal(isValidSerpApiFlightSelectionRequest(invalid), false);
+});
+
+test("requires airport scopes to be exactly their search airport and rejects overlap", () => {
+  assert.equal(
+    isValidSerpApiFlightSelectionRequest({ ...request, originAirportIds: ["JFK", "BOS"] }),
+    false,
+  );
+  assert.equal(
+    isValidSerpApiFlightSelectionRequest({ ...request, destinationAirportIds: ["CDG", "ORY"] }),
+    false,
+  );
+  assert.equal(
+    isValidSerpApiFlightSelectionRequest({ ...request, originAirportIds: ["BOS"] }),
+    false,
+  );
+  assert.equal(
+    isValidSerpApiFlightSelectionRequest({ ...request, destinationAirportIds: ["ORY"] }),
+    false,
+  );
+  assert.equal(
+    isValidSerpApiFlightSelectionRequest({
+      ...request,
+      originAirportIds: ["JFK"],
+      destinationAirportIds: ["JFK"],
+    }),
+    false,
+  );
+  assert.equal(
+    isValidSerpApiFlightSelectionRequest({
+      ...request,
+      origin: "/m/origin",
+      originAirportIds: ["JFK"],
+      destination: "/g/destination",
+      destinationAirportIds: ["JFK"],
+    }),
+    false,
+  );
 });
 
 test("rejects impossible or malformed request values without normalization", () => {
@@ -230,4 +348,15 @@ test("excludes opaque tokens, URLs, search IDs, and metadata from returned norma
     "roundTripPrice",
     "travelers",
   ]);
+});
+
+test("does not mutate request scope arrays or result inputs", () => {
+  const destinationAirportIds = ["CDG", "ORY"];
+  const cityRequest = { ...request, destination: "/m/05qtj", destinationAirportIds };
+  const results = [outboundResult()];
+  const beforeRequest = JSON.stringify(cityRequest);
+  const beforeResults = JSON.stringify(results);
+  assert.ok(selectSerpApiFlightOutbound(results, cityRequest));
+  assert.equal(JSON.stringify(cityRequest), beforeRequest);
+  assert.equal(JSON.stringify(results), beforeResults);
 });
