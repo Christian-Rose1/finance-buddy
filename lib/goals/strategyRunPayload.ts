@@ -1,5 +1,6 @@
 import type { StrategyAwardOption, StrategyCardOffer, StrategySource } from "./strategyTypes";
 import type { InterpretedResearch } from "./researchInterpreter";
+import { projectFlightPlanningEstimate } from "./flightPlanningEstimate";
 
 export type StrategyRunPayloadStage = "flight" | "hotel";
 
@@ -15,7 +16,6 @@ export class StrategyRunPayloadError extends Error {
     this.name = "StrategyRunPayloadError";
   }
 }
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -116,6 +116,7 @@ function validateStringArray(values: unknown): string[] {
   }
   return values.map((v) => validateString(v));
 }
+
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -467,6 +468,7 @@ const INTERPRETED_KEYS = new Set([
   "sources",
   "assumptions",
   "warnings",
+  "flightPlanningEstimate",
 ]);
 
 /**
@@ -527,6 +529,10 @@ export function validateStrategyRunStagePayload(
   }
   const warnings = interpreted.warnings.map((s: unknown) => validateString(s));
 
+  const flightPlanningEstimate = interpreted.flightPlanningEstimate === undefined || interpreted.flightPlanningEstimate === null
+    ? null
+    : projectFlightPlanningEstimate(interpreted.flightPlanningEstimate) ?? safeThrow();
+
   // Cross-reference: each option.sourceId must match a source
   validateSourceReferences(awardOptions, sources);
 
@@ -539,6 +545,7 @@ export function validateStrategyRunStagePayload(
       sources,
       assumptions,
       warnings,
+      flightPlanningEstimate,
     },
   };
 }

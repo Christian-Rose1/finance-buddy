@@ -160,7 +160,15 @@ export async function generateGoalFlightStageAction(
       };
     }
 
-    const envelope = buildStrategyRunStagePayload("flight", interpreted.value);
+    let estimate = null;
+    try {
+      estimate = dependencies.createFlightPlanningEstimate
+        ? await dependencies.createFlightPlanningEstimate(context.goal)
+        : null;
+    } catch {
+      estimate = null;
+    }
+    const envelope = buildStrategyRunStagePayload("flight", { ...interpreted.value, flightPlanningEstimate: estimate });
     await saveGoalStrategyRunStage(runId, goalId, userId, "flight", envelope, supabase);
 
     return {

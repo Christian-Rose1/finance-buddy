@@ -180,6 +180,27 @@ test("actual action partial failures retain siblings; all failures mark once wit
   assert.equal(failedDb.events.includes("stage-saved"), false);
 });
 
+test("rejected planning estimate remains best-effort after successful flight research", async () => {
+  const db = new RunDatabase();
+  const mock = mocks(db);
+  const dependencies = {
+    ...mock.dependencies,
+    createFlightPlanningEstimate: async () => { throw new Error("synthetic estimate failure"); },
+  };
+  await withStrategyStageActionDependenciesForTest(dependencies, async () => {
+    const flight = await generateGoalFlightStageAction("owned-goal");
+    assert.equal(flight.success, true);
+    assert.equal(flight.success && flight.stageStatus, "succeeded");
+    assert.equal(db.row?.flight_status, "succeeded");
+    assert.equal(db.row?.final_status, "pending");
+    const payload = JSON.parse(db.row?.flight_payload as string) as { interpreted: { flightPlanningEstimate: unknown } };
+    assert.equal(payload.interpreted.flightPlanningEstimate, null);
+    const runId = flight.success ? flight.runId : "";
+    const hotel = await generateGoalHotelStageAction("owned-goal", runId);
+    assert.equal(hotel.success && hotel.stageStatus, "succeeded");
+  });
+});
+
 test("actual hotel all-query failure marks failed once without retry", async () => {
   const db = new RunDatabase();
   let fail = false;

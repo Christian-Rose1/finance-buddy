@@ -5,6 +5,7 @@ import type {
   StrategyAwardOption,
   TravelEvidenceLevel,
 } from "./strategyTypes";
+import { projectFlightPlanningEstimate } from "./flightPlanningEstimate";
 
 export function evidenceLevelOf(option: Pick<StrategyAwardOption, "evidenceLevel">): TravelEvidenceLevel {
   return option.evidenceLevel ?? "planning_benchmark";
@@ -180,6 +181,7 @@ export function toClientSafeStrategy(strategy: PersonalizedStrategy): Personaliz
       : strategy.recommendedAwardOptionId,
     currentCashOptions: toClientSafeCashOptions(strategy.currentCashOptions),
     customerVerifiedOptions: strategy.customerVerifiedOptions ?? [],
+    flightPlanningEstimate: projectFlightPlanningEstimate(strategy.flightPlanningEstimate),
   };
 }
 
