@@ -146,6 +146,17 @@ test("get maps a valid row to SavedGoalStrategy", async () => {
   assert.equal(result.strategy.feasibility, "on_track");
 });
 
+test("get preserves a valid saved strategy while omitting its malformed estimate", async () => {
+  const strategy = validStrategy();
+  strategy.flightPlanningEstimate = { total: 1_000_001, rawProviderPayload: "hostile" } as never;
+  const { client } = mockClient({ data: validRow({ strategy_json: strategy }), error: null });
+  const result = await getLatestStrategyForGoal("goal-1", "user-1", client);
+  assert.ok(result);
+  assert.equal(result.strategy.headline, strategy.headline);
+  assert.equal(result.strategy.flightPlanningEstimate, null);
+  assert.equal(JSON.stringify(result.strategy).includes("rawProviderPayload"), false);
+});
+
 test("get rejects an unsupported schema version safely", async () => {
   const { client } = mockClient({
     data: validRow({ schema_version: 2 }),

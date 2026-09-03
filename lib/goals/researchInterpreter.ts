@@ -5,6 +5,7 @@ import type {
   StrategyCardOffer,
   StrategySource,
 } from "./strategyTypes";
+import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
 
 export interface InterpretedResearch {
   awardOptions: StrategyAwardOption[];
@@ -12,6 +13,7 @@ export interface InterpretedResearch {
   sources: StrategySource[];
   assumptions: string[];
   warnings: string[];
+  flightPlanningEstimate?: FlightPlanningEstimate | null;
 }
 
 export interface ResearchRewardProgram {

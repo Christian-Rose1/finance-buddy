@@ -1,4 +1,5 @@
 import type { Goal, RewardAccount } from "./types";
+import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
 
 export type StrategyDataStatus =
   | "live"
@@ -220,6 +221,7 @@ export interface PersonalizedStrategy {
   /** Empty until a future server-side provider adapter returns validated cash evidence. */
   currentCashOptions?: PublicExactCashCandidate[];
   customerVerifiedOptions?: CustomerVerifiedTravelOption[];
+  flightPlanningEstimate?: FlightPlanningEstimate | null;
 }
 
 /**

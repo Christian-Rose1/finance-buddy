@@ -1,5 +1,34 @@
 # Finance Buddy Current Handoff
 
+## 2026-09-03 Flight Planning Estimate Trust-Boundary Repair
+
+Implemented locally on the uncommitted authenticated SerpApi Flight Planning
+Estimate v1 work. One shared strict contract now reconstructs estimates for
+signed stage validation and persisted/client-safe projection. Signed malformed
+estimates reject the envelope; malformed, hostile, incoherent, or unsupported
+persisted estimates are omitted without failing the saved strategy. The same
+projection is repeated at customer presentation as defense in depth.
+
+Unknown labels are limited to the seven server-owned lane labels and copied in
+canonical order with duplicates rejected. Both directions require consecutive
+sequence numbers, airport continuity, chronological non-overlap, correct first
+departure dates, ordered trip dates, and correct endpoints; overnight arrivals
+remain valid. Provider/client behavior, other evidence lanes, narrative gates,
+database schema, and UI behavior were not changed.
+
+Final projection hardening caps the searched-party total at the established
+SerpApi maximum of 1,000,000, requires explicit segment cabins to match the
+requested cabin case-insensitively, and prevents the return from departing
+before the outbound journey finishes. The public projector is total: hostile
+accessors and revoked proxies return `null`. Signed payloads still reject that
+result, while saved-strategy loading and presentation omit only the estimate.
+An estimate dependency failure after successful flight research remains
+best-effort and does not prevent the signed flight stage from succeeding.
+
+No live provider, browser, database, migration, commit, push, deploy, or secret
+inspection was performed. See the completion report for the final local test,
+typecheck, build, and diff results.
+
 ## 2026-09-02 SerpApi Departure-Token Compatibility Correction
 
 The bounded departure-token maximum is now 1024 characters. This finite cap is
