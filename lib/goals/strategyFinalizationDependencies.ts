@@ -1,13 +1,42 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { saveLatestStrategy } from "./strategyRepository";
+import { prepareGoalStrategyContext } from "./strategyActionContext";
+import { generateAutomatedStrategyFromResearchStages } from "./automatedStrategyPlanner";
+import {
+  commitGoalStrategyRunFinalization,
+  failGoalStrategyRunFinalization,
+  getGoalStrategyRun,
+  loadVerifiedGoalStrategyRunStage,
+  recoverGoalStrategyRunFinalizationStart,
+  startGoalStrategyRunFinalization,
+} from "./strategyRunRepository";
+import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
 
 export interface StrategyFinalizationDependencies {
-  saveLatestStrategy: typeof saveLatestStrategy;
+  prepareContext: typeof prepareGoalStrategyContext;
+  createFenceExecutor: () => Promise<StrategyStageFenceRpcExecutor>;
+  getRun: typeof getGoalStrategyRun;
+  startFinalization: typeof startGoalStrategyRunFinalization;
+  recoverStart: typeof recoverGoalStrategyRunFinalizationStart;
+  loadStage: typeof loadVerifiedGoalStrategyRunStage;
+  generateStrategy: typeof generateAutomatedStrategyFromResearchStages;
+  commitFinalization: typeof commitGoalStrategyRunFinalization;
+  failFinalization: typeof failGoalStrategyRunFinalization;
+  finalizationDeadlineMs?: number;
+  cleanupDeadlineMs?: number;
 }
 
 const productionDependencies: StrategyFinalizationDependencies = Object.freeze({
-  saveLatestStrategy,
+  prepareContext: prepareGoalStrategyContext,
+  createFenceExecutor: async () =>
+    (await import("./strategyStageFenceRpcExecutor")).createStrategyStageFenceRpcExecutor(),
+  getRun: getGoalStrategyRun,
+  startFinalization: startGoalStrategyRunFinalization,
+  recoverStart: recoverGoalStrategyRunFinalizationStart,
+  loadStage: loadVerifiedGoalStrategyRunStage,
+  generateStrategy: generateAutomatedStrategyFromResearchStages,
+  commitFinalization: commitGoalStrategyRunFinalization,
+  failFinalization: failGoalStrategyRunFinalization,
 });
 
 const testOverrides = new AsyncLocalStorage<StrategyFinalizationDependencies>();

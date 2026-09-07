@@ -337,6 +337,7 @@ export interface SanitizedStrategyPrompt {
 
 export interface StrategyProvider {
   generateStrategy(
-    prompt: SanitizedStrategyPrompt
+    prompt: SanitizedStrategyPrompt,
+    options?: { signal?: AbortSignal },
   ): Promise<PersonalizedStrategyNarrative>;
 }

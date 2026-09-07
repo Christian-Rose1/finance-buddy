@@ -23,12 +23,17 @@ import { ResearchInterpreterError } from "./researchInterpreter";
 import type { InterpretedResearch } from "./researchInterpreter";
 import {
   createGoalStrategyRun,
-  deleteGoalStrategyRun,
   getGoalStrategyRun,
   loadVerifiedGoalStrategyRunStage,
   failGoalStrategyRunStage,
+  recoverGoalStrategyRunStageStart,
   saveGoalStrategyRunStage,
-  updateGoalStrategyRunFinalStatus,
+  type VerifiedRunningResearchStage,
+  type RecoverableResearchStageStart,
+  type VerifiedFinalizationAttempt,
+  type RecoverableFinalizationStart,
+  StrategyRunStageSaveDeadlineError,
+  StrategyRunFinalizationDeadlineError,
 } from "./strategyRunRepository";
 import {
   buildStrategyRunStagePayload,
@@ -44,8 +49,19 @@ import type { VerifiedStageQueryExecutor } from "./providerExecutionGateway";
 import { startVerifiedResearchStageExecution } from "./authenticatedStageExecution";
 import { getStrategyStageActionDependencies } from "./strategyStageActionDependencies";
 import { getStrategyFinalizationDependencies } from "./strategyFinalizationDependencies";
-import { persistFinalizedStrategy } from "./finalizedStrategyPersistence";
+import { getStrategyDeletionDependencies } from "./strategyDeletionDependencies";
 import type { ResearchInterpreter } from "./researchInterpreter";
+import { logFlightPlanningEstimateDiagnostic } from "./flightPlanningEstimate";
+import {
+  runWithStrategyResearchStageDeadline,
+  runWithStrategyResearchStageCleanupDeadline,
+  StrategyResearchStageDeadlineError,
+} from "./strategyStageDeadline";
+import {
+  runWithStrategyFinalizationDeadline,
+  runWithStrategyFinalizationCleanupDeadline,
+  StrategyFinalizationDeadlineError,
+} from "./strategyFinalizationDeadline";
 
 export type GenerateGoalStrategyResult =
   | {
@@ -87,6 +103,41 @@ export type GoalResearchStageResult =
       message: string;
     };
 
+export type DeleteGoalStrategyResult =
+  | { success: true }
+  | { success: false; message: string };
+
+const DELETE_STRATEGY_FAILURE_MESSAGE =
+  "We couldn't delete your strategy right now. Your saved plan is unchanged.";
+
+/**
+ * Delete only the signed-in customer's saved strategy. The browser supplies
+ * no user ID, run authority, recovery token, or strategy data.
+ */
+export async function deleteGoalStrategyAction(
+  goalId: string,
+): Promise<DeleteGoalStrategyResult> {
+  if (typeof goalId !== "string" || goalId.trim().length === 0) {
+    return { success: false, message: DELETE_STRATEGY_FAILURE_MESSAGE };
+  }
+  try {
+    const dependencies = getStrategyDeletionDependencies();
+    const supabase = await dependencies.createServerClient();
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    if (userError || !userData.user) {
+      return { success: false, message: DELETE_STRATEGY_FAILURE_MESSAGE };
+    }
+
+    // Privileged execution is created only after cookie-aware authentication;
+    // ownership is always the server-derived session user.
+    const fenceExecutor = await dependencies.createFenceExecutor();
+    await dependencies.deleteStrategy(goalId, userData.user.id, fenceExecutor);
+    return { success: true };
+  } catch {
+    return { success: false, message: DELETE_STRATEGY_FAILURE_MESSAGE };
+  }
+}
+
 const FLIGHT_STAGE_FAILED_MESSAGE =
   "Flight recommendations could not be generated from the available research.";
 const HOTEL_STAGE_FAILED_MESSAGE =
@@ -102,9 +153,14 @@ const STRATEGY_RUN_UNAVAILABLE_MESSAGE =
  * userId, balances, wallet data, purchases, context, and catalogs are never
  * returned.
  */
+
 export async function generateGoalFlightStageAction(
   goalId: string
 ): Promise<GoalResearchStageResult> {
+  const deadlineState: { handler: null | (() => Promise<GoalResearchStageResult>) } = { handler: null };
+  const uncertainStartState: { cleanup: null | (() => Promise<void>) } = { cleanup: null };
+  let createdRunId: string | null = null;
+  let createdGoalId: string | null = null;
   try {
     const dependencies = getStrategyStageActionDependencies();
     const preparedResult = await dependencies.prepareContext(goalId);
@@ -121,31 +177,70 @@ export async function generateGoalFlightStageAction(
       catalogRewardPrograms,
     } = preparedResult.prepared;
 
+    const fenceExecutor = await dependencies.createFenceExecutor();
+
     const run = await createGoalStrategyRun(goalId, userId, supabase);
     const runId = run.id;
+    createdRunId = runId;
+    createdGoalId = run.goalId;
     const expiresAt = run.expiresAt;
+    const outcome = await runWithStrategyResearchStageDeadline(async (signal) => {
+      const started = await startVerifiedResearchStageExecution(
+        runId,
+        goalId,
+        userId,
+        "flight",
+        dependencies.createProvider(),
+        supabase,
+        fenceExecutor,
+        signal,
+        (recovery) => {
+          uncertainStartState.cleanup = () => boundedUncertainStartRecovery(
+            recovery, fenceExecutor, dependencies,
+          );
+          deadlineState.handler = () => terminalDeadlineFailure(
+            "flight", runId, goalId, expiresAt, null, recovery, supabase, fenceExecutor, dependencies,
+          );
+        },
+      );
+      uncertainStartState.cleanup = null;
+      deadlineState.handler = () => terminalDeadlineFailure(
+        "flight", runId, goalId, expiresAt, started.runningStage, null, supabase, fenceExecutor, dependencies,
+      );
 
-    const executor = await startVerifiedResearchStageExecution(
-      runId,
-      goalId,
-      userId,
-      "flight",
-      dependencies.createProvider(),
-      supabase,
-    );
+      const interpreted = await runFlightStageResearch(
+        started.runningStage,
+        started.executor,
+        dependencies.createInterpreter(),
+        supabase,
+        fenceExecutor,
+        context,
+        catalogRewardPrograms,
+        signal,
+        runId,
+        goalId,
+      );
 
-    const interpreted = await runFlightStageResearch(
-      runId,
-      goalId,
-      userId,
-      executor,
-      dependencies.createInterpreter(),
-      supabase,
-      context,
-      catalogRewardPrograms
-    );
+      if (interpreted.kind === "failed") return { kind: "failed" as const };
 
-    if (interpreted.kind === "failed") {
+      let estimate = null;
+      try {
+        estimate = dependencies.createFlightPlanningEstimate
+          ? await dependencies.createFlightPlanningEstimate(context.goal)
+          : null;
+      } catch {
+        logFlightPlanningEstimateDiagnostic("unexpected_estimate_dependency_failure");
+        estimate = null;
+      }
+      if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+      const envelope = buildStrategyRunStagePayload("flight", { ...interpreted.value, flightPlanningEstimate: estimate });
+      if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+      await dependencies.saveStage(started.runningStage, envelope, supabase, fenceExecutor, signal);
+      if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+      return { kind: "succeeded" as const, envelope };
+    }, dependencies.stageDeadlineMs);
+
+    if (outcome.kind === "failed") {
       return {
         success: true,
         runId,
@@ -160,16 +255,7 @@ export async function generateGoalFlightStageAction(
       };
     }
 
-    let estimate = null;
-    try {
-      estimate = dependencies.createFlightPlanningEstimate
-        ? await dependencies.createFlightPlanningEstimate(context.goal)
-        : null;
-    } catch {
-      estimate = null;
-    }
-    const envelope = buildStrategyRunStagePayload("flight", { ...interpreted.value, flightPlanningEstimate: estimate });
-    await saveGoalStrategyRunStage(runId, goalId, userId, "flight", envelope, supabase);
+    const envelope = outcome.envelope;
 
     return {
       success: true,
@@ -183,8 +269,21 @@ export async function generateGoalFlightStageAction(
       warnings: envelope.interpreted.warnings,
       message: null,
     };
-  } catch {
-    return genericStageFailure("flight");
+  } catch (error) {
+    if (
+      error instanceof StrategyResearchStageDeadlineError ||
+      error instanceof StrategyRunStageSaveDeadlineError
+    ) {
+      return deadlineState.handler ? await deadlineState.handler() : genericStageFailure("flight", createdRunId, createdGoalId);
+    }
+    if (uncertainStartState.cleanup) {
+      await uncertainStartState.cleanup();
+      if (process.env.STRATEGY_DEBUG === "1") {
+        console.error("[strategy-stage-error]", JSON.stringify({ stage: "flight", runId: createdRunId, goalId: createdGoalId, category: "stage_start_recovery_failure" }));
+      }
+      return safeOuterStageFailure();
+    }
+    return genericStageFailure("flight", createdRunId, createdGoalId);
   }
 }
 
@@ -196,6 +295,8 @@ export async function generateGoalHotelStageAction(
   goalId: string,
   runId: string
 ): Promise<GoalResearchStageResult> {
+  const deadlineState: { handler: null | (() => Promise<GoalResearchStageResult>) } = { handler: null };
+  const uncertainStartState: { cleanup: null | (() => Promise<void>) } = { cleanup: null };
   try {
     if (typeof runId !== "string" || runId.trim().length === 0) {
       return { success: false, message: "A valid strategy run is required." };
@@ -215,6 +316,8 @@ export async function generateGoalHotelStageAction(
       catalogRewardPrograms,
     } = preparedResult.prepared;
 
+    const fenceExecutor = await dependencies.createFenceExecutor();
+
     const run = await getGoalStrategyRun(runId, goalId, userId, supabase);
     if (!run) {
       return { success: false, message: "We couldn't find that strategy run." };
@@ -226,28 +329,53 @@ export async function generateGoalHotelStageAction(
         message: "The flight research stage is not complete.",
       };
     }
+    const outcome = await runWithStrategyResearchStageDeadline(async (signal) => {
+      const started = await startVerifiedResearchStageExecution(
+        runId,
+        goalId,
+        userId,
+        "hotel",
+        dependencies.createProvider(),
+        supabase,
+        fenceExecutor,
+        signal,
+        (recovery) => {
+          uncertainStartState.cleanup = () => boundedUncertainStartRecovery(
+            recovery, fenceExecutor, dependencies,
+          );
+          deadlineState.handler = () => terminalDeadlineFailure(
+            "hotel", runId, goalId, run.expiresAt, null, recovery, supabase, fenceExecutor, dependencies,
+          );
+        },
+      );
+      uncertainStartState.cleanup = null;
+      deadlineState.handler = () => terminalDeadlineFailure(
+        "hotel", runId, goalId, run.expiresAt, started.runningStage, null, supabase, fenceExecutor, dependencies,
+      );
 
-    const executor = await startVerifiedResearchStageExecution(
-      runId,
-      goalId,
-      userId,
-      "hotel",
-      dependencies.createProvider(),
-      supabase,
-    );
+      const interpreted = await runHotelStageResearch(
+        started.runningStage,
+        started.executor,
+        dependencies.createInterpreter(),
+        supabase,
+        fenceExecutor,
+        context,
+        catalogRewardPrograms,
+        signal,
+        runId,
+        goalId,
+      );
 
-    const interpreted = await runHotelStageResearch(
-      runId,
-      goalId,
-      userId,
-      executor,
-      dependencies.createInterpreter(),
-      supabase,
-      context,
-      catalogRewardPrograms
-    );
+      if (interpreted.kind === "failed") return { kind: "failed" as const };
+      if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+      const envelope = buildStrategyRunStagePayload("hotel", interpreted.value);
+      if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+      await dependencies.saveStage(started.runningStage, envelope, supabase, fenceExecutor, signal);
+      if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+      return { kind: "succeeded" as const, envelope };
+    }, dependencies.stageDeadlineMs);
 
-    if (interpreted.kind === "failed") {
+    if (outcome.kind === "failed") {
       return {
         success: true,
         runId,
@@ -262,8 +390,7 @@ export async function generateGoalHotelStageAction(
       };
     }
 
-    const envelope = buildStrategyRunStagePayload("hotel", interpreted.value);
-    await saveGoalStrategyRunStage(runId, goalId, userId, "hotel", envelope, supabase);
+    const envelope = outcome.envelope;
 
     return {
       success: true,
@@ -277,8 +404,21 @@ export async function generateGoalHotelStageAction(
       warnings: envelope.interpreted.warnings,
       message: null,
     };
-  } catch {
-    return genericStageFailure("hotel");
+  } catch (error) {
+    if (
+      error instanceof StrategyResearchStageDeadlineError ||
+      error instanceof StrategyRunStageSaveDeadlineError
+    ) {
+      return deadlineState.handler ? await deadlineState.handler() : genericStageFailure("hotel", runId, goalId);
+    }
+    if (uncertainStartState.cleanup) {
+      await uncertainStartState.cleanup();
+      if (process.env.STRATEGY_DEBUG === "1") {
+        console.error("[strategy-stage-error]", JSON.stringify({ stage: "hotel", runId, goalId, category: "stage_start_recovery_failure" }));
+      }
+      return safeOuterStageFailure();
+    }
+    return genericStageFailure("hotel", runId, goalId);
   }
 }
 
@@ -290,19 +430,87 @@ type StageResearchResult =
   | { kind: "succeeded"; value: Awaited<ReturnType<typeof generateFlightResearchStage>> }
   | { kind: "failed" };
 
+async function boundedUncertainStartRecovery(
+  recovery: RecoverableResearchStageStart,
+  fenceExecutor: Parameters<typeof recoverGoalStrategyRunStageStart>[1],
+  dependencies: ReturnType<typeof getStrategyStageActionDependencies>,
+): Promise<void> {
+  try {
+    await runWithStrategyResearchStageCleanupDeadline(
+      (signal) => dependencies.recoverStageStart(recovery, fenceExecutor, signal),
+      dependencies.stageCleanupDeadlineMs,
+    );
+  } catch {
+    // Lost-response recovery is best-effort and never exposes RPC details.
+  }
+}
+
+async function terminalDeadlineFailure(
+  stage: "flight" | "hotel",
+  runId: string,
+  goalId: string | null,
+  expiresAt: string,
+  runningStage: VerifiedRunningResearchStage | null,
+  recoverableStart: RecoverableResearchStageStart | null,
+  supabase: Parameters<typeof failGoalStrategyRunStage>[1],
+  fenceExecutor: Parameters<typeof failGoalStrategyRunStage>[2],
+  dependencies: ReturnType<typeof getStrategyStageActionDependencies>,
+): Promise<GoalResearchStageResult> {
+  if (process.env.STRATEGY_DEBUG === "1") {
+    console.error("[strategy-stage-timeout]", JSON.stringify({ stage, runId, goalId, category: "stage_timeout" }));
+  }
+  try {
+    const outcome = await runWithStrategyResearchStageCleanupDeadline(
+      (signal) => runningStage
+        ? dependencies.failStage(runningStage, supabase, fenceExecutor, signal)
+        : recoverableStart
+          ? dependencies.recoverStageStart(recoverableStart, fenceExecutor, signal)
+          : Promise.reject(new Error("Stage cleanup unavailable.")),
+      dependencies.stageCleanupDeadlineMs,
+    );
+    if (outcome === "succeeded") return safeOuterStageFailure();
+  } catch {
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.error("[strategy-stage-error]", JSON.stringify({ stage, runId, goalId, category: "stage_start_recovery_failure" }));
+    }
+    return safeOuterStageFailure();
+  }
+  return {
+    success: true,
+    runId,
+    expiresAt,
+    stage,
+    stageStatus: "failed",
+    options: [],
+    sources: [],
+    assumptions: [],
+    warnings: [],
+    message: stage === "flight" ? FLIGHT_STAGE_FAILED_MESSAGE : HOTEL_STAGE_FAILED_MESSAGE,
+  };
+}
+
+function safeOuterStageFailure(): GoalResearchStageResult {
+  return {
+    success: false,
+    message: "We couldn't complete this strategy stage right now. Please try again.",
+  };
+}
+
 /**
  * Runs the flight research stage, isolating ResearchInterpreterError as a
  * non-fatal stage failure. The caught error is never exposed.
  */
 async function runFlightStageResearch(
-  runId: string,
-  goalId: string,
-  userId: string,
+  runningStage: VerifiedRunningResearchStage,
   executor: VerifiedStageQueryExecutor,
   interpreter: ResearchInterpreter,
-  supabase: Parameters<typeof saveGoalStrategyRunStage>[5],
+  supabase: Parameters<typeof saveGoalStrategyRunStage>[2],
+  fenceExecutor: Parameters<typeof saveGoalStrategyRunStage>[3],
   context: Parameters<typeof generateFlightResearchStage>[0],
-  catalogRewardPrograms: Parameters<typeof generateFlightResearchStage>[1]
+  catalogRewardPrograms: Parameters<typeof generateFlightResearchStage>[1],
+  signal: AbortSignal,
+  runId: string,
+  goalId: string,
 ): Promise<StageResearchResult> {
   try {
     const interpreted = await generateFlightResearchStage(
@@ -312,11 +520,19 @@ async function runFlightStageResearch(
     );
     return { kind: "succeeded", value: interpreted };
   } catch (err) {
+    if (signal.aborted) throw new StrategyResearchStageDeadlineError();
     if (err instanceof ResearchInterpreterError) {
       try {
-        await failGoalStrategyRunStage(runId, goalId, userId, "flight", supabase);
+        await failGoalStrategyRunStage(runningStage, supabase, fenceExecutor);
       } catch {
-        // Best-effort: do not expose a marking-failed error.
+        if (process.env.STRATEGY_DEBUG === "1") {
+          console.error("[strategy-stage-error]", JSON.stringify({ stage: "flight", runId, goalId, category: "stage_marking_failed" }));
+        }
+      }
+      if (process.env.STRATEGY_DEBUG === "1") {
+        console.error("[strategy-stage-error]", JSON.stringify({
+          stage: "flight", runId, goalId, category: "research_stage_failed",
+        }));
       }
       return { kind: "failed" };
     }
@@ -329,14 +545,16 @@ async function runFlightStageResearch(
  * non-fatal stage failure. The caught error is never exposed.
  */
 async function runHotelStageResearch(
-  runId: string,
-  goalId: string,
-  userId: string,
+  runningStage: VerifiedRunningResearchStage,
   executor: VerifiedStageQueryExecutor,
   interpreter: ResearchInterpreter,
-  supabase: Parameters<typeof saveGoalStrategyRunStage>[5],
+  supabase: Parameters<typeof saveGoalStrategyRunStage>[2],
+  fenceExecutor: Parameters<typeof saveGoalStrategyRunStage>[3],
   context: Parameters<typeof generateHotelResearchStage>[0],
-  catalogRewardPrograms: Parameters<typeof generateHotelResearchStage>[1]
+  catalogRewardPrograms: Parameters<typeof generateHotelResearchStage>[1],
+  signal: AbortSignal,
+  runId: string,
+  goalId: string,
 ): Promise<StageResearchResult> {
   try {
     const interpreted = await generateHotelResearchStage(
@@ -346,11 +564,19 @@ async function runHotelStageResearch(
     );
     return { kind: "succeeded", value: interpreted };
   } catch (err) {
+    if (signal.aborted) throw new StrategyResearchStageDeadlineError();
     if (err instanceof ResearchInterpreterError) {
       try {
-        await failGoalStrategyRunStage(runId, goalId, userId, "hotel", supabase);
+        await failGoalStrategyRunStage(runningStage, supabase, fenceExecutor);
       } catch {
-        // Best-effort: do not expose a marking-failed error.
+        if (process.env.STRATEGY_DEBUG === "1") {
+          console.error("[strategy-stage-error]", JSON.stringify({ stage: "hotel", runId, goalId, category: "stage_marking_failed" }));
+        }
+      }
+      if (process.env.STRATEGY_DEBUG === "1") {
+        console.error("[strategy-stage-error]", JSON.stringify({
+          stage: "hotel", runId, goalId, category: "research_stage_failed",
+        }));
       }
       return { kind: "failed" };
     }
@@ -365,15 +591,23 @@ async function runHotelStageResearch(
  * customer data, signatures, or complete errors. Specialized provider
  * diagnostics elsewhere retain their already-reviewed fixed categories and
  * status fields.
+ *
+ * Allowed flight diagnostic categories for this file:
+ * - stage_timeout
+ * - research_stage_failed
+ * - stage_marking_failed
+ * - stage_start_recovery_failure
+ * - unexpected_stage_failure
  */
-function genericStageFailure(stage: "flight" | "hotel"): GoalResearchStageResult {
+function genericStageFailure(
+  stage: "flight" | "hotel",
+  runId: string | null,
+  goalId: string | null,
+): GoalResearchStageResult {
   if (process.env.STRATEGY_DEBUG === "1") {
-    console.error("[strategy-stage-error]", JSON.stringify({ stage, category: "unexpected_stage_failure" }));
+    console.error("[strategy-stage-error]", JSON.stringify({ stage, runId, goalId, category: "unexpected_stage_failure" }));
   }
-  return {
-    success: false,
-    message: "We couldn't complete this strategy stage right now. Please try again.",
-  };
+  return safeOuterStageFailure();
 }
 
 /**
@@ -396,8 +630,12 @@ export async function finalizeGoalStrategyRunAction(
     };
   }
 
+  const dependencies = getStrategyFinalizationDependencies();
+  let recovery: RecoverableFinalizationStart | null = null;
+  let attempt: VerifiedFinalizationAttempt | null = null;
+  let fenceExecutor: Awaited<ReturnType<typeof dependencies.createFenceExecutor>> | null = null;
   try {
-    const preparedResult = await prepareGoalStrategyContext(goalId);
+    const preparedResult = await dependencies.prepareContext(goalId);
     if (!preparedResult.success) {
       return { success: false, message: preparedResult.message };
     }
@@ -412,7 +650,7 @@ export async function finalizeGoalStrategyRunAction(
 
     let run: Awaited<ReturnType<typeof getGoalStrategyRun>>;
     try {
-      run = await getGoalStrategyRun(runId, goalId, userId, supabase);
+      run = await dependencies.getRun(runId, goalId, userId, supabase);
     } catch {
       return {
         success: false,
@@ -443,100 +681,63 @@ export async function finalizeGoalStrategyRunAction(
     const finalizationMode: StrategyStageFinalizationMode =
       run.finalStatus === "failed" ? "retry" : "initial";
 
-    // Finalization begins. Supports retry from a previously failed run.
     try {
-      await updateGoalStrategyRunFinalStatus(runId, goalId, userId, "running", supabase);
-    } catch {
-      return {
-        success: false,
-        message: STRATEGY_RUN_UNAVAILABLE_MESSAGE,
-        retryable: false,
-      };
-    }
-
-    // Everything after finalization starts is guarded by an inner failure
-    // boundary so a best-effort mark-failed can be attempted.
-    try {
-      const flight = await loadVerifiedFinalStage(
-        runId,
-        goalId,
-        userId,
-        supabase,
-        "flight",
-        run.flightStatus
-      );
-      const hotel = await loadVerifiedFinalStage(
-        runId,
-        goalId,
-        userId,
-        supabase,
-        "hotel",
-        run.hotelStatus
-      );
-
-      const strategy = await generateAutomatedStrategyFromResearchStages(
-        context,
-        customerRewardPrograms,
-        catalogRewardPrograms,
-        { flight, hotel },
-        finalizationMode
-      );
-
-      // Save the complete strategy. A save failure keeps the run for retry
-      // and never overwrites/deletes a previous saved strategy.
-      let savedStrategy: Awaited<ReturnType<typeof persistFinalizedStrategy>>;
-      try {
-        const persisted = await persistFinalizedStrategy(
-          goalId,
-          userId,
-          strategy,
-          context.generatedAt,
-          getStrategyFinalizationDependencies().saveLatestStrategy,
+      // Authentication and owned-goal preparation have completed before the
+      // privileged, allowlisted executor is created. The single local deadline
+      // includes start (whose database deadline begins at commit) and every
+      // operation through the atomic final commit.
+      fenceExecutor = await dependencies.createFenceExecutor();
+      const committed = await runWithStrategyFinalizationDeadline(async (signal) => {
+        attempt = await dependencies.startFinalization(
+          runId, goalId, userId, supabase, fenceExecutor!, signal,
+          (value) => { recovery = value; },
         );
-        savedStrategy = persisted;
-      } catch (saveError) {
-        await bestEffortMarkFinalFailed(runId, goalId, userId, supabase);
-        const safeSaveMessage =
-          saveError instanceof Error
-            ? `${saveError.name}: ${saveError.message}`
-            : "Unknown error";
-        if (process.env.STRATEGY_DEBUG === "1") {
-          console.error("[strategy-save-error]", safeSaveMessage);
-        }
-        return {
-          success: false,
-          retryable: true,
-          message:
-            "We couldn't save your strategy right now. Try finishing it again in a moment.",
-        };
-      }
-
-      // Save succeeded. Best-effort lifecycle cleanup must not discard or
-      // misreport the successfully saved strategy.
-      try {
-        await updateGoalStrategyRunFinalStatus(runId, goalId, userId, "succeeded", supabase);
-      } catch (cleanupError) {
-        logFinalCleanupError(cleanupError);
-      }
-      try {
-        await deleteGoalStrategyRun(runId, goalId, userId, supabase);
-      } catch (cleanupError) {
-        logFinalCleanupError(cleanupError);
-      }
+        recovery = null;
+        const flight = await loadVerifiedFinalStage(
+          runId, goalId, userId, supabase, "flight", run.flightStatus,
+          dependencies.loadStage,
+        );
+        if (signal.aborted) throw new StrategyFinalizationDeadlineError();
+        const hotel = await loadVerifiedFinalStage(
+          runId, goalId, userId, supabase, "hotel", run.hotelStatus,
+          dependencies.loadStage,
+        );
+        if (signal.aborted) throw new StrategyFinalizationDeadlineError();
+        const strategy = await dependencies.generateStrategy(
+          context, customerRewardPrograms, catalogRewardPrograms,
+          { flight, hotel }, finalizationMode, signal,
+        );
+        if (signal.aborted) throw new StrategyFinalizationDeadlineError();
+        return dependencies.commitFinalization(
+          attempt!, strategy, context.generatedAt, fenceExecutor!, signal,
+        );
+      }, dependencies.finalizationDeadlineMs);
 
       return {
         success: true,
-        strategy: savedStrategy.strategy,
+        strategy: committed.strategy,
         saved: true,
         saveMessage: null,
-        generatedAt: savedStrategy.generatedAt,
+        generatedAt: committed.generatedAt,
       };
     } catch (error) {
-      await bestEffortMarkFinalFailed(runId, goalId, userId, supabase);
+      const deadlineFailure = error instanceof StrategyFinalizationDeadlineError ||
+        error instanceof StrategyRunFinalizationDeadlineError;
+      if (deadlineFailure && process.env.STRATEGY_DEBUG === "1") {
+        console.error("[strategy-finalization-timeout]", JSON.stringify({ category: "finalization_timeout" }));
+      }
+      if (!attempt && recovery && fenceExecutor) {
+        await boundedFinalizationStartRecovery(recovery, fenceExecutor, dependencies);
+        return finalizeGenericFailure(error);
+      }
+      const cleanup = await boundedFinalizationFailure(attempt, fenceExecutor, dependencies);
+      // A success committed before cleanup acquired the row remains authoritative.
+      // The current request still returns the generic safe shape; a reload reads it.
+      if (cleanup !== "failed") return finalizeGenericFailure();
       return finalizeGenericFailure(error);
     }
-  } catch (error) {
-    return finalizeGenericFailure(error);
+  } catch {
+    return finalizeGenericFailure();
   }
 }
 
@@ -554,13 +755,14 @@ async function loadVerifiedFinalStage(
   userId: string,
   supabase: Parameters<typeof loadVerifiedGoalStrategyRunStage>[4],
   stage: "flight" | "hotel",
-  status: string
+  status: string,
+  loader: ReturnType<typeof getStrategyFinalizationDependencies>["loadStage"],
 ): Promise<InterpretedResearch | null> {
   if (status !== "succeeded") {
     return null;
   }
 
-  const value = await loadVerifiedGoalStrategyRunStage(runId, goalId, userId, stage, supabase);
+  const value = await loader(runId, goalId, userId, stage, supabase);
   if (value === null) {
     throw new Error("Invalid strategy-run stage payload.");
   }
@@ -571,43 +773,42 @@ async function loadVerifiedFinalStage(
 /**
  * Best-effort transition a finalized run's final status to "failed".
  */
-async function bestEffortMarkFinalFailed(
-  runId: string,
-  goalId: string,
-  userId: string,
-  supabase: Parameters<typeof updateGoalStrategyRunFinalStatus>[4]
-): Promise<void> {
+async function boundedFinalizationFailure(
+  attempt: VerifiedFinalizationAttempt | null,
+  executor: Awaited<ReturnType<ReturnType<typeof getStrategyFinalizationDependencies>["createFenceExecutor"]>> | null,
+  dependencies: ReturnType<typeof getStrategyFinalizationDependencies>,
+): Promise<"failed" | "succeeded" | "unconfirmed"> {
+  if (!attempt || !executor) return "unconfirmed";
   try {
-    await updateGoalStrategyRunFinalStatus(runId, goalId, userId, "failed", supabase);
+    return await runWithStrategyFinalizationCleanupDeadline(
+      (signal) => dependencies.failFinalization(attempt, executor, signal),
+      dependencies.cleanupDeadlineMs,
+    );
   } catch {
-    // Best-effort: a cleanup failure must not be exposed or misreported.
+    return "unconfirmed";
   }
 }
 
-/**
- * Log a safe, STRATEGY_DEBUG-only lifecycle cleanup error.
- */
-function logFinalCleanupError(error: unknown): void {
-  if (process.env.STRATEGY_DEBUG === "1") {
-    const safeMessage =
-      error instanceof Error
-        ? `${error.name}: ${error.message}`
-        : "Unknown error";
-    console.error("[strategy-run-cleanup-error]", safeMessage);
-  }
+async function boundedFinalizationStartRecovery(
+  recovery: RecoverableFinalizationStart,
+  executor: Awaited<ReturnType<ReturnType<typeof getStrategyFinalizationDependencies>["createFenceExecutor"]>>,
+  dependencies: ReturnType<typeof getStrategyFinalizationDependencies>,
+): Promise<void> {
+  try {
+    await runWithStrategyFinalizationCleanupDeadline(
+      (signal) => dependencies.recoverStart(recovery, executor, signal),
+      dependencies.cleanupDeadlineMs,
+    );
+  } catch {}
 }
 
 /**
  * Generic outer failure boundary for the finalize action. Logs only error name
  * and message under STRATEGY_DEBUG, never error details/customer data.
  */
-function finalizeGenericFailure(error: unknown): GenerateGoalStrategyResult {
-  const safeMessage =
-    error instanceof Error
-      ? `${error.name}: ${error.message}`
-      : "Unknown error";
+function finalizeGenericFailure(_error?: unknown): GenerateGoalStrategyResult {
   if (process.env.STRATEGY_DEBUG === "1") {
-    console.error("[strategy-finalize-error]", safeMessage);
+    console.error("[strategy-finalize-error]", JSON.stringify({ category: "unexpected_finalization_failure" }));
   }
   return {
     success: false,

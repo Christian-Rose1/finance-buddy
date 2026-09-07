@@ -38,7 +38,8 @@ export interface StrategyRewardProgram {
  */
 async function executeNonTravelPlannedQueries(
   queries: ResearchPlanQuery[],
-  tavily: TavilyResearchProvider
+  tavily: TavilyResearchProvider,
+  signal?: AbortSignal,
 ): Promise<Awaited<ReturnType<TavilyResearchProvider["search"]>>[]> {
   return Promise.all(
     queries.map((q) =>
@@ -46,7 +47,7 @@ async function executeNonTravelPlannedQueries(
         query: q.query,
         includeDomains: [...q.includeDomains],
         searchDepth: q.searchDepth,
-      })
+      }, { signal })
     )
   );
 }
@@ -189,7 +190,8 @@ export async function generateAutomatedStrategyFromResearchStages(
   customerRewardPrograms: StrategyRewardProgram[],
   catalogRewardPrograms: StrategyRewardProgram[],
   stages: VerifiedStrategyResearchStages,
-  mode: StrategyStageFinalizationMode = "initial"
+  mode: StrategyStageFinalizationMode = "initial",
+  signal?: AbortSignal,
 ): Promise<PersonalizedStrategy> {
   const goal = context.goal;
 
@@ -215,7 +217,8 @@ export async function generateAutomatedStrategyFromResearchStages(
     if (cardPlanQueries.length > 0) {
       const cardResearchResponses = await executeNonTravelPlannedQueries(
         cardPlanQueries,
-        tavilyForCardFallback
+        tavilyForCardFallback,
+        signal,
       );
 
       const interpreter = createResearchInterpreter();
@@ -245,7 +248,7 @@ export async function generateAutomatedStrategyFromResearchStages(
             tavilyForCardFallback.search({
               query: q,
               includeDomains: [...TRUSTED_DOMAINS],
-            })
+            }, { signal })
           )
         );
 
@@ -338,7 +341,7 @@ export async function generateAutomatedStrategyFromResearchStages(
     catalogRewardPrograms
   );
   const strategy = applyNarrativeTrustGateToNarrative(
-    await strategyProvider.generateStrategy(sanitizedPrompt),
+    await strategyProvider.generateStrategy(sanitizedPrompt, { signal }),
   );
 
   // 6. Deterministically attach points inventory and allocation scenarios.

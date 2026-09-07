@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
 
 import { startVerifiedResearchStageExecution } from "./authenticatedStageExecution";
 import { executeVerifiedStageQueries } from "./providerExecutionGateway";
@@ -56,18 +57,29 @@ function stageClient(
   failTransition = false,
 ): SupabaseClient {
   return {
+    rpc(name: string) {
+      if (name === "prepare_goal_strategy_run_research_stage_start") {
+        return Promise.resolve({ data: "prepared", error: null });
+      }
+      events.push("stage-transition-attempted");
+      if (name !== "start_goal_strategy_run_research_stage" || failTransition) {
+        return Promise.resolve({ data: null, error: { message: "synthetic" } });
+      }
+      const revision = new Date().toISOString();
+      return Promise.resolve({
+        data: [{
+          attempt_id: "11111111-1111-4111-8111-111111111111",
+          deadline_at: new Date(Math.min(Date.now() + 60_000, Date.parse(persistedRow.expires_at as string))).toISOString(),
+          revision,
+        }],
+        error: null,
+      });
+    },
     from: () => {
-      let updatePayload: Record<string, unknown> | null = null;
       return {
         select() { return this; },
         eq() { return this; },
-        update(value: Record<string, unknown>) { updatePayload = value; return this; },
         maybeSingle() { events.push("owned-run-loaded"); return { data: persistedRow, error: null }; },
-        single() {
-          events.push("stage-transition-attempted");
-          if (failTransition) return { data: null, error: { message: "synthetic" } };
-          return { data: { ...persistedRow, ...updatePayload }, error: null };
-        },
       };
     },
   } as unknown as SupabaseClient;
@@ -102,19 +114,27 @@ for (const stage of ["flight", "hotel"] as const) {
     const events: string[] = [];
     const mockProvider = provider(events);
     const persisted = row(stage);
+    const client = stageClient(persisted, events);
+    const fenceExecutor: StrategyStageFenceRpcExecutor = {
+      async execute(name, parameters) {
+        const { data, error } = await client.rpc(name, parameters);
+        return { data, error };
+      },
+    };
     const execute = await startVerifiedResearchStageExecution(
       persisted.id as string,
       persisted.goal_id as string,
       persisted.user_id as string,
       stage,
       mockProvider.value,
-      stageClient(persisted, events),
+      client,
+      fenceExecutor,
     );
     assert.deepEqual(events, ["owned-run-loaded", "stage-transition-attempted"]);
 
     const plan = discoveryPlan();
     const queries = plan.queries.filter((query) => query.category === stage);
-    await executeVerifiedStageQueries(execute, plan, queries);
+    await executeVerifiedStageQueries(execute.executor, plan, queries);
     assert.equal(mockProvider.calls.length, queries.length);
     assert.equal(events.at(-1), "provider-called");
   });
@@ -143,6 +163,13 @@ test("ownership, integrity, expiry, stage order, and transition failures make ze
     const events: string[] = [];
     const mockProvider = provider(events);
     const persisted = row(item.stage, item.overrides);
+    const client = stageClient(persisted, events, item.failTransition);
+    const fenceExecutor: StrategyStageFenceRpcExecutor = {
+      async execute(name, parameters) {
+        const { data, error } = await client.rpc(name, parameters);
+        return { data, error };
+      },
+    };
     await assert.rejects(
       startVerifiedResearchStageExecution(
         item.runId ?? persisted.id as string,
@@ -150,7 +177,8 @@ test("ownership, integrity, expiry, stage order, and transition failures make ze
         item.userId ?? persisted.user_id as string,
         item.stage,
         mockProvider.value,
-        stageClient(persisted, events, item.failTransition),
+        client,
+        fenceExecutor,
       ),
       /Failed to update strategy-run stage\./,
       item.name,

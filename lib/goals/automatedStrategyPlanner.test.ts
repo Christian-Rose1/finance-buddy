@@ -20,6 +20,7 @@ import type { PersonalizedStrategyContext } from "./strategyTypes";
 import { createProviderExecutionGateway, type VerifiedStageQueryExecutor } from "./providerExecutionGateway";
 import { startGoalStrategyRunStage, type StrategyResearchStage } from "./strategyRunRepository";
 import { signStrategyRunPayload } from "./strategyRunSigning";
+import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
 
 const CATALOG = [{ id: "program-db-id", name: "Chase Ultimate Rewards" }];
 const SECRET = "planner-gateway-test-secret-0123456789";
@@ -96,11 +97,33 @@ async function dependencies(stage: StrategyResearchStage, fail: (query: string) 
     hotel_status: "pending", hotel_payload: null, hotel_signature: null, final_status: "pending",
     created_at: "2026-08-01T00:00:00.000Z", updated_at: "2026-08-01T00:00:00.000Z",
   };
-  const client = { from: () => { let update: Record<string, unknown> = {}; return {
-    select() { return this; }, eq() { return this; }, update(value: Record<string, unknown>) { update = value; return this; },
-    maybeSingle() { return { data: row, error: null }; }, single() { return { data: { ...row, ...update }, error: null }; },
-  }; } } as unknown as SupabaseClient;
-  const running = await startGoalStrategyRunStage(row.id, row.goal_id, row.user_id, stage, client);
+  const client = {
+    rpc(name: string) {
+      if (name === "prepare_goal_strategy_run_research_stage_start") {
+        return Promise.resolve({ data: "prepared", error: null });
+      }
+      const revision = new Date().toISOString();
+      return Promise.resolve({
+        data: [{
+          attempt_id: "33333333-3333-4333-8333-333333333333",
+          deadline_at: new Date(Math.min(Date.now() + 120_000, Date.parse(expiresAt))).toISOString(),
+          revision,
+        }],
+        error: null,
+      });
+    },
+    from: () => ({
+      select() { return this; }, eq() { return this; },
+      maybeSingle() { return { data: row, error: null }; },
+    }),
+  } as unknown as SupabaseClient;
+  const fenceExecutor: StrategyStageFenceRpcExecutor = {
+    async execute(name, parameters) {
+      const { data, error } = await client.rpc(name, parameters);
+      return { data, error };
+    },
+  };
+  const running = await startGoalStrategyRunStage(row.id, row.goal_id, row.user_id, stage, client, fenceExecutor);
   const executor = createProviderExecutionGateway(running, provider);
   const interpreter: ResearchInterpreter = {
     async interpret(input) {

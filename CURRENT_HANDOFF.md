@@ -1,5 +1,330 @@
 # Finance Buddy Current Handoff
 
+## 2026-09-06 Race-Safe Customer Strategy Deletion
+
+Implemented locally by amending the still-unapplied September 6 finalization
+migration in place. The applied September 5 stage-fence migration was not
+changed. No migration or Supabase command was run; remote database verification
+remains outstanding.
+
+Customers can now delete a saved strategy from its goal panel after an explicit
+confirmation explaining that the saved plan is removed and can be rebuilt
+later. The browser calls only a server action. That action creates the existing
+cookie-aware client, authenticates and derives the session user ID, and only
+then creates the narrowly allowlisted service-role fence executor. Failure
+retains the displayed strategy and timestamp and shows fixed generic wording;
+success clears the strategy, timestamp, stale run/retry state, and exposes the
+normal Build control without deleting the goal or any wallet/reward data.
+
+The amended migration adds one service-role-only `delete_owned_goal_strategy`
+RPC and revokes ordinary `goal_strategies` DELETE from browser roles. The RPC
+requires explicit server-derived user and goal IDs, verifies goal, strategy,
+and run ownership, locks the owned goal and all owned goal runs in a consistent
+goal-then-run order, advances a database-owned per-goal authority generation,
+clears running/prepared finalization authority, and only then deletes the one
+owned saved strategy in the same transaction. Run inserts inherit the current
+generation in a locked trigger, so a run racing after deletion belongs to the
+new generation and is a deliberate rebuild; every older attempt, prepared
+start, or recovery token is stale. The generation cannot be directly updated
+by authenticated roles.
+
+Race result: if final commit acquires the goal lock first, it commits and the
+waiting deletion subsequently invalidates its run authority and deletes the
+strategy before reporting success. If deletion acquires first, it advances the
+generation and removes the strategy, after which every old commit/start/recover
+predicate rejects. Thus no old attempt can recreate the strategy after a
+successful delete, while a newly created run can deliberately rebuild it.
+
+Direct tests cover browser table/RPC denial, dual ownership, lock ordering,
+generation invalidation and new-run inheritance, session-derived ownership,
+unauthenticated and ownership rejection, preservation on failure, successful
+client-state removal, confirmation copy, generic errors, and absence of direct
+browser table/RPC access. Verification passed: focused deletion/finalization/
+executor tests (18), the affected `lib/goals` suite (829), the full suite (964),
+`npx tsc --noEmit`, `npm run build`, and `git diff --check`. The existing
+unrelated `<img>` build warning remains. No browser/provider/database flow,
+Supabase command, migration application, `.env.local` inspection, commit, push,
+or deploy was performed.
+
+## 2026-09-06 Database-Backed Finalization Deadline Fence v1
+
+Implemented locally in the new forward-only migration
+`20260906120000_add_strategy_finalization_deadline_fence.sql`. It has not been
+applied. The prior flight/hotel fence migration
+`20260905120000_add_strategy_stage_deadline_fence.sql` is now reported by the
+user as applied remotely and was not edited during this milestone. The user
+must review and explicitly apply the new finalization migration; live database
+verification remains outstanding.
+
+Finalization now uses a database-owned opaque attempt UUID, a database-clock
+245-second deadline capped by the signed run expiry, and a private lost-start
+recovery token. The existing server-only executor allowlist was expanded only
+for the five finalization RPCs. The authenticated action still prepares the
+owned goal and derives `userId` through the cookie-aware session before it
+creates that executor. Browser roles cannot execute the RPCs or read/write the
+attempt, deadline, or recovery fields; authenticated direct updates to final
+status and direct inserts/updates of saved strategies are revoked.
+
+The new final commit RPC locks and verifies the exact owned running attempt,
+reads the database clock after acquiring the lock, rejects expired or stale
+authority, atomically upserts the fully validated server-generated strategy,
+and marks the same run succeeded in one transaction. Failure and recovery
+mutate only the matching attempt or recovery token. A newer start invalidates
+older authority, committed success wins over late cleanup, and a pre-migration
+or lost-response running finalization becomes retryable instead of remaining
+stranded. The previous saved strategy is untouched unless the atomic success
+transaction commits.
+
+One shared local 245-second deadline now covers finalization start, verified
+signed-stage loading, initial-only optional card work, final provider execution
+and validation, and atomic persistence/status commit. It propagates cancellation
+to optional Tavily work and both strategy providers. Cleanup has a separate
+five-second bound. Confirmed timeouts and ordinary dependency failures retain
+the existing retryable customer-safe result; missing configuration, malformed
+RPC output, transport failure, and unconfirmed cleanup remain generic. Debug
+diagnostics use only fixed `finalization_timeout` and
+`unexpected_finalization_failure` categories. Retry still reloads the signed
+flight/hotel stages and skips flight, hotel, and card research.
+
+Direct action tests cover a never-settling provider, provider abort propagation,
+a never-settling atomic persistence/status operation, lost start responses on
+both sides of commit, stale/deadline rejection, success winning cleanup,
+retryable failure, signed-stage reuse on retry, previous-strategy preservation,
+and private-authority non-leakage. Static migration/executor tests cover
+service-role-only execution, dual ownership, atomic persistence, database-clock
+ordering, privilege revocation, and the separate forward-only migration.
+
+Verification passed locally: focused finalization tests (33), the broader
+affected strategy suite (273), and the full suite (960). Final TypeScript,
+production build, and whitespace verification are recorded in the completion
+report. No Supabase command, migration application, live database/provider/
+browser call, `.env.local` inspection, deploy, commit, or push was performed.
+
+## 2026-09-06 Server-Only Stage-Fence Execution Boundary
+
+Implemented locally by correcting the still-unapplied
+`20260905120000_add_strategy_stage_deadline_fence.sql` migration in place. No
+second migration was created or applied. The user must review the migration
+and explicitly run the remote `supabase db push`; live database verification
+remains outstanding.
+
+The five flight/hotel stage-fence RPCs are now executable only by
+`service_role`: execution is revoked from `public`, `anon`, and
+`authenticated`, every function rejects unless `auth.role()` is
+`service_role`, and every function requires a non-null explicit `p_user_id`.
+All run and goal ownership predicates strictly match that user ID. The existing
+`SECURITY DEFINER` functions retain locked search paths, database-clock and
+attempt/deadline predicates, transaction safety, and the column-level ordinary
+table grants that exclude all attempt, deadline, and recovery-token fields.
+
+A new `server-only` executor constructs a non-persistent Supabase client for
+only the five allowlisted fence RPCs. Its required deployment configuration is
+`SUPABASE_SERVICE_ROLE_KEY`; no value is recorded here. Server actions still
+authenticate first through the existing cookie-aware client and derive the
+customer user ID from that session. Only afterward do they create the narrow
+executor and pass that server-derived ID to each privileged RPC. Ordinary run
+creation, reads, finalization, and all unrelated repositories remain on the
+cookie-aware client and RLS. Missing privileged configuration collapses to the
+existing generic customer-safe action failure.
+
+The repository now creates and registers its opaque start-recovery capability
+before awaiting preparation. A committed preparation whose response never
+arrives is recovered within the existing five-second cleanup bound. A fast
+lost preparation/start response also receives bounded recovery without being
+misclassified or logged as a stage timeout. Recovery before preparation has
+stored its token is a harmless rejection; preparation/start and recovery lock
+ordering still prevents a late `running` row, a newer attempt is not affected,
+and a committed success wins. Private capabilities and values remain absent
+from browser inputs/results, signed payloads, ordinary reads, and diagnostics.
+
+Verification passed locally: focused server-boundary/action/migration tests
+(26), the affected broader repository/action/lifecycle/signing/provider suite
+(229), the full suite (947), `npx tsc --noEmit`, `npm run build`, and `git diff
+--check`. The existing unrelated Next.js `<img>` warning remains. No Supabase
+command, live database/provider/browser call, direct `.env.local` inspection,
+migration application, deploy, commit, or push was performed.
+
+## 2026-09-05 Database-Backed Stage Deadline Fence v1 Blocking Repair
+
+This correction supersedes the affected save/start/privilege descriptions in
+Database-Backed Stage Deadline Fence v1 below. The existing local, unapplied
+`20260905120000_add_strategy_stage_deadline_fence.sql` migration was corrected
+in place; no second migration was created and no migration was applied. The
+user must still review it and explicitly run the remote `supabase db push`.
+Live database verification remains outstanding.
+
+The save RPC now returns `deadline_expired` only when its exact owned attempt
+is still `running` and the database clock is beyond that attempt's deadline.
+The repository maps only that outcome to a private typed deadline error, and
+the action sends it through the same fixed `stage_timeout` diagnostic and
+bounded five-second cleanup as a local timeout. Transport, malformed, stale,
+wrong-attempt, and unrelated rejections remain generic persistence failures.
+An already committed success still wins and cannot be overwritten or reported
+as degraded.
+
+Stage start now supplies its AbortSignal to both Supabase RPCs when supported.
+The repository first reserves a random private start-recovery token on the
+eligible owned stage, then mints an opaque recovery capability before issuing
+the separate `running` transition. The transition requires that exact token
+and still generates the attempt ID and deadline in the database. Recovery
+atomically changes the same token-bearing pending/failed/running stage to
+`failed` and clears the token. Therefore recovery either preempts a start or
+runs after an in-flight start's row lock; a late start cannot commit `running`
+after recovery. It safely reports an already committed success and cannot
+affect a different or newer attempt. Attempt IDs, deadlines, and recovery
+tokens remain absent from browser inputs/results, signed payloads, diagnostics,
+and ordinary table reads.
+
+The migration now explicitly revokes ordinary `INSERT` from `anon` and
+`authenticated`, then grants authenticated insertion only for the exact
+pre-existing columns used by `createGoalStrategyRun`. All attempt, deadline,
+and recovery-token columns are excluded. Existing dual run/goal ownership RLS
+remains enabled and unchanged. Database-generated attempt IDs, database-clock
+deadlines, locked `SECURITY DEFINER` search paths, authenticated-only RPCs,
+matching status/attempt predicates, and safe conversion of pre-migration
+`running` rows remain intact.
+
+Verification passed locally: focused fence/repository/action tests (107), the
+affected broader stage/lifecycle/signing/gateway/provider suite (222), the full
+suite (940), `npx tsc --noEmit`, `npm run build`, and `git diff --check`. The
+existing unrelated Next.js `<img>` warning remains. No Supabase command, live
+database/provider/browser call, `.env.local` inspection, migration application,
+deploy, commit, or push was performed.
+
+## 2026-09-05 Database-Backed Stage Deadline Fence v1
+
+Implemented locally on top of the uncommitted bounded-liveness and flight-
+estimate work. The new forward-only migration is
+`20260905120000_add_strategy_stage_deadline_fence.sql`. It has been created
+locally but has not been applied. The user must review the migration and then
+explicitly run the remote `supabase db push`; live database verification
+remains outstanding.
+
+The database now mints a fresh opaque attempt UUID and finite database-clock
+deadline whenever an owned flight or hotel stage atomically enters `running`.
+Successful persistence is an authenticated atomic RPC requiring goal/run
+ownership, the exact stage, `running` status, the current attempt, and a
+database clock not beyond its deadline. Timeout failure is a separate atomic
+RPC requiring the current running attempt; it clears payload/signature and
+invalidates every later save from that attempt. A later start replaces the
+attempt identity. If success committed first, failure authoritatively returns
+that terminal state and the action returns the safe outer failure shape rather
+than falsely reporting degradation.
+
+The four new attempt/deadline columns are excluded from ordinary authenticated
+table reads and writes. Attempt data stays inside a repository-owned opaque
+capability and is absent from browser action inputs/results, signed payloads,
+customer projections, and diagnostics. Existing RLS policies, HMAC validation,
+finalization-only retry, previous-strategy preservation, stage ordering,
+estimate isolation, no-retry/no-fallback behavior, the 120-second action
+deadline, the 5-second cleanup deadline, and fixed `stage_timeout` logging are
+unchanged. Pre-migration rows left in `running` are transactionally converted
+to retryable `failed` lanes because they have no valid database attempt.
+
+Migration-aware repository/action tests cover a client-accepted save evaluated
+after local timeout, replacement-attempt invalidation of old save/fail calls,
+deadline-expired save rejection, timeout failure blocking a later save, and a
+success committed before its deadline resisting failure and degradation. The
+full suite passed (936), as did `npx tsc --noEmit`, `npm run build`, and
+`git diff --check`; the existing unrelated Next.js `<img>` warning remains. No
+live provider, browser, database, migration application, secret inspection,
+deploy, commit, or push was performed.
+
+## 2026-09-05 Bounded Strategy Stage Liveness Persistence Repair
+
+This correction supersedes the persistence-boundary description in Bounded
+Strategy Stage Liveness v1 below. The shared 120-second flight/hotel deadline
+now includes the fully validated signed stage-save transition itself, in
+addition to authenticated stage start, planning, provider execution,
+interpretation, optional flight-estimate work, and payload construction. The
+deadline signal reaches both Tavily and the Supabase stage update. Repository
+saves still require the durable `status = running` fence, so a confirmed
+timeout transition prevents a cancelled or late save from changing the stage
+to succeeded or persisting a partial payload.
+
+Timeout cleanup has its own shared 5-second bound and abort signal. A confirmed
+`running → failed` transition returns the existing terminal degraded result.
+If that database transition cannot be confirmed within the cleanup window, the
+action returns the existing safe outer failure result instead of hanging or
+claiming the stage failed. Both paths stop browser progress through the
+existing lifecycle, preserve the prior saved strategy, and expose no raw
+details. Timeout logging remains exactly the fixed `stage_timeout` category.
+No retry, fallback, duplicate request, migration, schema, UI-copy, signed-
+payload, estimate-isolation, or finalization-only retry behavior changed.
+
+Request-local save/fail dependency seams enable deterministic never-settling
+persistence tests without changing browser action signatures. Tests cover
+flight and hotel save timeouts, cancellation and late-write rejection,
+confirmed one-time degraded failure, bounded unconfirmed cleanup returning the
+outer failure shape, timer cleanup, abort propagation, and safe observation of
+late rejections. Focused deadline/action/lifecycle/gateway/repository/provider
+tests passed (122); the full suite passed (930). `npx tsc --noEmit`, `npm run
+build`, and `git diff --check` passed. The existing unrelated Next.js `<img>`
+warning remains. No live provider, browser, database, migration, secret
+inspection, commit, push, or deploy was performed.
+
+## 2026-09-05 Bounded Strategy Stage Liveness v1
+
+Implemented locally without live provider, browser, database, migration,
+secret-inspection, commit, push, or deploy activity. Flight and hotel research
+now share one documented 120-second server deadline covering authenticated
+stage start, saved-goal planning, provider execution, interpretation, optional
+flight-estimate work, and validated stage-payload preparation. The existing
+Tavily 15-second per-request timeout and city-aware SerpApi lane are unchanged.
+
+The deadline aborts gateway provider calls where supported, marks the exact
+running signed stage failed through an optimistic `status = running` update,
+and returns the existing terminal degraded-stage result. Cancellation-resistant
+late interpretation is observed but cannot persist: payload saving occurs only
+after bounded work wins, checks the deadline signal before returning, and the
+repository accepts success only from `running`. Failure marking also requires
+`running`, preventing a late timeout from overwriting an already successful
+stage. No retry, fallback provider, duplicate query, partial stage payload, or
+new customer wording was added. The only timeout diagnostic is the fixed
+allowlisted `[strategy-stage-timeout] {"category":"stage_timeout"}` record
+under `STRATEGY_DEBUG=1`.
+
+Deterministic never-settling-interpreter tests cover flight and hotel terminal
+failure, one failure write, late-success rejection, sibling preservation, no
+extra provider calls, safe diagnostics, and the existing UI lifecycle's
+progress cleanup/prior-strategy behavior. Tavily cancellation plumbing is also
+covered. Focused lifecycle/action/gateway/repository/provider tests passed
+(118), the full suite passed (926), `npx tsc --noEmit`, `npm run build`, and
+`git diff --check` passed. The existing unrelated Next.js `<img>` warning
+remains. Live runtime timing and cancellation behavior remain unverified by
+request.
+
+## 2026-09-03 Safe Flight Planning Estimate Diagnostics v1
+
+Implemented locally without a live provider call. Each attempted optional
+flight planning estimate now emits exactly one fixed-format diagnostic only
+when `STRATEGY_DEBUG=1`: `[flight-planning-estimate] {"category":"..."}`.
+The finite categories are `success`, `invalid_saved_goal_shape`,
+`origin_resolution_unavailable`, `origin_resolution_unresolved`,
+`destination_resolution_unavailable`, `destination_resolution_unresolved`,
+`invalid_resolved_search_location`, `estimate_projection_rejected`,
+`unexpected_estimate_dependency_failure`, and the existing flight-client
+categories prefixed with `flight_client_`: `invalid_request`,
+`provider_not_configured`, `http_failure`, `malformed_initial_response`,
+`no_eligible_outbound`, `malformed_return_response`, `no_compatible_return`,
+and `normalization_failed`.
+
+Diagnostics contain no identifiers, saved location text, dates, prices, URLs,
+keys, tokens, provider content, raw errors, messages, names, stacks, payloads,
+or metadata. An injected action-level estimate rejection uses only
+`unexpected_estimate_dependency_failure` and remains isolated after successful
+flight research. Production behavior remains best-effort: every estimate
+failure still returns or persists `null`, with no retry, extra provider request,
+or client-visible diagnostic. Existing city-aware, searched-party-total,
+planning-only, projection, privacy, persistence, and flight-research behavior
+is unchanged.
+
+Verified locally: focused estimate/action tests passed (24), affected flight
+and strategy tests passed (426), the full suite passed (922), `npx tsc
+--noEmit`, `npm run build`, and `git diff --check` passed. The existing
+unrelated Next.js `<img>` warning remains. No live provider, SerpApi, browser,
+database, migration, secret inspection, commit, push, or deploy was performed.
+
 ## 2026-09-03 Flight Planning Estimate Trust-Boundary Repair
 
 Implemented locally on the uncommitted authenticated SerpApi Flight Planning

@@ -11,6 +11,14 @@ import { createServerClient } from "@/lib/supabase-server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Goal, GoalStatus, OptimizationPriority, CabinPreference } from "./types";
 
+/** Exact customer-facing goals projection; excludes server-owned fence state. */
+const GOAL_SELECT_COLUMNS = [
+  "id", "user_id", "type", "title", "status", "origin", "destinations",
+  "earliest_departure", "latest_return", "minimum_nights", "maximum_nights",
+  "traveler_count", "cabin_preference", "optimization_priority",
+  "maximum_cash_budget", "currency", "allow_new_cards", "created_at", "updated_at",
+].join(", ");
+
 /** Fields required to create a persisted goal. */
 export interface CreateGoalInput {
   title: string;
@@ -60,6 +68,20 @@ function parseNumeric(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+/**
+ * Narrows a Supabase select result row for `toGoal`.
+ *
+ * The untyped Supabase client cannot infer row types from the explicit
+ * string projection above, so PostgrestJs types successful select results
+ * as its GenericStringError sentinel. At runtime every successful row is a
+ * plain column object, so it is narrowed once through `unknown` here. The
+ * explicit GOAL_SELECT_COLUMNS projection alone defines which columns can
+ * appear, so no server-owned field can pass this boundary.
+ */
+function asGoalRow(row: unknown): Record<string, unknown> {
+  return row as Record<string, unknown>;
 }
 
 /** Maps a goals row (snake_case) to a Goal (camelCase). */
@@ -147,7 +169,7 @@ export async function getGoalsForUser(
 
   const { data: rows, error } = await supabase
     .from("goals")
-    .select("*")
+    .select(GOAL_SELECT_COLUMNS)
     .eq("user_id", userId)
     .order("updated_at", { ascending: false });
 
@@ -155,7 +177,7 @@ export async function getGoalsForUser(
     throw new Error("Failed to load goals.");
   }
 
-  return (rows ?? []).map((row) => toGoal(row as Record<string, unknown>));
+  return (rows ?? []).map((row) => toGoal(asGoalRow(row)));
 }
 
 /**
@@ -178,7 +200,7 @@ export async function getGoalForUser(
 
   const { data: row, error } = await supabase
     .from("goals")
-    .select("*")
+    .select(GOAL_SELECT_COLUMNS)
     .eq("id", goalId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -191,7 +213,7 @@ export async function getGoalForUser(
     return null;
   }
 
-  return toGoal(row as Record<string, unknown>);
+  return toGoal(asGoalRow(row));
 }
 
 /**
@@ -221,14 +243,14 @@ export async function createGoal(
   const { data: row, error } = await supabase
     .from("goals")
     .insert(payload)
-    .select()
+    .select(GOAL_SELECT_COLUMNS)
     .single();
 
   if (error || !row) {
     throw new Error("Failed to create goal.");
   }
 
-  return toGoal(row as Record<string, unknown>);
+  return toGoal(asGoalRow(row));
 }
 
 /**
@@ -261,14 +283,14 @@ export async function updateGoal(
     .update(payload)
     .eq("id", goalId)
     .eq("user_id", userId)
-    .select()
+    .select(GOAL_SELECT_COLUMNS)
     .single();
 
   if (error || !row) {
     throw new Error("Failed to update goal.");
   }
 
-  return toGoal(row as Record<string, unknown>);
+  return toGoal(asGoalRow(row));
 }
 
 /**

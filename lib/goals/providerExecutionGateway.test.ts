@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
 
 import {
   createProviderExecutionGateway,
@@ -97,27 +98,41 @@ async function runningStage(
 ): Promise<VerifiedRunningResearchStage> {
   const row = runRow(stage, overrides);
   const client = {
+    rpc(name: string) {
+      if (name === "prepare_goal_strategy_run_research_stage_start") {
+        return Promise.resolve({ data: "prepared", error: null });
+      }
+      const revision = new Date().toISOString();
+      return Promise.resolve({
+        data: [{
+          attempt_id: "22222222-2222-4222-8222-222222222222",
+          deadline_at: new Date(Math.min(Date.now() + 120_000, Date.parse(row.expires_at as string))).toISOString(),
+          revision,
+        }],
+        error: null,
+      });
+    },
     from: () => {
-      let updatePayload: Record<string, unknown> | null = null;
       return {
         select() { return this; },
         eq() { return this; },
-        update(value: Record<string, unknown>) { updatePayload = value; return this; },
         maybeSingle() { return { data: row, error: null }; },
-        single() {
-          return updatePayload
-            ? { data: { ...row, ...updatePayload }, error: null }
-            : { data: row, error: null };
-        },
       };
     },
   } as unknown as SupabaseClient;
+  const fenceExecutor: StrategyStageFenceRpcExecutor = {
+    async execute(name, parameters) {
+      const { data, error } = await client.rpc(name, parameters);
+      return { data, error };
+    },
+  };
   return startGoalStrategyRunStage(
     row.id,
     row.goal_id,
     row.user_id,
     stage,
     client,
+    fenceExecutor,
   );
 }
 

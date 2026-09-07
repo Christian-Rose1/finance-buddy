@@ -99,6 +99,31 @@ test("does not expose API key on network failure", async () => {
   }
 });
 
+test("forwards caller cancellation without changing the per-request timeout", async () => {
+  let observedSignal: AbortSignal | null = null;
+  const restore = installFetchStub((_url, init) => {
+    observedSignal = init?.signal as AbortSignal;
+    return new Promise<Response>((_resolve, reject) => {
+      observedSignal?.addEventListener("abort", () => reject(new Error("private abort detail")), { once: true });
+    });
+  });
+  try {
+    const provider = new TavilyResearchProvider(TEST_KEY);
+    const controller = new AbortController();
+    const pending = provider.search({ query: "test", includeDomains: ["chase.com"] }, { signal: controller.signal });
+    controller.abort();
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof TavilyResearchError);
+      assert.equal(error.message.includes("private abort detail"), false);
+      return true;
+    });
+    assert.ok(observedSignal);
+    assert.equal((observedSignal as AbortSignal).aborted, true);
+  } finally {
+    restore();
+  }
+});
+
 test("rejects missing API key", () => {
   const original = process.env.TAVILY_API_KEY;
   delete process.env.TAVILY_API_KEY;

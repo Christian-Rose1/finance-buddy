@@ -55,6 +55,7 @@ interface ExecutorState {
   provider: ResearchProvider;
   execution: InternalExecution;
   consumed: boolean;
+  signal?: AbortSignal;
 }
 
 const verifiedExecutors = new WeakMap<object, ExecutorState>();
@@ -340,6 +341,7 @@ function validateQuery(
 export function createProviderExecutionGateway(
   runningStage: VerifiedRunningResearchStage,
   provider: ResearchProvider,
+  signal?: AbortSignal,
 ): VerifiedStageQueryExecutor {
   const context = inspectVerifiedRunningResearchStage(runningStage);
   if (!context || !Number.isFinite(Date.parse(context.expiresAt))) invariantFailure();
@@ -355,6 +357,7 @@ export function createProviderExecutionGateway(
       requests: [],
     },
     consumed: false,
+    signal,
   });
   return executor;
 }
@@ -421,6 +424,7 @@ export async function executeVerifiedStageQueries(
     state.execution.requests.push(...requests);
 
     const settled = await Promise.all(requests.map(async (request) => {
+      if (state.signal?.aborted) invariantFailure();
       const beforeRequest = inspectVerifiedRunningResearchStage(state.runningStage);
       if (
         !beforeRequest ||
@@ -434,7 +438,8 @@ export async function executeVerifiedStageQueries(
           query: request.query,
           includeDomains: [...request.approvedDomains],
           searchDepth: request.searchDepth,
-        });
+        }, { signal: state.signal });
+        if (state.signal?.aborted) invariantFailure();
         if (
           !response ||
           !Array.isArray(response.results) ||

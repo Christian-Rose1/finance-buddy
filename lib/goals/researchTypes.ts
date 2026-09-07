@@ -24,7 +24,7 @@ export interface ResearchResponse {
 }
 
 export interface ResearchProvider {
-  search(input: ResearchQuery): Promise<ResearchResponse>;
+  search(input: ResearchQuery, options?: { signal?: AbortSignal }): Promise<ResearchResponse>;
 }
 
 export const CARD_PROGRAM_DOMAINS: readonly string[] = Object.freeze([

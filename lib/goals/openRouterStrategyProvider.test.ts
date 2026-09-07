@@ -392,6 +392,31 @@ test("preserves the abort timeout and does not retry an aborted request", async 
   }
 });
 
+test("propagates an action-wide caller abort and does not retry", async () => {
+  let calls = 0;
+  let observedSignal: AbortSignal | null | undefined;
+  const runtime = installMockedRuntime(
+    ((_, init) => {
+      calls += 1;
+      observedSignal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("private abort cause")));
+      });
+    }) as typeof fetch,
+  );
+  try {
+    const controller = new AbortController();
+    const provider = new OpenRouterStrategyProvider("test-key", "test-model");
+    const result = provider.generateStrategy(prompt, { signal: controller.signal });
+    controller.abort();
+    await assert.rejects(() => result, /timed out after 120000ms/);
+    assert.equal(observedSignal?.aborted, true);
+    assert.equal(calls, 1);
+  } finally {
+    runtime.restore();
+  }
+});
+
 test("keeps the abort timeout active while consuming the response body", async () => {
   let calls = 0;
   const runtime = installMockedRuntime(

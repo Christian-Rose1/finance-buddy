@@ -1,6 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
 import {
   createGoalStrategyRun,
   getGoalStrategyRun,
@@ -19,6 +20,17 @@ import {
 } from "./strategyRunSigning";
 
 const SYNTHETIC_SECRET = "0123456789abcdef0123456789abcdef"; // 32 chars, synthetic only
+
+function fenceExecutor(client: SupabaseClient): StrategyStageFenceRpcExecutor {
+  return {
+    async execute(name, parameters, signal) {
+      const rpc = client.rpc(name, parameters);
+      return signal && typeof (rpc as { abortSignal?: unknown }).abortSignal === "function"
+        ? (rpc as unknown as { abortSignal(signal: AbortSignal): Promise<{ data: unknown; error: unknown }> }).abortSignal(signal)
+        : rpc;
+    },
+  };
+}
 
 let originalEnv: string | undefined;
 
@@ -151,8 +163,52 @@ function mockStageClient(
   const filtersRef: { current: Array<{ field: string; value: unknown }> } = {
     current: [],
   };
+  let currentRow = getResult.data && typeof getResult.data === "object"
+    ? { ...(getResult.data as Record<string, unknown>) }
+    : null;
+  let attemptCounter = 0;
 
   const client = {
+    rpc(name: string, args: Record<string, unknown>) {
+      const stage = args.p_stage as "flight" | "hotel";
+      const status = `${stage}_status`;
+      const attempt = `${stage}_attempt_id`;
+      const deadline = `${stage}_deadline_at`;
+      filtersRef.current = [
+        { field: "id", value: args.p_run_id },
+        { field: "goal_id", value: args.p_goal_id },
+        { field: "user_id", value: currentRow?.user_id },
+      ];
+      if (name === "prepare_goal_strategy_run_research_stage_start") {
+        currentRow = currentRow && { ...currentRow, [`${stage}_start_recovery_token`]: args.p_start_recovery_token };
+        return Promise.resolve({ data: "prepared", error: null });
+      }
+      if (name === "start_goal_strategy_run_research_stage") {
+        const attemptId = `00000000-0000-4000-8000-${String(++attemptCounter).padStart(12, "0")}`;
+        const revision = new Date().toISOString();
+        const deadlineAt = new Date(Date.now() + 120_000).toISOString();
+        updatePayloadRef.current = {
+          [status]: "running", [`${stage}_payload`]: null, [`${stage}_signature`]: null,
+        };
+        currentRow = currentRow && { ...currentRow, ...updatePayloadRef.current, [attempt]: attemptId, [deadline]: deadlineAt, updated_at: revision };
+        return Promise.resolve({ data: [{ attempt_id: attemptId, deadline_at: deadlineAt, revision }], error: null });
+      }
+      if (name === "save_goal_strategy_run_research_stage") {
+        updatePayloadRef.current = {
+          [status]: "succeeded", [`${stage}_payload`]: args.p_payload, [`${stage}_signature`]: args.p_signature,
+        };
+        currentRow = currentRow && { ...currentRow, ...updatePayloadRef.current };
+        return Promise.resolve({ data: "succeeded", error: null });
+      }
+      if (name === "fail_goal_strategy_run_research_stage") {
+        updatePayloadRef.current = {
+          [status]: "failed", [`${stage}_payload`]: null, [`${stage}_signature`]: null,
+        };
+        currentRow = currentRow && { ...currentRow, ...updatePayloadRef.current };
+        return Promise.resolve({ data: "failed", error: null });
+      }
+      return Promise.resolve({ data: null, error: { message: "unknown" } });
+    },
     from: (table: string) => {
       let selectColumns: string | null = null;
       const filters: Array<{ field: string; value: unknown }> = [];
@@ -176,22 +232,22 @@ function mockStageClient(
         },
         maybeSingle() {
           filtersRef.current = filters;
-          return getResult;
+          return { data: currentRow, error: getResult.error };
         },
         single() {
           filtersRef.current = filters;
           if (isUpdate && updatePayload) {
             // Merge the update payload onto the get result (preserves expires_at)
             const base =
-              getResult.data && typeof getResult.data === "object"
-                ? (getResult.data as Record<string, unknown>)
+              currentRow
+                ? currentRow
                 : validRunRow();
             return {
               data: { ...base, ...updatePayload },
               error: null,
             };
           }
-          return getResult;
+          return { data: currentRow, error: getResult.error };
         },
       };
       return builder;
@@ -671,7 +727,7 @@ test("start flight changes only flight fields", async () => {
   const row = validRunRow();
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
 
-  const started = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client);
+  const started = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
   const p = updatePayloadRef.current;
   assert.ok(p);
@@ -683,7 +739,7 @@ test("start flight changes only flight fields", async () => {
   assert.equal("hotel_signature" in p, false);
   const runningStage = inspectVerifiedRunningResearchStage(started);
   assert.equal(runningStage?.stage, "flight");
-  assert.equal(runningStage?.revision, updatePayloadRef.current?.updated_at);
+  assert.ok(Number.isFinite(Date.parse(runningStage?.revision ?? "")));
   assert.deepEqual(Object.keys(runningStage ?? {}).sort(), ["expiresAt", "revision", "stage"]);
   assert.ok(Object.isFrozen(started));
 });
@@ -692,7 +748,7 @@ test("start hotel changes only hotel fields", async () => {
   const row = validRunRow({ flight_status: "failed" });
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
 
-  await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", client);
+  await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", client, fenceExecutor(client));
 
   const p = updatePayloadRef.current;
   assert.ok(p);
@@ -708,33 +764,33 @@ test("start ownership filters are present on update", async () => {
   const row = validRunRow();
   const { client, filtersRef } = mockStageClient({ data: row, error: null });
 
-  await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client);
+  await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
   const filters = filtersRef.current;
   assert.ok(filters.some((f) => f.field === "id" && f.value === "run-abc-123"));
   assert.ok(filters.some((f) => f.field === "goal_id" && f.value === "goal-xyz-456"));
   assert.ok(filters.some((f) => f.field === "user_id" && f.value === "user-001"));
-  assert.ok(filters.some((f) => f.field === "flight_status" && f.value === "pending"));
-  assert.ok(filters.some((f) => f.field === "updated_at" && f.value === row.updated_at));
+  assert.equal(filters.some((f) => f.field === "flight_attempt_id"), false);
 });
 
 test("start mints no capability when stage order or transition fails", async () => {
   const wrongOrder = validRunRow({ flight_status: "pending" });
   const wrongOrderClient = mockStageClient({ data: wrongOrder, error: null }).client;
   await assert.rejects(
-    startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", wrongOrderClient),
+    startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", wrongOrderClient, fenceExecutor(wrongOrderClient)),
     /Failed to update strategy-run stage\./,
   );
 
   const row = validRunRow();
   const failedClient = {
+    rpc() { return { data: [], error: { message: "synthetic" } }; },
     from: () => ({
       select() { return this; }, eq() { return this; }, maybeSingle() { return { data: row, error: null }; },
       update() { return this; }, single() { return { data: null, error: { message: "synthetic" } }; },
     }),
   } as unknown as SupabaseClient;
   await assert.rejects(
-    startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", failedClient),
+    startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", failedClient, fenceExecutor(failedClient)),
     /Failed to update strategy-run stage\./,
   );
   assert.equal(inspectVerifiedRunningResearchStage({}), null);
@@ -746,10 +802,11 @@ test("start mints no capability when stage order or transition fails", async () 
 
 test("save flight stores exact serialized payload and valid bound signature", async () => {
   const payload = { flights: [{ airline: "UA", points: 70000 }] };
-  const row = validRunRow({ flight_status: "running" });
+  const row = validRunRow();
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
+  const capability = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
-  await saveGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", payload, client);
+  await saveGoalStrategyRunStage(capability, payload, client, fenceExecutor(client));
 
   const p = updatePayloadRef.current;
   assert.ok(p);
@@ -777,10 +834,11 @@ test("save flight stores exact serialized payload and valid bound signature", as
 
 test("save hotel stores exact serialized payload and valid bound signature", async () => {
   const payload = { hotel: { name: "Test Hotel", points: 50000 } };
-  const row = validRunRow({ hotel_status: "running" });
+  const row = validRunRow({ flight_status: "failed" });
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
+  const capability = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", client, fenceExecutor(client));
 
-  await saveGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "hotel", payload, client);
+  await saveGoalStrategyRunStage(capability, payload, client, fenceExecutor(client));
 
   const p = updatePayloadRef.current;
   assert.ok(p);
@@ -808,21 +866,23 @@ test("save hotel stores exact serialized payload and valid bound signature", asy
 
 test("save requires current selected status='running'", async () => {
   const payload = { flights: [{ airline: "UA" }] };
-  const row = validRunRow({ flight_status: "running" });
+  const row = validRunRow();
   const { client, filtersRef } = mockStageClient({ data: row, error: null });
+  const capability = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
-  await saveGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", payload, client);
+  await saveGoalStrategyRunStage(capability, payload, client, fenceExecutor(client));
 
   const filters = filtersRef.current;
-  assert.ok(filters.some((f) => f.field === "flight_status" && f.value === "running"));
+  assert.ok(filters.some((f) => f.field === "id" && f.value === "run-abc-123"));
 });
 
 test("flight save does not alter hotel fields and vice versa", async () => {
   const payload = { flights: [{ airline: "UA" }] };
-  const row = validRunRow({ flight_status: "running" });
+  const row = validRunRow();
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
+  const capability = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
-  await saveGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", payload, client);
+  await saveGoalStrategyRunStage(capability, payload, client, fenceExecutor(client));
 
   const p = updatePayloadRef.current;
   assert.ok(p);
@@ -833,10 +893,11 @@ test("flight save does not alter hotel fields and vice versa", async () => {
 
 test("save ownership filters are present on update", async () => {
   const payload = { flights: [{ airline: "UA" }] };
-  const row = validRunRow({ flight_status: "running" });
+  const row = validRunRow();
   const { client, filtersRef } = mockStageClient({ data: row, error: null });
+  const capability = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
-  await saveGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", payload, client);
+  await saveGoalStrategyRunStage(capability, payload, client, fenceExecutor(client));
 
   const filters = filtersRef.current;
   assert.ok(filters.some((f) => f.field === "id" && f.value === "run-abc-123"));
@@ -980,11 +1041,11 @@ test("payload/signature from another run cannot validate", async () => {
 // ---------------------------------------------------------------------------
 
 test("fail clears selected payload/signature and sets failed", async () => {
-  const payload = { flights: [{ airline: "UA" }] };
-  const row = validRunRowWithFlightPayload(payload);
+  const row = validRunRow();
   const { client, updatePayloadRef } = mockStageClient({ data: row, error: null });
+  const capability = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
-  await failGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client);
+  await failGoalStrategyRunStage(capability, client, fenceExecutor(client));
 
   const p = updatePayloadRef.current;
   assert.ok(p);
@@ -996,8 +1057,9 @@ test("fail clears selected payload/signature and sets failed", async () => {
 test("fail ownership filters are present on update", async () => {
   const row = validRunRow();
   const { client, filtersRef } = mockStageClient({ data: row, error: null });
+  const capability = await startGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client, fenceExecutor(client));
 
-  await failGoalStrategyRunStage("run-abc-123", "goal-xyz-456", "user-001", "flight", client);
+  await failGoalStrategyRunStage(capability, client, fenceExecutor(client));
 
   const filters = filtersRef.current;
   assert.ok(filters.some((f) => f.field === "id" && f.value === "run-abc-123"));

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildFlightPlanningEstimate, projectFlightPlanningEstimate } from "./flightPlanningEstimate";
+import type { FlightPlanningEstimateDependencies } from "./flightPlanningEstimate";
 import { buildStrategyRunStagePayload, validateStrategyRunStagePayload } from "./strategyRunPayload";
 import { toClientSafeStrategy } from "./travelEvidence";
 import { buildCustomerSafeStrategyPresentation } from "./customerSafeStrategyPresentation";
@@ -66,6 +67,31 @@ function assertSafelyOmittedEverywhere(value: unknown) {
   assert.equal(presentedProjection(value), null);
 }
 
+async function captureEstimateDiagnostics<T>(debug: boolean, operation: () => Promise<T>) {
+  const priorDebug = process.env.STRATEGY_DEBUG;
+  const priorError = console.error;
+  const logs: unknown[][] = [];
+  if (debug) process.env.STRATEGY_DEBUG = "1";
+  else delete process.env.STRATEGY_DEBUG;
+  console.error = (...values: unknown[]) => { logs.push(values); };
+  try {
+    return { value: await operation(), logs };
+  } finally {
+    console.error = priorError;
+    if (priorDebug === undefined) delete process.env.STRATEGY_DEBUG;
+    else process.env.STRATEGY_DEBUG = priorDebug;
+  }
+}
+
+const resolvedDependencies: FlightPlanningEstimateDependencies = {
+  resolveLocation: async (value: unknown) => ({ projection: resolved(value === "Paris" ? "CDG" : String(value), "airport", [value === "Paris" ? "CDG" : String(value)]), error: null }),
+  fetchFlight: async () => ({ observation, error: null } as any),
+};
+
+function assertOnlyCategory(logs: unknown[][], category: string) {
+  assert.deepEqual(logs, [[`[flight-planning-estimate] {"category":"${category}"}`]]);
+}
+
 test("builds an airport-only planning estimate with searched-party total", async () => {
   let fetches = 0;
   const estimate = await buildFlightPlanningEstimate(goal, {
@@ -75,6 +101,67 @@ test("builds an airport-only planning estimate with searched-party total", async
   assert.equal(fetches, 1);
   assert.equal(estimate?.total, 1736);
   assert.equal(estimate?.origin, "DEN");
+});
+
+test("emits one safe success category and nothing when diagnostics are disabled", async () => {
+  const enabled = await captureEstimateDiagnostics(true, () => buildFlightPlanningEstimate(goal, resolvedDependencies));
+  assert.ok(enabled.value);
+  assertOnlyCategory(enabled.logs, "success");
+
+  const disabled = await captureEstimateDiagnostics(false, () => buildFlightPlanningEstimate(goal, resolvedDependencies));
+  assert.ok(disabled.value);
+  assert.deepEqual(disabled.logs, []);
+});
+
+test("emits one allowlisted category for each controlled preflight and resolution failure", async () => {
+  const cases: Array<{ category: string; goal?: Goal; resolveLocation?: FlightPlanningEstimateDependencies["resolveLocation"] }> = [
+    { category: "invalid_saved_goal_shape", goal: { ...goal, origin: [] } },
+    { category: "origin_resolution_unavailable", resolveLocation: async (value) => value === "DEN" ? { projection: null, error: "http_failure" as const } : resolvedDependencies.resolveLocation(value) },
+    { category: "origin_resolution_unresolved", resolveLocation: async (value) => value === "DEN" ? { projection: { status: "unresolved" as const, selected: null, candidates: [] as const }, error: null } : resolvedDependencies.resolveLocation(value) },
+    { category: "destination_resolution_unavailable", resolveLocation: async (value) => value === "Paris" ? { projection: null, error: "provider_not_configured" as const } : resolvedDependencies.resolveLocation(value) },
+    { category: "destination_resolution_unresolved", resolveLocation: async (value) => value === "Paris" ? { projection: { status: "ambiguous" as const, selected: null, candidates: [] }, error: null } : resolvedDependencies.resolveLocation(value) },
+    { category: "invalid_resolved_search_location", resolveLocation: async (value) => ({ projection: resolved(value === "Paris" ? "CDG" : "DEN", "airport", ["LHR"]), error: null }) },
+  ];
+  for (const item of cases) {
+    let fetches = 0;
+    const result = await captureEstimateDiagnostics(true, () => buildFlightPlanningEstimate(item.goal ?? goal, {
+      resolveLocation: item.resolveLocation ?? resolvedDependencies.resolveLocation,
+      fetchFlight: async () => { fetches += 1; return { observation, error: null } as any; },
+    }));
+    assert.equal(result.value, null, item.category);
+    assert.equal(fetches, 0, item.category);
+    assertOnlyCategory(result.logs, item.category);
+  }
+});
+
+test("reports every existing fixed flight-client outcome without leaking injected text", async () => {
+  const categories = ["invalid_request", "provider_not_configured", "http_failure", "malformed_initial_response", "no_eligible_outbound", "malformed_return_response", "no_compatible_return", "normalization_failed"] as const;
+  for (const category of categories) {
+    const result = await captureEstimateDiagnostics(true, () => buildFlightPlanningEstimate(goal, {
+      ...resolvedDependencies,
+      fetchFlight: async () => ({ observation: null, error: category }),
+    }));
+    assert.equal(result.value, null);
+    assertOnlyCategory(result.logs, `flight_client_${category}`);
+  }
+
+  const sensitive = "goal-secret user-secret Paris 2027-04-03 $1736 https://evil.test token provider body";
+  const thrown = await captureEstimateDiagnostics(true, () => buildFlightPlanningEstimate(goal, {
+    ...resolvedDependencies,
+    fetchFlight: async () => { throw new Error(sensitive); },
+  }));
+  assert.equal(thrown.value, null);
+  assertOnlyCategory(thrown.logs, "unexpected_estimate_dependency_failure");
+  assert.equal(JSON.stringify(thrown.logs).includes(sensitive), false);
+});
+
+test("reports estimate projection rejection once", async () => {
+  const result = await captureEstimateDiagnostics(true, () => buildFlightPlanningEstimate(goal, {
+    ...resolvedDependencies,
+    fetchFlight: async () => ({ observation: { ...observation, price: { amount: 1_000_001, currency: "USD" } }, error: null } as any),
+  }));
+  assert.equal(result.value, null);
+  assertOnlyCategory(result.logs, "estimate_projection_rejected");
 });
 
 test("uses resolved city locations and preserves actual selected airports", async () => {

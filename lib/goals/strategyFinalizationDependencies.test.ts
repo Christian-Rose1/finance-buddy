@@ -1,22 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { saveLatestStrategy } from "./strategyRepository";
 import {
   getStrategyFinalizationDependencies,
   withStrategyFinalizationDependenciesForTest,
 } from "./strategyFinalizationDependencies";
 
 test("finalization save dependency is request-local and restores defaults", async () => {
-  const production = getStrategyFinalizationDependencies().saveLatestStrategy;
-  const replacement = async (...args: Parameters<typeof saveLatestStrategy>) =>
-    saveLatestStrategy(...args);
+  const production = getStrategyFinalizationDependencies();
+  const replacement = async (...args: Parameters<typeof production.commitFinalization>) =>
+    production.commitFinalization(...args);
 
   await withStrategyFinalizationDependenciesForTest(
-    { saveLatestStrategy: replacement },
+    { ...production, commitFinalization: replacement },
     async () => {
-      assert.equal(getStrategyFinalizationDependencies().saveLatestStrategy, replacement);
+      assert.equal(getStrategyFinalizationDependencies().commitFinalization, replacement);
     },
   );
 
-  assert.equal(getStrategyFinalizationDependencies().saveLatestStrategy, production);
+  assert.equal(getStrategyFinalizationDependencies(), production);
 });

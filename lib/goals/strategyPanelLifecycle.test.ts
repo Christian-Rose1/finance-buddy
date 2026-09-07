@@ -217,6 +217,22 @@ test("successful sibling options survive the other lane’s degradation", () => 
   assert.deepEqual(flightDegradedLane.hotelOptions, [hotelOption]);
 });
 
+test("a deadline's terminal degraded shape clears active stage progress and retains the prior saved strategy", () => {
+  const priorSavedStrategy = strategy;
+  const afterFlightDeadline = flightDegraded();
+  assert.equal(afterFlightDeadline.stage, "hotel");
+  const afterHotel = hotelSucceeded(afterFlightDeadline);
+  assert.equal(afterHotel.stage, "final");
+  const completed = transitionStrategyPanelRun(afterHotel, {
+    type: "finalization_succeeded",
+    strategy: priorSavedStrategy,
+    generatedAt: GENERATED_AT,
+  });
+  assert.equal(completed.state.isGenerating, false);
+  assert.equal(buildStrategyProgressPresentation(completed.state, true), null);
+  assert.deepEqual(completed.strategyUpdate, { strategy: priorSavedStrategy, generatedAt: GENERATED_AT });
+});
+
 test("an action-level flight failure stops the workflow and clears the run", () => {
   const result = transitionStrategyPanelRun(start(), { type: "flight_action_failed" });
   const state = result.state;

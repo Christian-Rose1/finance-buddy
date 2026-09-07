@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Sparkles } from "lucide-react";
-import { generateGoalFlightStageAction, generateGoalHotelStageAction, finalizeGoalStrategyRunAction } from "@/lib/goals/strategyActions";
+import { Loader2, Sparkles, Trash2 } from "lucide-react";
+import { deleteGoalStrategyAction, generateGoalFlightStageAction, generateGoalHotelStageAction, finalizeGoalStrategyRunAction } from "@/lib/goals/strategyActions";
 import type { PersonalizedStrategy, StrategyAwardOption } from "@/lib/goals/strategyTypes";
 import type { Goal } from "@/lib/goals/types";
 import { buildCustomerSafeStrategyPresentation } from "@/lib/goals/customerSafeStrategyPresentation";
@@ -35,6 +35,8 @@ export function GoalStrategyPanel({ goalId, goal, initialStrategy = null, initia
   const [strategy, setStrategy] = useState<PersonalizedStrategy | null>(initialStrategy);
   const [generatedAt, setGeneratedAt] = useState<string | null>(() => normalizePersistedStrategyTimestamp(initialGeneratedAt));
   const [runState, setRunState] = useState<StrategyPanelRunState>(() => createInitialStrategyPanelRunState());
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const noticeRef = useRef<HTMLDivElement>(null);
   const presentation = strategy ? buildCustomerSafeStrategyPresentation(goal, strategy, generatedAt) : null;
   // The narrative gate suppresses model prose in every evidence state; the
@@ -64,7 +66,8 @@ export function GoalStrategyPanel({ goalId, goal, initialStrategy = null, initia
   }
 
   async function handleGenerate() {
-    if (runState.isGenerating) return;
+    if (runState.isGenerating || isDeleting) return;
+    setDeleteError(null);
     let state = transitionStrategyPanelRun(runState, { type: "run_started" }).state;
     setRunState(state);
     try {
@@ -96,7 +99,7 @@ export function GoalStrategyPanel({ goalId, goal, initialStrategy = null, initia
   }
 
   async function handleRetry() {
-    if (runState.isGenerating || !isStrategyRetryAvailable(runState)) return;
+    if (runState.isGenerating || isDeleting || !isStrategyRetryAvailable(runState)) return;
     const retainedRunId = runState.runId;
     if (!retainedRunId) return;
     const state = transitionStrategyPanelRun(runState, { type: "retry_started" }).state;
@@ -112,11 +115,37 @@ export function GoalStrategyPanel({ goalId, goal, initialStrategy = null, initia
     }
   }
 
+  async function handleDelete() {
+    if (!strategy || runState.isGenerating || isDeleting) return;
+    const confirmed = window.confirm(
+      "Delete this saved strategy? This removes the saved plan. You can build a new plan later.",
+    );
+    if (!confirmed) return;
+
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      const result = await deleteGoalStrategyAction(goalId);
+      if (!result.success) {
+        setDeleteError("We couldn’t delete your strategy right now. Your saved plan is unchanged.");
+        return;
+      }
+      setStrategy(null);
+      setGeneratedAt(null);
+      setRunState(createInitialStrategyPanelRunState());
+    } catch {
+      setDeleteError("We couldn’t delete your strategy right now. Your saved plan is unchanged.");
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   return <div className="mt-6 border-t border-white/5 pt-4">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-sm font-medium text-slate-300">{strategy ? "Planning estimates" : "Ready to plan this trip?"}</p><p className="mt-1 text-xs text-slate-500">{strategy ? (benchmarkOnly ? "Planning estimates based on your saved goal, not a route- and date-specific recommendation." : "Exact cash and customer-verified records are shown with their evidence labels; recommendation prose is not generated yet.") : "We’ll use your saved goal to build a planning strategy."}</p></div><button type="button" onClick={handleGenerate} disabled={runState.isGenerating} className="fb-btn inline-flex min-h-11 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-60">{runState.isGenerating ? <><Loader2 className="h-4 w-4 animate-spin" />Working…</> : <><Sparkles className="h-4 w-4" />{strategy ? "Refresh plan" : "Build my plan"}</>}</button></div>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-sm font-medium text-slate-300">{strategy ? "Planning estimates" : "Ready to plan this trip?"}</p><p className="mt-1 text-xs text-slate-500">{strategy ? (benchmarkOnly ? "Planning estimates based on your saved goal, not a route- and date-specific recommendation." : "Exact cash and customer-verified records are shown with their evidence labels; recommendation prose is not generated yet.") : "We’ll use your saved goal to build a planning strategy."}</p></div><div className="flex flex-col gap-2 sm:flex-row"><button type="button" onClick={handleGenerate} disabled={runState.isGenerating || isDeleting} className="fb-btn inline-flex min-h-11 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-60">{runState.isGenerating ? <><Loader2 className="h-4 w-4 animate-spin" />Working…</> : <><Sparkles className="h-4 w-4" />{strategy ? "Refresh plan" : "Build my plan"}</>}</button>{strategy ? <button type="button" onClick={handleDelete} disabled={runState.isGenerating || isDeleting} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-rose-400/30 px-3 text-sm text-rose-200 disabled:cursor-not-allowed disabled:opacity-60">{isDeleting ? <><Loader2 className="h-4 w-4 animate-spin" />Deleting…</> : <><Trash2 className="h-4 w-4" />Delete strategy</>}</button> : null}</div></div>
     {progress ? <div className="mt-4 space-y-2" role="status" aria-live="polite"><p className="text-sm font-medium text-slate-200">{progress.heading}</p><p className="text-xs text-slate-500">{progress.description}</p>{progress.stageLabel ? <p className="text-xs font-medium text-slate-300">{progress.stageLabel}</p> : null}{previews.mode === "active" ? <StagedPreviewLists flightOptions={runState.flightOptions} hotelOptions={runState.hotelOptions} /> : null}</div> : null}
     {previews.mode === "retained" ? <div className="mt-4 space-y-2"><p className="text-xs text-slate-400">{previews.heading}</p><StagedPreviewLists flightOptions={runState.flightOptions} hotelOptions={runState.hotelOptions} /></div> : null}
     {failureMessage ? <div ref={noticeRef} tabIndex={-1} className="mt-4 rounded-xl border border-amber-400/20 bg-amber-400/10 p-3"><p className="text-sm text-amber-100">{failureMessage}</p>{retryAvailable ? <button type="button" className="mt-3 min-h-11 rounded-lg border border-amber-400/30 px-3 text-sm text-amber-100" onClick={handleRetry} disabled={runState.isGenerating}>Try finishing again</button> : null}</div> : null}
+    {deleteError ? <div role="alert" className="mt-4 rounded-xl border border-rose-400/20 bg-rose-400/10 p-3"><p className="text-sm text-rose-100">{deleteError}</p></div> : null}
     {presentation ? <CustomerSafeStrategyContent presentation={presentation} /> : null}
   </div>;
 }

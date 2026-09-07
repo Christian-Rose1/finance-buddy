@@ -5,9 +5,9 @@
  * staged strategy runs (flight, hotel). Each run is signed with an HMAC
  * that application code verifies before finalization.
  *
- * All operations use the cookie-aware server Supabase client and rely on RLS
- * as the security boundary. `user_id` and `goal_id` are always taken from the
- * explicit function arguments.
+ * Ordinary operations use the cookie-aware server Supabase client and RLS.
+ * The five deadline-fence RPCs use a narrowly scoped server-only executor
+ * after the action has derived `userId` from the authenticated session.
  */
 
 import { createServerClient } from "@/lib/supabase-server";
@@ -18,6 +18,8 @@ import {
   serializeStrategyRunPayload,
   parseStrategyRunPayload,
 } from "./strategyRunSigning";
+import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
+import type { PersonalizedStrategy } from "./strategyTypes";
 
 /** Current signature version. */
 const CURRENT_SIGNATURE_VERSION = 1;
@@ -28,9 +30,32 @@ interface VerifiedRunningResearchStageContext {
   runId: string;
   goalId: string;
   userId: string;
+  attemptId: string;
   gatewayView: VerifiedRunningResearchStageInspection;
 }
 const runningStageCapabilities = new WeakMap<object, VerifiedRunningResearchStageContext>();
+interface RecoverableResearchStageStartContext {
+  runId: string;
+  goalId: string;
+  userId: string;
+  stage: StrategyResearchStage;
+  recoveryToken: string;
+}
+const recoverableStageStarts = new WeakMap<object, RecoverableResearchStageStartContext>();
+interface VerifiedFinalizationAttemptContext {
+  runId: string;
+  goalId: string;
+  userId: string;
+  attemptId: string;
+}
+interface RecoverableFinalizationStartContext {
+  runId: string;
+  goalId: string;
+  userId: string;
+  recoveryToken: string;
+}
+const finalizationAttempts = new WeakMap<object, VerifiedFinalizationAttemptContext>();
+const recoverableFinalizationStarts = new WeakMap<object, RecoverableFinalizationStartContext>();
 
 export type StrategyRunStatus = "pending" | "running" | "succeeded" | "failed";
 export type StrategyResearchStage = "flight" | "hotel";
@@ -56,6 +81,27 @@ export interface SavedGoalStrategyRun {
 
 /** Opaque proof of an owned, verified, successfully started research stage. */
 export interface VerifiedRunningResearchStage { readonly _verifiedRunningStage?: never }
+/** Opaque recovery authority minted before the database stage-start request. */
+export interface RecoverableResearchStageStart { readonly _recoverableResearchStageStart?: never }
+/** Opaque server-held authority for one database-owned finalization attempt. */
+export interface VerifiedFinalizationAttempt { readonly _verifiedFinalizationAttempt?: never }
+/** Opaque recovery authority minted before the finalization-start request. */
+export interface RecoverableFinalizationStart { readonly _recoverableFinalizationStart?: never }
+
+/** Safe classification used only for an authoritative database-clock expiry. */
+export class StrategyRunStageSaveDeadlineError extends Error {
+  constructor() {
+    super("Strategy-run stage deadline reached.");
+    this.name = "StrategyRunStageSaveDeadlineError";
+  }
+}
+
+export class StrategyRunFinalizationDeadlineError extends Error {
+  constructor() {
+    super("Strategy-run finalization deadline reached.");
+    this.name = "StrategyRunFinalizationDeadlineError";
+  }
+}
 
 export interface VerifiedRunningResearchStageInspection {
   stage: StrategyResearchStage;
@@ -408,14 +454,25 @@ export async function getGoalStrategyRun(
 // Stage operations
 // ---------------------------------------------------------------------------
 
-/** Column names keyed by stage. */
-const STAGE_COLUMNS: Record<
-  StrategyResearchStage,
-  { status: string; payload: string; signature: string }
-> = {
-  flight: { status: "flight_status", payload: "flight_payload", signature: "flight_signature" },
-  hotel: { status: "hotel_status", payload: "hotel_payload", signature: "hotel_signature" },
-};
+interface StartedStageRpcRow {
+  attempt_id: string;
+  deadline_at: string;
+  revision: string;
+}
+
+function getRunningStageContext(
+  capability: VerifiedRunningResearchStage,
+  expectedStage?: StrategyResearchStage,
+): VerifiedRunningResearchStageContext {
+  if (!capability || typeof capability !== "object") {
+    throw new Error("Failed to update strategy-run stage.");
+  }
+  const context = runningStageCapabilities.get(capability as object);
+  if (!context || (expectedStage !== undefined && context.gatewayView.stage !== expectedStage)) {
+    throw new Error("Failed to update strategy-run stage.");
+  }
+  return context;
+}
 
 /**
  * Start a stage by setting its status to "running" and clearing payload/signature.
@@ -425,7 +482,10 @@ export async function startGoalStrategyRunStage(
   goalId: string,
   userId: string,
   stage: StrategyResearchStage,
-  client?: SupabaseClient,
+  client: SupabaseClient,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+  onRecoveryReady?: (recovery: RecoverableResearchStageStart) => void,
 ): Promise<VerifiedRunningResearchStage> {
   if (stage !== "flight" && stage !== "hotel") {
     throw new Error("Failed to update strategy-run stage.");
@@ -450,59 +510,83 @@ export async function startGoalStrategyRunStage(
     throw new Error("Failed to update strategy-run stage.");
   }
 
-  const supabase = client ?? (await createServerClient());
-  const cols = STAGE_COLUMNS[stage];
-  const now = new Date().toISOString();
-
-  const updatePayload: Record<string, unknown> = {
-    [cols.status]: "running",
-    [cols.payload]: null,
-    [cols.signature]: null,
-    updated_at: now,
-  };
-
-  const { data: row, error } = await supabase
-    .from("goal_strategy_runs")
-    .update(updatePayload)
-    .eq("id", runId)
-    .eq("goal_id", goalId)
-    .eq("user_id", userId)
-    .eq(cols.status, stage === "flight" ? existing.flightStatus : existing.hotelStatus)
-    .eq("updated_at", existing.updatedAt)
-    .select(SELECT_COLUMNS)
-    .single();
-
-  if (error || !row) {
+  if (signal?.aborted) throw new Error("Failed to update strategy-run stage.");
+  const recoveryToken = crypto.randomUUID();
+  const recoveryCapability = Object.freeze({}) as RecoverableResearchStageStart;
+  recoverableStageStarts.set(recoveryCapability as object, Object.freeze({
+    runId,
+    goalId,
+    userId,
+    stage,
+    recoveryToken,
+  }));
+  onRecoveryReady?.(recoveryCapability);
+  try {
+    const { data: prepareOutcome, error: prepareError } = await fenceExecutor.execute(
+      "prepare_goal_strategy_run_research_stage_start",
+      {
+      p_user_id: userId,
+      p_run_id: runId,
+      p_goal_id: goalId,
+      p_stage: stage,
+      p_start_recovery_token: recoveryToken,
+      },
+      signal,
+    );
+    if (prepareError || prepareOutcome !== "prepared") {
+      throw new Error("Failed to update strategy-run stage.");
+    }
+  } catch {
     throw new Error("Failed to update strategy-run stage.");
   }
-
-  if (!isValidRunRow(row)) {
+  if (signal?.aborted) throw new Error("Failed to update strategy-run stage.");
+  let data: unknown;
+  let error: unknown;
+  try {
+    ({ data, error } = await fenceExecutor.execute("start_goal_strategy_run_research_stage", {
+      p_user_id: userId,
+      p_run_id: runId,
+      p_goal_id: goalId,
+      p_stage: stage,
+      p_start_recovery_token: recoveryToken,
+    }, signal));
+  } catch {
     throw new Error("Failed to update strategy-run stage.");
   }
-
-  const saved = toSavedGoalStrategyRun(row);
-
-  if (saved.id !== runId || saved.goalId !== goalId || saved.userId !== userId) {
+  const row = Array.isArray(data) && data.length === 1 ? data[0] : null;
+  if (error || !row || typeof row !== "object") {
     throw new Error("Failed to update strategy-run stage.");
   }
-
-  verifyRunIntegrity(saved, true);
+  const started = row as Partial<StartedStageRpcRow>;
   if (
-    (stage === "flight" ? saved.flightStatus : saved.hotelStatus) !== "running" ||
-    !Number.isFinite(Date.parse(saved.updatedAt))
+    typeof started.attempt_id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(started.attempt_id) ||
+    typeof started.deadline_at !== "string" ||
+    typeof started.revision !== "string"
+  ) {
+    throw new Error("Failed to update strategy-run stage.");
+  }
+  const deadlineTimestamp = Date.parse(started.deadline_at);
+  const revisionTimestamp = Date.parse(started.revision);
+  if (
+    !Number.isFinite(deadlineTimestamp) ||
+    !Number.isFinite(revisionTimestamp) ||
+    deadlineTimestamp <= revisionTimestamp ||
+    deadlineTimestamp > Date.parse(existing.expiresAt)
   ) {
     throw new Error("Failed to update strategy-run stage.");
   }
 
   const gatewayView = Object.freeze({
     stage,
-    expiresAt: saved.expiresAt,
-    revision: saved.updatedAt,
+    expiresAt: started.deadline_at,
+    revision: started.revision,
   });
   const context = Object.freeze({
-    runId: saved.id,
-    goalId: saved.goalId,
-    userId: saved.userId,
+    runId,
+    goalId,
+    userId,
+    attemptId: started.attempt_id,
     gatewayView,
   });
   const capability = Object.freeze({}) as VerifiedRunningResearchStage;
@@ -511,17 +595,59 @@ export async function startGoalStrategyRunStage(
 }
 
 /**
+ * Recover a stage-start request whose response was lost to cancellation.
+ * The database updates only the exact owned running stage carrying this
+ * server-held recovery token.
+ */
+export async function recoverGoalStrategyRunStageStart(
+  recovery: RecoverableResearchStageStart,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+): Promise<"failed" | "succeeded"> {
+  if (signal?.aborted || !recovery || typeof recovery !== "object") {
+    throw new Error("Failed to recover strategy-run stage start.");
+  }
+  const context = recoverableStageStarts.get(recovery as object);
+  if (!context) throw new Error("Failed to recover strategy-run stage start.");
+  try {
+    const { data: outcome, error } = await fenceExecutor.execute(
+      "recover_goal_strategy_run_research_stage_start",
+      {
+      p_user_id: context.userId,
+      p_run_id: context.runId,
+      p_goal_id: context.goalId,
+      p_stage: context.stage,
+      p_start_recovery_token: context.recoveryToken,
+      },
+      signal,
+    );
+    if (!error && (outcome === "failed" || outcome === "succeeded")) return outcome;
+  } catch {
+    // Collapse transport/runtime details into the repository's fixed failure.
+  }
+  throw new Error("Failed to recover strategy-run stage start.");
+}
+
+/**
  * Save a serialized and signed payload for a stage. The stage must currently
  * be "running".
  */
 export async function saveGoalStrategyRunStage(
-  runId: string,
-  goalId: string,
-  userId: string,
-  stage: StrategyResearchStage,
+  capability: VerifiedRunningResearchStage,
   value: unknown,
-  client?: SupabaseClient,
+  client: SupabaseClient,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
 ): Promise<SavedGoalStrategyRun> {
+  if (signal?.aborted) throw new Error("Failed to save strategy-run stage.");
+  let context: VerifiedRunningResearchStageContext;
+  try {
+    context = getRunningStageContext(capability);
+  } catch {
+    throw new Error("Failed to save strategy-run stage.");
+  }
+  const { runId, goalId, userId, attemptId } = context;
+  const stage = context.gatewayView.stage;
   let existing: SavedGoalStrategyRun;
   try {
     const loaded = await getGoalStrategyRun(runId, goalId, userId, client);
@@ -532,6 +658,7 @@ export async function saveGoalStrategyRunStage(
   } catch {
     throw new Error("Failed to save strategy-run stage.");
   }
+  if (signal?.aborted) throw new Error("Failed to save strategy-run stage.");
 
   const serialized = serializeStrategyRunPayload(value);
   const normalizedExpiresAt = new Date(existing.expiresAt).toISOString();
@@ -546,42 +673,25 @@ export async function saveGoalStrategyRunStage(
     payload: serialized,
   });
 
-  const supabase = client ?? (await createServerClient());
-  const cols = STAGE_COLUMNS[stage];
-  const now = new Date().toISOString();
-
-  const updatePayload: Record<string, unknown> = {
-    [cols.status]: "succeeded",
-    [cols.payload]: serialized,
-    [cols.signature]: signature,
-    updated_at: now,
-  };
-
-  const { data: row, error } = await supabase
-    .from("goal_strategy_runs")
-    .update(updatePayload)
-    .eq("id", runId)
-    .eq("goal_id", goalId)
-    .eq("user_id", userId)
-    .eq(cols.status, "running")
-    .select(SELECT_COLUMNS)
-    .single();
-
-  if (error || !row) {
+  const { data: outcome, error } = await fenceExecutor.execute("save_goal_strategy_run_research_stage", {
+    p_user_id: userId,
+    p_run_id: runId,
+    p_goal_id: goalId,
+    p_stage: stage,
+    p_attempt_id: attemptId,
+    p_payload: serialized,
+    p_signature: signature,
+  }, signal);
+  if (!error && outcome === "deadline_expired") {
+    throw new StrategyRunStageSaveDeadlineError();
+  }
+  if (error || outcome !== "succeeded") {
     throw new Error("Failed to save strategy-run stage.");
   }
-
-  if (!isValidRunRow(row)) {
+  const saved = await getGoalStrategyRun(runId, goalId, userId, client);
+  if (!saved || (stage === "flight" ? saved.flightStatus : saved.hotelStatus) !== "succeeded") {
     throw new Error("Failed to save strategy-run stage.");
   }
-
-  const saved = toSavedGoalStrategyRun(row);
-
-  if (saved.id !== runId || saved.goalId !== goalId || saved.userId !== userId) {
-    throw new Error("Failed to save strategy-run stage.");
-  }
-
-  verifyRunIntegrity(saved, true);
 
   return immutableSavedRun(saved);
 }
@@ -590,58 +700,31 @@ export async function saveGoalStrategyRunStage(
  * Mark a stage as failed, clearing payload/signature.
  */
 export async function failGoalStrategyRunStage(
-  runId: string,
-  goalId: string,
-  userId: string,
-  stage: StrategyResearchStage,
-  client?: SupabaseClient,
-): Promise<SavedGoalStrategyRun> {
+  capability: VerifiedRunningResearchStage,
+  client: SupabaseClient,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+): Promise<"failed" | "succeeded"> {
+  if (signal?.aborted) throw new Error("Failed to update strategy-run stage.");
+  let context: VerifiedRunningResearchStageContext;
   try {
-    const existing = await getGoalStrategyRun(runId, goalId, userId, client);
-    if (!existing) {
-      throw new Error("Failed to update strategy-run stage.");
-    }
+    context = getRunningStageContext(capability);
   } catch {
     throw new Error("Failed to update strategy-run stage.");
   }
+  if (signal?.aborted) throw new Error("Failed to update strategy-run stage.");
 
-  const supabase = client ?? (await createServerClient());
-  const cols = STAGE_COLUMNS[stage];
-  const now = new Date().toISOString();
-
-  const updatePayload: Record<string, unknown> = {
-    [cols.status]: "failed",
-    [cols.payload]: null,
-    [cols.signature]: null,
-    updated_at: now,
-  };
-
-  const { data: row, error } = await supabase
-    .from("goal_strategy_runs")
-    .update(updatePayload)
-    .eq("id", runId)
-    .eq("goal_id", goalId)
-    .eq("user_id", userId)
-    .select(SELECT_COLUMNS)
-    .single();
-
-  if (error || !row) {
+  const { data: outcome, error } = await fenceExecutor.execute("fail_goal_strategy_run_research_stage", {
+    p_user_id: context.userId,
+    p_run_id: context.runId,
+    p_goal_id: context.goalId,
+    p_stage: context.gatewayView.stage,
+    p_attempt_id: context.attemptId,
+  }, signal);
+  if (error || (outcome !== "failed" && outcome !== "succeeded")) {
     throw new Error("Failed to update strategy-run stage.");
   }
-
-  if (!isValidRunRow(row)) {
-    throw new Error("Failed to update strategy-run stage.");
-  }
-
-  const saved = toSavedGoalStrategyRun(row);
-
-  if (saved.id !== runId || saved.goalId !== goalId || saved.userId !== userId) {
-    throw new Error("Failed to update strategy-run stage.");
-  }
-
-  verifyRunIntegrity(saved, true);
-
-  return immutableSavedRun(saved);
+  return outcome;
 }
 
 /**
@@ -703,6 +786,174 @@ export async function loadVerifiedGoalStrategyRunStage(
 // ---------------------------------------------------------------------------
 // Finalization and deletion
 // ---------------------------------------------------------------------------
+
+/** Delete an owned saved strategy through the database-authoritative fence. */
+export async function deleteOwnedGoalStrategy(
+  goalId: string,
+  userId: string,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+): Promise<void> {
+  if (!goalId || !userId) throw new Error("Failed to delete saved strategy.");
+  try {
+    const result = await fenceExecutor.execute("delete_owned_goal_strategy", {
+      p_user_id: userId,
+      p_goal_id: goalId,
+    });
+    if (!result.error && result.data === "deleted") return;
+  } catch {}
+  throw new Error("Failed to delete saved strategy.");
+}
+
+interface StartedFinalizationRpcRow {
+  attempt_id: string;
+  deadline_at: string;
+  revision: string;
+}
+
+/**
+ * Atomically enter finalization through a database-owned attempt/deadline.
+ * The recovery capability is registered before either start RPC is awaited so
+ * a lost response can never strand a newly committed running status.
+ */
+export async function startGoalStrategyRunFinalization(
+  runId: string,
+  goalId: string,
+  userId: string,
+  client: SupabaseClient,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+  onRecoveryReady?: (recovery: RecoverableFinalizationStart) => void,
+): Promise<VerifiedFinalizationAttempt> {
+  let existing: SavedGoalStrategyRun;
+  try {
+    const loaded = await getGoalStrategyRun(runId, goalId, userId, client);
+    if (!loaded) throw new Error("unavailable");
+    existing = loaded;
+  } catch {
+    throw new Error("Failed to start strategy-run finalization.");
+  }
+  const terminal = (status: StrategyRunStatus) => status === "succeeded" || status === "failed";
+  if (!terminal(existing.flightStatus) || !terminal(existing.hotelStatus) ||
+      (existing.finalStatus !== "pending" && existing.finalStatus !== "failed") || signal?.aborted) {
+    throw new Error("Failed to start strategy-run finalization.");
+  }
+
+  const recoveryToken = crypto.randomUUID();
+  const recovery = Object.freeze({}) as RecoverableFinalizationStart;
+  recoverableFinalizationStarts.set(recovery as object, Object.freeze({ runId, goalId, userId, recoveryToken }));
+  onRecoveryReady?.(recovery);
+
+  try {
+    const prepared = await fenceExecutor.execute("prepare_goal_strategy_run_finalization_start", {
+      p_user_id: userId, p_run_id: runId, p_goal_id: goalId,
+      p_start_recovery_token: recoveryToken,
+    }, signal);
+    if (prepared.error || prepared.data !== "prepared" || signal?.aborted) throw new Error("rejected");
+
+    const startedResult = await fenceExecutor.execute("start_goal_strategy_run_finalization", {
+      p_user_id: userId, p_run_id: runId, p_goal_id: goalId,
+      p_start_recovery_token: recoveryToken,
+    }, signal);
+    const row = Array.isArray(startedResult.data) && startedResult.data.length === 1
+      ? startedResult.data[0] : null;
+    if (startedResult.error || !row || typeof row !== "object") throw new Error("rejected");
+    const started = row as Partial<StartedFinalizationRpcRow>;
+    if (typeof started.attempt_id !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(started.attempt_id) ||
+        typeof started.deadline_at !== "string" || typeof started.revision !== "string") {
+      throw new Error("malformed");
+    }
+    const deadline = Date.parse(started.deadline_at);
+    const revision = Date.parse(started.revision);
+    if (!Number.isFinite(deadline) || !Number.isFinite(revision) || deadline <= revision ||
+        deadline > Date.parse(existing.expiresAt)) throw new Error("malformed");
+
+    const capability = Object.freeze({}) as VerifiedFinalizationAttempt;
+    finalizationAttempts.set(capability as object, Object.freeze({
+      runId, goalId, userId, attemptId: started.attempt_id,
+    }));
+    return capability;
+  } catch {
+    throw new Error("Failed to start strategy-run finalization.");
+  }
+}
+
+export async function recoverGoalStrategyRunFinalizationStart(
+  recovery: RecoverableFinalizationStart,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+): Promise<"failed" | "succeeded"> {
+  if (signal?.aborted || !recovery || typeof recovery !== "object") {
+    throw new Error("Failed to recover strategy-run finalization start.");
+  }
+  const context = recoverableFinalizationStarts.get(recovery as object);
+  if (!context) throw new Error("Failed to recover strategy-run finalization start.");
+  try {
+    const result = await fenceExecutor.execute("recover_goal_strategy_run_finalization_start", {
+      p_user_id: context.userId, p_run_id: context.runId, p_goal_id: context.goalId,
+      p_start_recovery_token: context.recoveryToken,
+    }, signal);
+    if (!result.error && (result.data === "failed" || result.data === "succeeded")) return result.data;
+  } catch {}
+  throw new Error("Failed to recover strategy-run finalization start.");
+}
+
+export interface CommittedFinalizedStrategy {
+  strategy: PersonalizedStrategy;
+  generatedAt: string;
+}
+
+/** Atomically persist the strategy and commit this exact live final attempt. */
+export async function commitGoalStrategyRunFinalization(
+  capability: VerifiedFinalizationAttempt,
+  strategy: PersonalizedStrategy,
+  generatedAt: string,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+): Promise<CommittedFinalizedStrategy> {
+  if (signal?.aborted || !capability || typeof capability !== "object") {
+    throw new Error("Failed to commit strategy-run finalization.");
+  }
+  const context = finalizationAttempts.get(capability as object);
+  if (!context) throw new Error("Failed to commit strategy-run finalization.");
+  const result = await fenceExecutor.execute("commit_goal_strategy_run_finalization", {
+    p_user_id: context.userId, p_run_id: context.runId, p_goal_id: context.goalId,
+    p_attempt_id: context.attemptId, p_strategy_json: strategy,
+    p_schema_version: 1, p_generated_at: generatedAt,
+  }, signal);
+  const row = Array.isArray(result.data) && result.data.length === 1 ? result.data[0] : null;
+  const outcome = row && typeof row === "object" ? (row as Record<string, unknown>).outcome : null;
+  if (!result.error && outcome === "deadline_expired") throw new StrategyRunFinalizationDeadlineError();
+  if (result.error || outcome !== "succeeded") throw new Error("Failed to commit strategy-run finalization.");
+  const persistedAt = (row as Record<string, unknown>).generated_at;
+  const persistedStrategy = (row as Record<string, unknown>).strategy_json;
+  if (typeof persistedAt !== "string" || !Number.isFinite(Date.parse(persistedAt)) ||
+      typeof persistedStrategy !== "object" || persistedStrategy === null || Array.isArray(persistedStrategy)) {
+    throw new Error("Failed to commit strategy-run finalization.");
+  }
+  return { strategy, generatedAt: new Date(persistedAt).toISOString() };
+}
+
+/** Fail only the exact current finalization attempt. A committed success wins. */
+export async function failGoalStrategyRunFinalization(
+  capability: VerifiedFinalizationAttempt,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+): Promise<"failed" | "succeeded"> {
+  if (signal?.aborted || !capability || typeof capability !== "object") {
+    throw new Error("Failed to fail strategy-run finalization.");
+  }
+  const context = finalizationAttempts.get(capability as object);
+  if (!context) throw new Error("Failed to fail strategy-run finalization.");
+  const result = await fenceExecutor.execute("fail_goal_strategy_run_finalization", {
+    p_user_id: context.userId, p_run_id: context.runId, p_goal_id: context.goalId,
+    p_attempt_id: context.attemptId,
+  }, signal);
+  if (result.error || (result.data !== "failed" && result.data !== "succeeded")) {
+    throw new Error("Failed to fail strategy-run finalization.");
+  }
+  return result.data;
+}
 
 /**
  * Transition a fully verified run's final status.

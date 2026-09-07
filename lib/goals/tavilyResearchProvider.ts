@@ -158,7 +158,7 @@ export class TavilyResearchProvider implements ResearchProvider {
     this.apiKey = key;
   }
 
-  async search(input: ResearchQuery): Promise<ResearchResponse> {
+  async search(input: ResearchQuery, options?: { signal?: AbortSignal }): Promise<ResearchResponse> {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       throw new TavilyResearchError(
         "Research query must be an object."
@@ -203,6 +203,9 @@ export class TavilyResearchProvider implements ResearchProvider {
     }
 
     const controller = new AbortController();
+    const abortFromCaller = () => controller.abort();
+    options?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    if (options?.signal?.aborted) controller.abort();
     const timeoutId = setTimeout(
       () => controller.abort(),
       REQUEST_TIMEOUT_MS
@@ -241,6 +244,7 @@ export class TavilyResearchProvider implements ResearchProvider {
       );
     } finally {
       clearTimeout(timeoutId);
+      options?.signal?.removeEventListener("abort", abortFromCaller);
     }
 
     if (!response.ok) {

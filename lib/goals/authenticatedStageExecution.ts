@@ -5,10 +5,18 @@ import {
   type VerifiedStageQueryExecutor,
 } from "./providerExecutionGateway";
 import type { ResearchProvider } from "./researchTypes";
+import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
 import {
   startGoalStrategyRunStage,
+  type RecoverableResearchStageStart,
   type StrategyResearchStage,
+  type VerifiedRunningResearchStage,
 } from "./strategyRunRepository";
+
+export interface StartedVerifiedResearchStageExecution {
+  executor: VerifiedStageQueryExecutor;
+  runningStage: VerifiedRunningResearchStage;
+}
 
 /**
  * Authenticated action-path composition: the repository transition must mint
@@ -20,14 +28,23 @@ export async function startVerifiedResearchStageExecution(
   userId: string,
   stage: StrategyResearchStage,
   provider: ResearchProvider,
-  client?: SupabaseClient,
-): Promise<VerifiedStageQueryExecutor> {
+  client: SupabaseClient,
+  fenceExecutor: StrategyStageFenceRpcExecutor,
+  signal?: AbortSignal,
+  onRecoveryReady?: (recovery: RecoverableResearchStageStart) => void,
+): Promise<StartedVerifiedResearchStageExecution> {
   const runningStage = await startGoalStrategyRunStage(
     runId,
     goalId,
     userId,
     stage,
     client,
+    fenceExecutor,
+    signal,
+    onRecoveryReady,
   );
-  return createProviderExecutionGateway(runningStage, provider);
+  return Object.freeze({
+    executor: createProviderExecutionGateway(runningStage, provider, signal),
+    runningStage,
+  });
 }

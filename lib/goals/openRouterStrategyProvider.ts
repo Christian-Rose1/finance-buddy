@@ -183,7 +183,8 @@ export class OpenRouterStrategyProvider implements StrategyProvider {
    * never accepted or sent.
    */
   async generateStrategy(
-    prompt: SanitizedStrategyPrompt
+    prompt: SanitizedStrategyPrompt,
+    options?: { signal?: AbortSignal },
   ): Promise<PersonalizedStrategyNarrative> {
     // Serialize once so every bounded retry sends exactly the same sanitized
     // request. The full personalized context is never accepted here.
@@ -205,6 +206,9 @@ export class OpenRouterStrategyProvider implements StrategyProvider {
 
     for (let attempt = 1; attempt <= MAX_TOTAL_ATTEMPTS; attempt += 1) {
       const controller = new AbortController();
+      const abortFromCaller = () => controller.abort();
+      options?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+      if (options?.signal?.aborted) controller.abort();
       const timeoutId = setTimeout(
         () => controller.abort(),
         DEFAULT_TIMEOUT_MS
@@ -388,6 +392,7 @@ export class OpenRouterStrategyProvider implements StrategyProvider {
         }
       } finally {
         clearTimeout(timeoutId);
+        options?.signal?.removeEventListener("abort", abortFromCaller);
       }
     }
 

@@ -4,7 +4,28 @@ import { buildSerpApiFlightLocationClient } from "./serpApiFlightLocationClient"
 import { buildSerpApiFlightSearchLocation } from "./serpApiFlightSearchLocation";
 import type { NormalizedSerpApiFlightObservation } from "./serpApiFlightNormalizer";
 import type { SerpApiFlightLocationClientResult } from "./serpApiFlightLocationClient";
-import type { SerpApiFlightClientResult, SerpApiFlightRequest } from "./serpApiFlightClient";
+import type { SerpApiFlightClientErrorCategory, SerpApiFlightClientResult, SerpApiFlightRequest } from "./serpApiFlightClient";
+
+export type FlightPlanningEstimateDiagnosticCategory =
+  | "success"
+  | "invalid_saved_goal_shape"
+  | "origin_resolution_unavailable"
+  | "origin_resolution_unresolved"
+  | "destination_resolution_unavailable"
+  | "destination_resolution_unresolved"
+  | "invalid_resolved_search_location"
+  | `flight_client_${SerpApiFlightClientErrorCategory}`
+  | "estimate_projection_rejected"
+  | "unexpected_estimate_dependency_failure";
+
+/** Emits only one fixed prefix and one allowlisted category. */
+export function logFlightPlanningEstimateDiagnostic(
+  category: FlightPlanningEstimateDiagnosticCategory,
+): void {
+  if (process.env.STRATEGY_DEBUG === "1") {
+    console.error(`[flight-planning-estimate] ${JSON.stringify({ category })}`);
+  }
+}
 
 export interface FlightPlanningEstimateSegment {
   sequence: number;
@@ -47,6 +68,10 @@ const ESTIMATE_KEYS = new Set(["label", "origin", "destination", "outboundDate",
 const SEGMENT_KEYS = new Set(["sequence", "departureAirport", "departureTime", "arrivalAirport", "arrivalTime", "marketingCarrier", "marketingFlightNumber", "cabin"]);
 const UNKNOWN_SET = new Set<string>(FLIGHT_PLANNING_ESTIMATE_UNKNOWNS);
 const CABINS = new Set(["economy", "premium_economy", "business", "first"]);
+const FLIGHT_CLIENT_ERRORS = new Set<SerpApiFlightClientErrorCategory>([
+  "invalid_request", "provider_not_configured", "http_failure", "malformed_initial_response",
+  "no_eligible_outbound", "malformed_return_response", "no_compatible_return", "normalization_failed",
+]);
 const MAX_TOTAL = 1_000_000;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const onlyKeys = (value: Record<string, unknown>, keys: ReadonlySet<string>) => Object.keys(value).every((key) => keys.has(key));
@@ -136,19 +161,55 @@ export async function buildFlightPlanningEstimate(
   },
 ): Promise<FlightPlanningEstimate | null> {
   try {
-    if (goal.origin.length !== 1 || goal.destinations.length !== 1 || !goal.earliestDeparture || !goal.latestReturn || goal.cabinPreference === "flexible") return null;
+    if (
+      !isRecord(goal) ||
+      !Array.isArray(goal.origin) || goal.origin.length !== 1 || typeof goal.origin[0] !== "string" ||
+      !Array.isArray(goal.destinations) || goal.destinations.length !== 1 || typeof goal.destinations[0] !== "string" ||
+      !calendarDate(goal.earliestDeparture) || !calendarDate(goal.latestReturn) || goal.latestReturn < goal.earliestDeparture ||
+      typeof goal.travelerCount !== "number" || !Number.isInteger(goal.travelerCount) || goal.travelerCount < 1 || goal.travelerCount > 9 ||
+      typeof goal.cabinPreference !== "string" || !CABINS.has(goal.cabinPreference) ||
+      typeof goal.currency !== "string" || !/^[A-Z]{3}$/.test(goal.currency)
+    ) {
+      logFlightPlanningEstimateDiagnostic("invalid_saved_goal_shape");
+      return null;
+    }
     const [originResult, destinationResult] = await Promise.all([
       dependencies.resolveLocation(goal.origin[0]),
       dependencies.resolveLocation(goal.destinations[0]),
     ]);
-    if (!originResult.projection || originResult.projection.status !== "resolved" || !destinationResult.projection || destinationResult.projection.status !== "resolved") return null;
+    if (!originResult.projection) {
+      logFlightPlanningEstimateDiagnostic("origin_resolution_unavailable");
+      return null;
+    }
+    if (originResult.projection.status !== "resolved") {
+      logFlightPlanningEstimateDiagnostic("origin_resolution_unresolved");
+      return null;
+    }
+    if (!destinationResult.projection) {
+      logFlightPlanningEstimateDiagnostic("destination_resolution_unavailable");
+      return null;
+    }
+    if (destinationResult.projection.status !== "resolved") {
+      logFlightPlanningEstimateDiagnostic("destination_resolution_unresolved");
+      return null;
+    }
     const origin = buildSerpApiFlightSearchLocation(originResult.projection);
     const destination = buildSerpApiFlightSearchLocation(destinationResult.projection);
-    if (!origin || !destination) return null;
+    if (!origin || !destination) {
+      logFlightPlanningEstimateDiagnostic("invalid_resolved_search_location");
+      return null;
+    }
     const result = await dependencies.fetchFlight({ origin, destination, outboundDate: goal.earliestDeparture, returnDate: goal.latestReturn, travelers: goal.travelerCount, cabin: goal.cabinPreference, currency: goal.currency });
-    if (!result.observation || result.error) return null;
+    if (result.error && FLIGHT_CLIENT_ERRORS.has(result.error)) {
+      logFlightPlanningEstimateDiagnostic(`flight_client_${result.error}`);
+      return null;
+    }
+    if (result.error || !result.observation) {
+      logFlightPlanningEstimateDiagnostic("estimate_projection_rejected");
+      return null;
+    }
     const observation = result.observation;
-    return projectFlightPlanningEstimate({
+    const estimate = projectFlightPlanningEstimate({
     label: "Flight planning estimate",
     origin: observation.origin,
     destination: observation.destination,
@@ -167,7 +228,10 @@ export async function buildFlightPlanningEstimate(
     verificationLabel: "Not customer-verified",
     availabilityLabel: "Not live or bookable; verify before booking",
     });
+    logFlightPlanningEstimateDiagnostic(estimate ? "success" : "estimate_projection_rejected");
+    return estimate;
   } catch {
+    logFlightPlanningEstimateDiagnostic("unexpected_estimate_dependency_failure");
     return null;
   }
 }

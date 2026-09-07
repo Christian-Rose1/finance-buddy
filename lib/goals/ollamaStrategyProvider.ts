@@ -61,9 +61,13 @@ export class OllamaStrategyProvider implements StrategyProvider {
   }
 
   async generateStrategy(
-    prompt: SanitizedStrategyPrompt
+    prompt: SanitizedStrategyPrompt,
+    options?: { signal?: AbortSignal },
   ): Promise<PersonalizedStrategyNarrative> {
     const controller = new AbortController();
+    const abortFromCaller = () => controller.abort();
+    options?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    if (options?.signal?.aborted) controller.abort();
 
     const timeoutId = setTimeout(
       () => controller.abort(),
@@ -125,6 +129,7 @@ export class OllamaStrategyProvider implements StrategyProvider {
       );
     } finally {
       clearTimeout(timeoutId);
+      options?.signal?.removeEventListener("abort", abortFromCaller);
     }
 
     if (!response.ok) {
