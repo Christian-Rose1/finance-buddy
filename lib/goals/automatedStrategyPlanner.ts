@@ -342,6 +342,7 @@ export async function generateAutomatedStrategyFromResearchStages(
         : []),
     ],
     flightPlanningEstimate: stages.flight?.flightPlanningEstimate ?? null,
+    hotelPlanningEstimate: stages.hotel?.hotelPlanningEstimate ?? null,
   };
 
   // 4. Build an enriched context without mutating any input.
@@ -402,5 +403,6 @@ export async function generateAutomatedStrategyFromResearchStages(
     pointsInventory,
     allocationScenarios,
     flightPlanningEstimate: interpreted.flightPlanningEstimate ?? null,
+    hotelPlanningEstimate: interpreted.hotelPlanningEstimate ?? null,
   };
 }

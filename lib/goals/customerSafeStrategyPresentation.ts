@@ -1,6 +1,13 @@
 import type { Goal } from "./types";
 import type { CustomerVerifiedTravelOption, PersonalizedStrategy, PublicExactCashCandidate, StrategyAllocationScenario, StrategyAwardOption, StrategyPointsInventoryItem } from "./strategyTypes";
 import { projectFlightPlanningEstimate } from "./flightPlanningEstimate";
+import {
+  HOTEL_PLANNING_ESTIMATE_AVAILABILITY_LABEL,
+  HOTEL_PLANNING_ESTIMATE_LABEL,
+  projectHotelPlanningEstimate,
+  type HotelPlanningEstimate,
+  type HotelPlanningEstimateOption,
+} from "./hotelPlanningEstimate";
 import { buildCustomerSafeGoalSummary, safeGoalLabel, toCustomerSafeResearchLabel, type CustomerSafeGoalSummary } from "./customerSafeGoalSummary";
 import { formatPersistedStrategyTimestamp } from "./customerSafeStrategyTimestamp";
 import { filterCustomerSentences } from "./customerTextPolicy";
@@ -16,7 +23,9 @@ export interface CustomerSafeAlternative { key: string; title: string; tradeoff:
 export interface CustomerSafeExactCashOption { key: string; kind: "flight" | "hotel"; sourceLabel: string; evidenceLabel: "Exact cash quote"; priceLabel: string; taxesLabel: string | null; datesLabel: string | null; coverageLabel: string; cancellationLabel: string | null; baggageLabel: string | null; unknownCount: number; }
 export interface CustomerSafeVerifiedOption { key: string; kind: "flight" | "hotel"; summary: string; confirmedAtLabel: string | null; evidenceLabel: "Customer verified"; unknownCount: number; }
 export interface CustomerSafeFlightPlanningEstimate { label: "Flight planning estimate"; route: string; dates: string; travelersLabel: string; cabin: string; priceLabel: string; retrievedAt: string; segments: string[]; unknowns: string[]; evidenceLabel: "Planning estimate"; verificationLabel: "Not customer-verified"; availabilityLabel: "Not live or bookable; verify before booking"; }
-export interface CustomerSafeStrategyPresentation { goal: CustomerSafeGoalSummary; strategy: { headline: string; summary: string; actions: CustomerSafeAction[] }; rewards: { confirmedCount: number; needsConfirmationCount: number; pathCount: number; summary: string; verified: CustomerSafeRewardAccount[]; unverified: CustomerSafeRewardAccount[]; scenarios: CustomerSafeScenario[] }; flightEstimates: CustomerSafeEstimate[]; flightPlanningEstimate: CustomerSafeFlightPlanningEstimate | null; hotelEstimates: CustomerSafeEstimate[]; currentCash: CustomerSafeExactCashOption[]; customerVerified: CustomerSafeVerifiedOption[]; alternatives: CustomerSafeAlternative[]; details: { assumptions: string[]; warnings: string[]; unknowns: string[]; evidenceLabels: string[] }; refinementTopics: string[]; lastResearched: string | null; lastResearchedLabel: string | null; }
+export interface CustomerSafeHotelPlanningEstimateOption { key: string; propertyName: string; nightlyPriceLabel: string | null; totalPriceLabel: string | null; ratingLabel: string | null; hotelClassLabel: string | null; neighborhoodLabel: string | null; amenities: string[]; trustStatusLabel: string; propertyUrl: string | null; imageUrl: string | null; }
+export interface CustomerSafeHotelPlanningEstimate { label: typeof HOTEL_PLANNING_ESTIMATE_LABEL; destination: string; dates: string; nights: number; travelersLabel: string; currencyLabel: string | null; options: CustomerSafeHotelPlanningEstimateOption[]; disclosure: string; evidenceLabel: string; verificationLabel: string; availabilityLabel: string; }
+export interface CustomerSafeStrategyPresentation { goal: CustomerSafeGoalSummary; strategy: { headline: string; summary: string; actions: CustomerSafeAction[] }; rewards: { confirmedCount: number; needsConfirmationCount: number; pathCount: number; summary: string; verified: CustomerSafeRewardAccount[]; unverified: CustomerSafeRewardAccount[]; scenarios: CustomerSafeScenario[] }; flightEstimates: CustomerSafeEstimate[]; flightPlanningEstimate: CustomerSafeFlightPlanningEstimate | null; hotelPlanningEstimate: CustomerSafeHotelPlanningEstimate | null; hotelEstimates: CustomerSafeEstimate[]; currentCash: CustomerSafeExactCashOption[]; customerVerified: CustomerSafeVerifiedOption[]; alternatives: CustomerSafeAlternative[]; details: { assumptions: string[]; warnings: string[]; unknowns: string[]; evidenceLabels: string[] }; refinementTopics: string[]; lastResearched: string | null; lastResearchedLabel: string | null; }
 export const CUSTOMER_SAFE_MAX_ESTIMATES = 3;
 export const CUSTOMER_SAFE_MAX_ALTERNATIVES = 2;
 
@@ -114,6 +123,52 @@ function nonNegative(value: unknown): number | null { const result = finite(valu
 function nonNegativeInteger(value: unknown): number | null { const result = nonNegative(value); return result !== null && Number.isInteger(result) ? result : null; }
 function estimate(option: StrategyAwardOption | undefined, key: string): CustomerSafeEstimate | null { if (!option) return null; return { key, programName: toCustomerSafeResearchLabel(option.programName, "Reward program"), redemptionLabel: option.redemptionType === "flight" ? "Flight" : option.redemptionType === "hotel" ? "Hotel" : "Travel option", pricingLabel: label(pricingLabels, option.pricingBasis, "Pricing basis not confirmed"), itineraryLabel: option.itineraryLabel ? toCustomerSafeResearchLabel(option.itineraryLabel, "") || null : null, pointsRequired: nonNegativeInteger(option.pointsRequired), cashFees: nonNegative(option.cashFees), seats: nonNegativeInteger(option.seats), cabin: option.cabin ? label(cabinLabels, option.cabin, "Cabin preference saved") : null, coverageLabel: label(coverageLabels, option.coverageStatus, "Coverage not confirmed"), travelerCountCovered: nonNegativeInteger(option.travelerCountCovered), nightCountCovered: nonNegativeInteger(option.nightCountCovered), evidenceLabel: "Planning estimate", availabilityLabel: "Check current availability before acting" }; }
 
+/** Fixed per-trust-status labels; never provider- or model-authored. */
+const hotelTrustStatusLabels: Record<HotelPlanningEstimateOption["trustStatus"], string> = { search_estimate: "Search estimate only; verify current price and availability", price_unavailable: "Price not confirmed" };
+
+/**
+ * Re-projects the persisted hotel planning estimate through the strict hotel
+ * projector and rebuilds a customer-safe view. Any value that fails its
+ * validation becomes null; a rejected estimate becomes null entirely — the
+ * same fail-closed convention as the flight planning estimate.
+ */
+function buildCustomerSafeHotelPlanningEstimate(raw: unknown): CustomerSafeHotelPlanningEstimate | null {
+  const estimate = projectHotelPlanningEstimate(raw);
+  if (!estimate) return null;
+  const optionView = (option: HotelPlanningEstimateOption, index: number): CustomerSafeHotelPlanningEstimateOption => ({
+    key: `hotel-estimate-option-${index + 1}`,
+    propertyName: option.propertyName,
+    nightlyPriceLabel: option.nightlyPrice !== null && option.nightlyPriceCurrency !== null
+      ? `${option.nightlyPriceCurrency} ${option.nightlyPrice.toLocaleString("en-US")} per night`
+      : null,
+    totalPriceLabel: option.totalPrice !== null && option.totalPriceCurrency !== null
+      ? `${option.totalPriceCurrency} ${option.totalPrice.toLocaleString("en-US")} total stay`
+      : null,
+    ratingLabel: option.rating !== null && option.reviewCount !== null
+      ? `${option.rating.toLocaleString("en-US")} (${option.reviewCount.toLocaleString("en-US")} reviews)`
+      : null,
+    hotelClassLabel: option.hotelClass !== null ? `${option.hotelClass}-star` : null,
+    neighborhoodLabel: option.neighborhood !== null ? safeText(option.neighborhood) || null : null,
+    amenities: option.amenities.map((item) => safeText(item)).filter(Boolean).slice(0, 12),
+    trustStatusLabel: hotelTrustStatusLabels[option.trustStatus],
+    propertyUrl: option.propertyUrl,
+    imageUrl: option.imageUrl,
+  });
+  return {
+    label: HOTEL_PLANNING_ESTIMATE_LABEL,
+    destination: estimate.destination,
+    dates: `${estimate.checkInDate} – ${estimate.checkOutDate}`,
+    nights: estimate.nights,
+    travelersLabel: `${estimate.travelers} ${estimate.travelers === 1 ? "traveler" : "travelers"}`,
+    currencyLabel: safeCurrencyLabel(estimate.currency),
+    options: estimate.options.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map(optionView),
+    disclosure: estimate.disclosure,
+    evidenceLabel: estimate.evidenceLabel,
+    verificationLabel: estimate.verificationLabel,
+    availabilityLabel: HOTEL_PLANNING_ESTIMATE_AVAILABILITY_LABEL,
+  };
+}
+
 export function buildCustomerSafeStrategyPresentation(goal: Goal, strategy: PersonalizedStrategy, generatedAt: string | null = null): CustomerSafeStrategyPresentation {
   const flights = strategy.flightOptions ?? []; const hotels = strategy.hotelOptions ?? []; const inventory = strategy.pointsInventory ?? [];
   const safeAccount = (item: StrategyPointsInventoryItem, index: number): CustomerSafeRewardAccount => ({ key: `account-${index + 1}`, programName: toCustomerSafeResearchLabel(item.programName, "Reward program"), ownerType: item.ownerType, ownerLabel: safeGoalLabel(item.ownerLabel, item.ownerType === "self" ? "You" : "Companion"), balance: nonNegative(item.balance), verificationLabel: item.verificationStatus === "verified" ? "Confirmed rewards balance" : "Balance needs confirmation", originLabel: item.origin === "connected" ? "Connected account" : item.origin === "manual" ? "Manually entered" : "Evidence-backed", balanceAsOf: safeGoalLabel(item.balanceAsOf) });
@@ -135,5 +190,10 @@ export function buildCustomerSafeStrategyPresentation(goal: Goal, strategy: Pers
   const customerVerified = (strategy.customerVerifiedOptions ?? []).map(safeVerifiedOption);
   const planning = projectFlightPlanningEstimate(strategy.flightPlanningEstimate);
   const flightPlanningEstimate: CustomerSafeFlightPlanningEstimate | null = planning ? { label: "Flight planning estimate", route: `${planning.origin} → ${planning.destination}`, dates: `${planning.outboundDate} – ${planning.returnDate}`, travelersLabel: `${planning.travelers} ${planning.travelers === 1 ? "traveler" : "travelers"} · searched-party total`, cabin: label(cabinLabels, planning.cabin, "Cabin not confirmed"), priceLabel: `${safeCurrencyLabel(planning.currency) ?? "Currency not confirmed"} ${planning.total.toLocaleString("en-US")} total`, retrievedAt: timestamp(planning.retrievedAt) ?? "Retrieval time not confirmed", segments: [...planning.outboundSegments, ...planning.returnSegments].map((item) => `${item.departureAirport} ${item.departureTime} → ${item.arrivalAirport} ${item.arrivalTime}`).slice(0, 16), unknowns: planning.unknowns.filter((item) => safeText(item)), evidenceLabel: "Planning estimate", verificationLabel: "Not customer-verified", availabilityLabel: "Not live or bookable; verify before booking" } : null;
-  return { goal: goalSummary, strategy: { headline: narrativeCopy.headline, summary: narrativeCopy.summary, actions: [] }, rewards: { confirmedCount: confirmed.length, needsConfirmationCount: needs.length, pathCount: scenarios.length, summary: `${confirmed.length} confirmed rewards account${confirmed.length === 1 ? "" : "s"}, ${needs.length} balance${needs.length === 1 ? "" : "s"} needing confirmation, and ${scenarios.length} planning path${scenarios.length === 1 ? "" : "s"}. Accounts and programs remain separate.`, verified: confirmed, unverified: needs, scenarios }, flightEstimates: flights.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `flight-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), flightPlanningEstimate, hotelEstimates: hotels.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `hotel-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), currentCash, customerVerified, alternatives: [], details: { assumptions, warnings, unknowns: [], evidenceLabels: [...flights, ...hotels].some((item) => (item.evidenceLevel ?? "planning_benchmark") === "planning_benchmark") ? ["Planning estimate"] : [] }, refinementTopics: safeList(strategy.followUpQuestions), lastResearched: timestamp(generatedAt), lastResearchedLabel: formatPersistedStrategyTimestamp(generatedAt)?.label ?? null };
+  // The signed hotel-stage estimate is re-projected through the strict hotel
+  // projector at the presentation boundary: any value that no longer validates
+  // becomes null rather than reaching the customer (flight-estimate
+  // convention).
+  const hotelPlanningEstimate = buildCustomerSafeHotelPlanningEstimate(strategy.hotelPlanningEstimate);
+  return { goal: goalSummary, strategy: { headline: narrativeCopy.headline, summary: narrativeCopy.summary, actions: [] }, rewards: { confirmedCount: confirmed.length, needsConfirmationCount: needs.length, pathCount: scenarios.length, summary: `${confirmed.length} confirmed rewards account${confirmed.length === 1 ? "" : "s"}, ${needs.length} balance${needs.length === 1 ? "" : "s"} needing confirmation, and ${scenarios.length} planning path${scenarios.length === 1 ? "" : "s"}. Accounts and programs remain separate.`, verified: confirmed, unverified: needs, scenarios }, flightEstimates: flights.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `flight-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), flightPlanningEstimate, hotelPlanningEstimate, hotelEstimates: hotels.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `hotel-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), currentCash, customerVerified, alternatives: [], details: { assumptions, warnings, unknowns: [], evidenceLabels: [...flights, ...hotels].some((item) => (item.evidenceLevel ?? "planning_benchmark") === "planning_benchmark") ? ["Planning estimate"] : [] }, refinementTopics: safeList(strategy.followUpQuestions), lastResearched: timestamp(generatedAt), lastResearchedLabel: formatPersistedStrategyTimestamp(generatedAt)?.label ?? null };
 }

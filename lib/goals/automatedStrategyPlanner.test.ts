@@ -3,12 +3,17 @@ import { after, before, test } from "node:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
+  generateAutomatedStrategyFromResearchStages,
   generateHotelResearchStage,
   shouldRunOptionalCardResearch,
   type StagedResearchDependencies,
+  type VerifiedStrategyResearchStages,
 } from "./automatedStrategyPlanner";
 import { ResearchInterpreterError, type ResearchInterpreter } from "./researchInterpreter";
 import { buildResearchPlannerInput } from "./researchPlannerInputBuilder";
+import { projectHotelPlanningEstimate } from "./hotelPlanningEstimate";
+import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
+import type { PersonalizedStrategy } from "./strategyTypes";
 import {
   buildSavedGoalWebTravelDiscoveryPlan,
   toSavedGoalWebDiscoveryInput,
@@ -410,4 +415,182 @@ test("hotel stage preserves general planning-benchmark options without destinati
   assert.deepEqual(interpreted.awardOptions, [general]);
   assert.deepEqual(interpreted.assumptions, assumptions);
   assert.deepEqual(interpreted.warnings, warnings);
+});
+
+// ---------------------------------------------------------------------------
+// Finalized-strategy hotelPlanningEstimate propagation
+// ---------------------------------------------------------------------------
+
+function stubOllamaStrategyNarrative(narrative: Record<string, unknown>): void {
+  process.env.OLLAMA_BASE_URL = "http://localhost:11434";
+  process.env.OLLAMA_STRATEGY_MODEL = "planner-test-model";
+  globalThis.fetch = (async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ message: { content: JSON.stringify(narrative) } }),
+  })) as unknown as typeof fetch;
+}
+
+function restoreOllamaStrategyFetch(priorFetch: typeof fetch | undefined, priorBaseUrl: string | undefined, priorModel: string | undefined): void {
+  if (priorFetch === undefined) delete (globalThis as { fetch?: typeof fetch }).fetch;
+  else globalThis.fetch = priorFetch;
+  if (priorBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+  else process.env.OLLAMA_BASE_URL = priorBaseUrl;
+  if (priorModel === undefined) delete process.env.OLLAMA_STRATEGY_MODEL;
+  else process.env.OLLAMA_STRATEGY_MODEL = priorModel;
+}
+
+function minimalNarrative(): Record<string, unknown> {
+  return {
+    headline: "Model headline must be replaced",
+    summary: "Model summary must be replaced",
+    feasibility: "on_track",
+    pointsGap: 42_000,
+    recommendedAwardOptionId: "hotel-option-general",
+    recommendedCardOfferId: "card-1",
+    flightOptions: [],
+    hotelOptions: [],
+    actions: [],
+    alternatives: [],
+    assumptions: [],
+    warnings: [],
+    followUpQuestions: ["Model follow-up"],
+    // Hostile: the model must never be able to set the persisted estimates.
+    flightPlanningEstimate: { label: "Flight planning estimate", hijacked: true },
+    hotelPlanningEstimate: { label: "Hotel planning estimate", hijacked: true },
+  };
+}
+
+async function finalizeWithStages(stages: VerifiedStrategyResearchStages): Promise<PersonalizedStrategy> {
+  // Deterministic provider selection: force the Ollama path so the stubbed
+  // fetch is used and no real provider network call can occur. Key values are
+  // only saved and restored — never read or printed.
+  const priorFetch = globalThis.fetch;
+  const priorOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const priorBaseUrl = process.env.OLLAMA_BASE_URL;
+  const priorModel = process.env.OLLAMA_STRATEGY_MODEL;
+  delete process.env.OPENROUTER_API_KEY;
+  stubOllamaStrategyNarrative(minimalNarrative());
+  try {
+    return await generateAutomatedStrategyFromResearchStages(
+      context(),
+      [],
+      CATALOG,
+      stages,
+      "retry",
+    );
+  } finally {
+    if (priorOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = priorOpenRouterKey;
+    restoreOllamaStrategyFetch(priorFetch, priorBaseUrl, priorModel);
+  }
+}
+
+const hotelEstimateFixture = projectHotelPlanningEstimate({
+  schemaVersion: 1,
+  label: "Hotel planning estimate",
+  destination: "Paris",
+  checkInDate: "2027-04-03",
+  checkOutDate: "2027-04-11",
+  nights: 8,
+  travelers: 2,
+  currency: "USD",
+  options: [{
+    id: "serpapi-hotel-1",
+    propertyName: "Example Grand Hotel",
+    locationText: null,
+    nightlyPrice: 1200,
+    nightlyPriceCurrency: "USD",
+    totalPrice: 9600,
+    totalPriceCurrency: "USD",
+    rating: 4.5,
+    reviewCount: 214,
+    hotelClass: 4,
+    neighborhood: null,
+    amenities: ["Free Wi-Fi"],
+    propertyUrl: "https://example.com/example-grand-hotel",
+    imageUrl: null,
+    trustStatus: "search_estimate",
+  }],
+  disclosure: "Search estimates only; not bookable; verify current price and availability before booking",
+  evidenceLabel: "Planning estimate",
+  verificationLabel: "Not customer-verified",
+  availabilityLabel: "Search estimates only; not bookable; verify current price and availability before booking",
+});
+assert.ok(hotelEstimateFixture, "hotel estimate fixture must be valid");
+
+const flightEstimateFixture: FlightPlanningEstimate = {
+  label: "Flight planning estimate" as const,
+  origin: "DEN",
+  destination: "Paris",
+  outboundDate: "2027-04-03",
+  returnDate: "2027-04-11",
+  travelers: 2,
+  cabin: "economy",
+  currency: "USD",
+  total: 1800,
+  priceCoverage: "searched_party_total" as const,
+  retrievedAt: "2026-08-01T00:00:00.000Z",
+  outboundSegments: [{
+    sequence: 1,
+    departureAirport: "DEN",
+    departureTime: "2027-04-03 08:00",
+    arrivalAirport: "CDG",
+    arrivalTime: "2027-04-03 22:00",
+    marketingCarrier: null,
+    marketingFlightNumber: null,
+    cabin: "economy",
+  }],
+  returnSegments: [{
+    sequence: 1,
+    departureAirport: "CDG",
+    departureTime: "2027-04-11 09:00",
+    arrivalAirport: "DEN",
+    arrivalTime: "2027-04-11 23:00",
+    marketingCarrier: null,
+    marketingFlightNumber: null,
+    cabin: "economy",
+  }],
+  unknowns: ["offer_expiry"],
+  evidenceLabel: "Planning estimate" as const,
+  verificationLabel: "Not customer-verified" as const,
+  availabilityLabel: "Not live or bookable; verify before booking" as const,
+};
+
+const emptyStage = {
+  awardOptions: [],
+  cardOffers: [],
+  sources: [],
+  assumptions: [],
+  warnings: [],
+};
+
+test("finalized strategy copies the verified signed hotel-stage estimate and never model output", async () => {
+  const strategy = await finalizeWithStages({
+    flight: null,
+    hotel: { ...emptyStage, hotelPlanningEstimate: hotelEstimateFixture },
+  });
+
+  assert.deepEqual(strategy.hotelPlanningEstimate, hotelEstimateFixture);
+  assert.equal(strategy.flightPlanningEstimate, null);
+  const serialized = JSON.stringify(strategy);
+  // The model narrative's hostile estimate shapes must not survive.
+  assert.equal(serialized.includes("hijacked"), false);
+  assert.equal(serialized.includes("Model headline"), false);
+});
+
+test("finalized strategy keeps flight and hotel estimates independent and absent stages null", async () => {
+  const withFlight = await finalizeWithStages({
+    flight: { ...emptyStage, flightPlanningEstimate: flightEstimateFixture },
+    hotel: null,
+  });
+  assert.deepEqual(withFlight.flightPlanningEstimate, flightEstimateFixture);
+  assert.equal(withFlight.hotelPlanningEstimate, null);
+
+  const withBoth = await finalizeWithStages({
+    flight: { ...emptyStage, flightPlanningEstimate: flightEstimateFixture },
+    hotel: { ...emptyStage, hotelPlanningEstimate: hotelEstimateFixture },
+  });
+  assert.deepEqual(withBoth.flightPlanningEstimate, flightEstimateFixture);
+  assert.deepEqual(withBoth.hotelPlanningEstimate, hotelEstimateFixture);
 });

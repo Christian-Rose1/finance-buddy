@@ -1,5 +1,6 @@
 import type { Goal, RewardAccount } from "./types";
 import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
+import type { HotelPlanningEstimate } from "./hotelPlanningEstimate";
 
 export type StrategyDataStatus =
   | "live"
@@ -222,6 +223,12 @@ export interface PersonalizedStrategy {
   currentCashOptions?: PublicExactCashCandidate[];
   customerVerifiedOptions?: CustomerVerifiedTravelOption[];
   flightPlanningEstimate?: FlightPlanningEstimate | null;
+  /**
+   * Copied only from the verified signed hotel-stage payload during
+   * deterministic planner assembly; never sourced from model output,
+   * browser input, award options, warnings, or assumptions.
+   */
+  hotelPlanningEstimate?: HotelPlanningEstimate | null;
 }
 
 /**

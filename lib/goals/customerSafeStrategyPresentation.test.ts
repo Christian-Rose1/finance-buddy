@@ -872,3 +872,129 @@ test("drops hostile object elements from lists and follow-up topics", () => {
   assert.equal(output.includes("hostile-list-value"), false);
   assert.equal(output.includes("source-hostile"), false);
 });
+
+// ---------------------------------------------------------------------------
+// Customer-safe hotel planning estimate
+// ---------------------------------------------------------------------------
+
+function hotelEstimate(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    label: "Hotel planning estimate",
+    destination: "Paris",
+    checkInDate: "2027-04-03",
+    checkOutDate: "2027-04-11",
+    nights: 8,
+    travelers: 2,
+    currency: "USD",
+    options: [{
+      id: "serpapi-hotel-1",
+      propertyName: "Example Grand Hotel",
+      locationText: null,
+      nightlyPrice: 1200,
+      nightlyPriceCurrency: "USD",
+      totalPrice: 9600,
+      totalPriceCurrency: "USD",
+      rating: 4.5,
+      reviewCount: 214,
+      hotelClass: 4,
+      neighborhood: null,
+      amenities: ["Free Wi-Fi"],
+      propertyUrl: "https://example.com/example-grand-hotel",
+      imageUrl: null,
+      trustStatus: "search_estimate",
+    }],
+    disclosure: "Search estimates only; not bookable; verify current price and availability before booking",
+    evidenceLabel: "Planning estimate",
+    verificationLabel: "Not customer-verified",
+    availabilityLabel: "Search estimates only; not bookable; verify current price and availability before booking",
+    ...overrides,
+  };
+}
+
+/** Test-only cast: intentionally malformed/untrusted shapes for boundary tests. */
+function asHotelEstimate(value: unknown): PersonalizedStrategy["hotelPlanningEstimate"] {
+  return value as PersonalizedStrategy["hotelPlanningEstimate"];
+}
+
+test("a verified hotel-stage estimate appears unchanged and survives customer-safe projection", () => {
+  const estimate = hotelEstimate();
+  const view = build(baseStrategy({ hotelPlanningEstimate: asHotelEstimate(estimate) }));
+  const hotel = view.hotelPlanningEstimate;
+
+  assert.ok(hotel);
+  assert.equal(hotel.label, "Hotel planning estimate");
+  assert.equal(hotel.destination, "Paris");
+  assert.equal(hotel.dates, "2027-04-03 – 2027-04-11");
+  assert.equal(hotel.nights, 8);
+  assert.equal(hotel.travelersLabel, "2 travelers");
+  assert.equal(hotel.currencyLabel, "USD");
+  assert.equal(hotel.options.length, 1);
+  const option = hotel.options[0]!;
+  assert.equal(option.propertyName, "Example Grand Hotel");
+  assert.equal(option.nightlyPriceLabel, "USD 1,200 per night");
+  assert.equal(option.totalPriceLabel, "USD 9,600 total stay");
+  assert.equal(option.ratingLabel, "4.5 (214 reviews)");
+  assert.equal(option.hotelClassLabel, "4-star");
+  assert.equal(option.trustStatusLabel, "Search estimate only; verify current price and availability");
+  assert.equal(option.propertyUrl, "https://example.com/example-grand-hotel");
+  assert.equal(hotel.evidenceLabel, "Planning estimate");
+  assert.equal(hotel.verificationLabel, "Not customer-verified");
+  // Nightly price is never presented as the trip total; labels stay distinct.
+  assert.notEqual(option.nightlyPriceLabel, option.totalPriceLabel);
+  // Flight estimate lane unchanged.
+  assert.equal(view.flightPlanningEstimate, null);
+});
+
+test("absent hotel estimates remain null and invalid estimates cannot enter the presentation", () => {
+  // Absent field stays null.
+  assert.equal(build(baseStrategy()).hotelPlanningEstimate, null);
+  // Explicit null stays null.
+  assert.equal(build(baseStrategy({ hotelPlanningEstimate: null })).hotelPlanningEstimate, null);
+
+  const invalid = [
+    { ...hotelEstimate(), schemaVersion: 2 },
+    { ...hotelEstimate(), destination: "" },
+    { ...hotelEstimate(), options: [] },
+    { ...hotelEstimate(), options: [{ ...(hotelEstimate().options as Record<string, unknown>[])[0], nightlyPrice: "1200" }] },
+    { ...hotelEstimate(), currency: "usd" },
+    "not-an-estimate",
+    42,
+  ];
+  for (const estimate of invalid) {
+    const view = build(baseStrategy({ hotelPlanningEstimate: asHotelEstimate(estimate) }));
+    assert.equal(view.hotelPlanningEstimate, null, JSON.stringify(estimate).slice(0, 80));
+    const output = serialized(view);
+    assert.equal(output.includes("Example Grand Hotel"), false, "rejected estimate must not leak");
+  }
+});
+
+test("an estimate with unsupported or hostile option fields is dropped whole at presentation", () => {
+  const hostile = hotelEstimate({
+    options: [{
+      ...(hotelEstimate().options as Record<string, unknown>[])[0],
+      apiKey: "sk-secret-value",
+      requestUrl: "https://serpapi.com/search?api_key=sk-secret-value",
+      rawResponse: { nested: "provider payload" },
+    }],
+  });
+  const view = build(baseStrategy({ hotelPlanningEstimate: asHotelEstimate(hostile) }));
+  assert.equal(view.hotelPlanningEstimate, null);
+  const output = serialized(view);
+  assert.equal(output.includes("sk-secret-value"), false);
+  assert.equal(output.includes("serpapi.com"), false);
+  assert.equal(output.includes("provider payload"), false);
+});
+
+test("flight and hotel estimate lanes stay independent with safe-label enforcement", () => {
+  const view = build(baseStrategy({
+    hotelPlanningEstimate: asHotelEstimate(hotelEstimate()),
+  }));
+  assert.ok(view.hotelPlanningEstimate);
+  assert.ok(view.hotelEstimates.length > 0);
+  // The cash-lane hotel award options are untouched by the estimate lane.
+  assert.equal(view.hotelEstimates[0]?.programName, "Program A");
+  const output = serialized(view);
+  // Fixed trust labels only; no provider- or model-authored copy.
+  assert.equal(output.includes("Search estimates only; not bookable"), true);
+});
