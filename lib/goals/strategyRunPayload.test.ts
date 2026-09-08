@@ -741,7 +741,6 @@ test("NaN number rejected", () => {
     ),
   );
 });
-
 test("infinite number rejected", () => {
   assertRejected(() =>
     validateStrategyRunStagePayload(
@@ -749,4 +748,164 @@ test("infinite number rejected", () => {
       "flight",
     ),
   );
+});
+
+// ---------------------------------------------------------------------------
+// Hotel planning estimate (hotel-stage-only envelope field)
+// ---------------------------------------------------------------------------
+
+function validHotelEstimateOption(): Record<string, unknown> {
+  return {
+    id: "hotel-option-1",
+    propertyName: "Example Grand Hotel",
+    locationText: "Copenhagen",
+    nightlyPrice: 1200,
+    nightlyPriceCurrency: "USD",
+    totalPrice: 9600,
+    totalPriceCurrency: "USD",
+    rating: 4.5,
+    reviewCount: 812,
+    hotelClass: 4,
+    neighborhood: "Vesterbro",
+    amenities: ["Free Wi-Fi", "Breakfast included"],
+    propertyUrl: "https://example.com/property",
+    imageUrl: "https://example.com/image.jpg",
+    trustStatus: "search_estimate",
+  };
+}
+
+function validHotelEstimate(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    label: "Hotel planning estimate",
+    destination: "Copenhagen",
+    checkInDate: "2027-04-03",
+    checkOutDate: "2027-04-11",
+    nights: 8,
+    travelers: 2,
+    currency: "USD",
+    options: [validHotelEstimateOption()],
+    disclosure:
+      "Search estimates only; not bookable; verify current price and availability before booking",
+    evidenceLabel: "Planning estimate",
+    verificationLabel: "Not customer-verified",
+    availabilityLabel:
+      "Search estimates only; not bookable; verify current price and availability before booking",
+  };
+}
+
+test("hotel estimate accepted on hotel envelope and round-trips projected fields", () => {
+  const estimate = validHotelEstimate();
+  const result = validateStrategyRunStagePayload(
+    { schemaVersion: 1, stage: "hotel", interpreted: { ...validHotelInterpreted(), hotelPlanningEstimate: estimate } },
+    "hotel",
+  );
+  const projected = result.interpreted.hotelPlanningEstimate;
+  assert.ok(projected);
+  assert.equal(projected.destination, "Copenhagen");
+  assert.equal(projected.checkInDate, "2027-04-03");
+  assert.equal(projected.checkOutDate, "2027-04-11");
+  assert.equal(projected.nights, 8);
+  assert.equal(projected.travelers, 2);
+  assert.equal(projected.currency, "USD");
+  assert.equal(projected.options[0].propertyName, "Example Grand Hotel");
+  assert.equal(projected.options[0].nightlyPrice, 1200);
+  assert.equal(projected.options[0].totalPrice, 9600);
+  assert.notStrictEqual(projected, estimate);
+});
+
+test("hotel estimate round-trips through buildStrategyRunStagePayload", () => {
+  const estimate = validHotelEstimate();
+  const envelope = buildStrategyRunStagePayload("hotel", {
+    ...validHotelInterpreted(),
+    hotelPlanningEstimate: estimate,
+  } as unknown as InterpretedResearch);
+  assert.ok(envelope.interpreted.hotelPlanningEstimate);
+  assert.equal(envelope.interpreted.hotelPlanningEstimate.destination, "Copenhagen");
+  // Round-trip: the projected value revalidates identically.
+  const again = validateStrategyRunStagePayload(
+    { schemaVersion: 1, stage: "hotel", interpreted: { ...validHotelInterpreted(), hotelPlanningEstimate: envelope.interpreted.hotelPlanningEstimate } },
+    "hotel",
+  );
+  assert.deepEqual(again.interpreted.hotelPlanningEstimate, envelope.interpreted.hotelPlanningEstimate);
+});
+
+test("null hotel estimate preserved as null on hotel envelope", () => {
+  const result = validateStrategyRunStagePayload(
+    { schemaVersion: 1, stage: "hotel", interpreted: { ...validHotelInterpreted(), hotelPlanningEstimate: null } },
+    "hotel",
+  );
+  assert.equal(result.interpreted.hotelPlanningEstimate, null);
+});
+
+test("undefined hotel estimate stays absent, matching flight semantics", () => {
+  const result = validateStrategyRunStagePayload(
+    { schemaVersion: 1, stage: "hotel", interpreted: validHotelInterpreted() },
+    "hotel",
+  );
+  assert.equal("hotelPlanningEstimate" in result.interpreted, false);
+  const flightResult = validateStrategyRunStagePayload(
+    { schemaVersion: 1, stage: "flight", interpreted: validFlightInterpreted() },
+    "flight",
+  );
+  assert.equal("hotelPlanningEstimate" in flightResult.interpreted, false);
+});
+
+test("hotel estimate rejected on the flight stage", () => {
+  assertRejected(() =>
+    validateStrategyRunStagePayload(
+      { schemaVersion: 1, stage: "flight", interpreted: { ...validFlightInterpreted(), hotelPlanningEstimate: validHotelEstimate() } },
+      "flight",
+    ),
+  );
+  assertRejected(() =>
+    buildStrategyRunStagePayload("flight", {
+      ...validFlightInterpreted(),
+      hotelPlanningEstimate: validHotelEstimate(),
+    } as unknown as InterpretedResearch),
+  );
+});
+
+test("malformed hotel estimates rejected on the hotel stage", () => {
+  const malformed: Array<Record<string, unknown>> = [
+    { ...validHotelEstimate(), schemaVersion: 2 },
+    { ...validHotelEstimate(), checkInDate: "2027-13-40" },
+    { ...validHotelEstimate(), nights: 9 },
+    { ...validHotelEstimate(), currency: "usd" },
+    { ...validHotelEstimate(), options: [] },
+    { ...validHotelEstimate(), options: [{ ...validHotelEstimateOption(), propertyName: "" }] },
+    { ...validHotelEstimate(), options: [{ ...validHotelEstimateOption(), nightlyPrice: 0 }] },
+    { ...validHotelEstimate(), options: [{ ...validHotelEstimateOption(), propertyUrl: "javascript:alert(1)" }] },
+    { ...validHotelEstimate(), options: [{ ...validHotelEstimateOption(), extraField: "bad" }] },
+    { ...validHotelEstimate(), extra: "bad" },
+  ];
+  for (const estimate of malformed) {
+    assertRejected(() =>
+      validateStrategyRunStagePayload(
+        { schemaVersion: 1, stage: "hotel", interpreted: { ...validHotelInterpreted(), hotelPlanningEstimate: estimate } },
+        "hotel",
+      ),
+    );
+  }
+});
+
+test("non-object hotel estimate rejected on the hotel stage", () => {
+  for (const estimate of ["estimate", 42, [], true]) {
+    assertRejected(() =>
+      validateStrategyRunStagePayload(
+        { schemaVersion: 1, stage: "hotel", interpreted: { ...validHotelInterpreted(), hotelPlanningEstimate: estimate } },
+        "hotel",
+      ),
+    );
+  }
+});
+
+test("existing hotel award payload unchanged with hotel estimate absent", () => {
+  const result = validateStrategyRunStagePayload(
+    { schemaVersion: 1, stage: "hotel", interpreted: validHotelInterpreted() },
+    "hotel",
+  );
+  assert.ok(result);
+  assert.equal(result.interpreted.awardOptions[0].pointsRequired, 25000);
+  assert.equal(result.interpreted.awardOptions[0].pricingBasis, "per_night");
 });

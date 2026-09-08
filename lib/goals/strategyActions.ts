@@ -16,14 +16,13 @@ import { prepareGoalStrategyContext } from "./strategyActionContext";
 import {
   generateAutomatedStrategyFromResearchStages,
   type StrategyStageFinalizationMode,
-  generateFlightResearchStage,
-  generateHotelResearchStage,
 } from "./automatedStrategyPlanner";
 import { ResearchInterpreterError } from "./researchInterpreter";
 import type { InterpretedResearch } from "./researchInterpreter";
 import {
   createGoalStrategyRun,
   getGoalStrategyRun,
+  startGoalStrategyRunStage,
   loadVerifiedGoalStrategyRunStage,
   failGoalStrategyRunStage,
   recoverGoalStrategyRunStageStart,
@@ -45,13 +44,15 @@ import type {
   StrategySource,
 } from "./strategyTypes";
 import { toClientSafeResearch, toClientSafeStrategy } from "./travelEvidence";
-import type { VerifiedStageQueryExecutor } from "./providerExecutionGateway";
-import { startVerifiedResearchStageExecution } from "./authenticatedStageExecution";
 import { getStrategyStageActionDependencies } from "./strategyStageActionDependencies";
 import { getStrategyFinalizationDependencies } from "./strategyFinalizationDependencies";
 import { getStrategyDeletionDependencies } from "./strategyDeletionDependencies";
 import type { ResearchInterpreter } from "./researchInterpreter";
-import { logFlightPlanningEstimateDiagnostic } from "./flightPlanningEstimate";
+import { buildFlightPlanningEstimate, logFlightPlanningEstimateDiagnostic } from "./flightPlanningEstimate";
+import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
+import type { HotelPlanningEstimate } from "./hotelPlanningEstimate";
+import { logSerpApiHotelEstimateDiagnostic } from "./serpApiHotelClient";
+import type { Goal } from "./types";
 import {
   runWithStrategyResearchStageDeadline,
   runWithStrategyResearchStageCleanupDeadline,
@@ -173,8 +174,6 @@ export async function generateGoalFlightStageAction(
       supabase,
       userId,
       context,
-      customerRewardPrograms,
-      catalogRewardPrograms,
     } = preparedResult.prepared;
 
     const fenceExecutor = await dependencies.createFenceExecutor();
@@ -185,12 +184,16 @@ export async function generateGoalFlightStageAction(
     createdGoalId = run.goalId;
     const expiresAt = run.expiresAt;
     const outcome = await runWithStrategyResearchStageDeadline(async (signal) => {
-      const started = await startVerifiedResearchStageExecution(
+      // The production flight stage is SerpAPI-direct: the authenticated
+      // planning-estimate path is the only flight result source. The stage
+      // authority is minted directly through the repository fence, so no
+      // Tavily provider, research interpreter, or provider-backed execution
+      // gateway is ever constructed or called for flight.
+      const runningStage = await startGoalStrategyRunStage(
         runId,
         goalId,
         userId,
         "flight",
-        dependencies.createProvider(),
         supabase,
         fenceExecutor,
         signal,
@@ -205,37 +208,32 @@ export async function generateGoalFlightStageAction(
       );
       uncertainStartState.cleanup = null;
       deadlineState.handler = () => terminalDeadlineFailure(
-        "flight", runId, goalId, expiresAt, started.runningStage, null, supabase, fenceExecutor, dependencies,
+        "flight", runId, goalId, expiresAt, runningStage, null, supabase, fenceExecutor, dependencies,
       );
 
-      const interpreted = await runFlightStageResearch(
-        started.runningStage,
-        started.executor,
-        dependencies.createInterpreter(),
+      const estimateOutcome = await runFlightStageSerpApiEstimate(
+        runningStage,
+        dependencies,
         supabase,
         fenceExecutor,
-        context,
-        catalogRewardPrograms,
-        signal,
+        context.goal,
         runId,
         goalId,
+        signal,
       );
 
-      if (interpreted.kind === "failed") return { kind: "failed" as const };
-
-      let estimate = null;
-      try {
-        estimate = dependencies.createFlightPlanningEstimate
-          ? await dependencies.createFlightPlanningEstimate(context.goal)
-          : null;
-      } catch {
-        logFlightPlanningEstimateDiagnostic("unexpected_estimate_dependency_failure");
-        estimate = null;
-      }
+      if (estimateOutcome.kind === "failed") return { kind: "failed" as const };
       if (signal.aborted) throw new StrategyResearchStageDeadlineError();
-      const envelope = buildStrategyRunStagePayload("flight", { ...interpreted.value, flightPlanningEstimate: estimate });
+      const envelope = buildStrategyRunStagePayload("flight", {
+        awardOptions: [],
+        cardOffers: [],
+        sources: [],
+        assumptions: [],
+        warnings: [],
+        flightPlanningEstimate: estimateOutcome.estimate,
+      });
       if (signal.aborted) throw new StrategyResearchStageDeadlineError();
-      await dependencies.saveStage(started.runningStage, envelope, supabase, fenceExecutor, signal);
+      await dependencies.saveStage(runningStage, envelope, supabase, fenceExecutor, signal);
       if (signal.aborted) throw new StrategyResearchStageDeadlineError();
       return { kind: "succeeded" as const, envelope };
     }, dependencies.stageDeadlineMs);
@@ -313,7 +311,6 @@ export async function generateGoalHotelStageAction(
       supabase,
       userId,
       context,
-      catalogRewardPrograms,
     } = preparedResult.prepared;
 
     const fenceExecutor = await dependencies.createFenceExecutor();
@@ -330,12 +327,15 @@ export async function generateGoalHotelStageAction(
       };
     }
     const outcome = await runWithStrategyResearchStageDeadline(async (signal) => {
-      const started = await startVerifiedResearchStageExecution(
+      // The production hotel stage is SerpAPI-direct: the authenticated saved
+      // goal drives a single Google Hotels request through the strict client,
+      // and no Tavily provider, research interpreter, or provider-backed
+      // execution gateway is ever constructed or called for hotels.
+      const runningStage = await startGoalStrategyRunStage(
         runId,
         goalId,
         userId,
         "hotel",
-        dependencies.createProvider(),
         supabase,
         fenceExecutor,
         signal,
@@ -350,27 +350,32 @@ export async function generateGoalHotelStageAction(
       );
       uncertainStartState.cleanup = null;
       deadlineState.handler = () => terminalDeadlineFailure(
-        "hotel", runId, goalId, run.expiresAt, started.runningStage, null, supabase, fenceExecutor, dependencies,
+        "hotel", runId, goalId, run.expiresAt, runningStage, null, supabase, fenceExecutor, dependencies,
       );
 
-      const interpreted = await runHotelStageResearch(
-        started.runningStage,
-        started.executor,
-        dependencies.createInterpreter(),
+      const estimateOutcome = await runHotelStageSerpApiEstimate(
+        runningStage,
+        dependencies,
         supabase,
         fenceExecutor,
-        context,
-        catalogRewardPrograms,
-        signal,
+        context.goal,
         runId,
         goalId,
+        signal,
       );
 
-      if (interpreted.kind === "failed") return { kind: "failed" as const };
+      if (estimateOutcome.kind === "failed") return { kind: "failed" as const };
       if (signal.aborted) throw new StrategyResearchStageDeadlineError();
-      const envelope = buildStrategyRunStagePayload("hotel", interpreted.value);
+      const envelope = buildStrategyRunStagePayload("hotel", {
+        awardOptions: [],
+        cardOffers: [],
+        sources: [],
+        assumptions: [],
+        warnings: [],
+        hotelPlanningEstimate: estimateOutcome.estimate,
+      });
       if (signal.aborted) throw new StrategyResearchStageDeadlineError();
-      await dependencies.saveStage(started.runningStage, envelope, supabase, fenceExecutor, signal);
+      await dependencies.saveStage(runningStage, envelope, supabase, fenceExecutor, signal);
       if (signal.aborted) throw new StrategyResearchStageDeadlineError();
       return { kind: "succeeded" as const, envelope };
     }, dependencies.stageDeadlineMs);
@@ -380,8 +385,8 @@ export async function generateGoalHotelStageAction(
         success: true,
         runId,
         expiresAt: run.expiresAt,
-        stage: "hotel",
-        stageStatus: "failed",
+        stage: "hotel" as const,
+        stageStatus: "failed" as const,
         options: [],
         sources: [],
         assumptions: [],
@@ -396,9 +401,9 @@ export async function generateGoalHotelStageAction(
       success: true,
       runId,
       expiresAt: run.expiresAt,
-      stage: "hotel",
-      stageStatus: "succeeded",
-      options: toClientSafeResearch(envelope.interpreted.awardOptions),
+      stage: "hotel" as const,
+      stageStatus: "succeeded" as const,
+      options: [],
       sources: [],
       assumptions: envelope.interpreted.assumptions,
       warnings: envelope.interpreted.warnings,
@@ -427,7 +432,7 @@ export async function generateGoalHotelStageAction(
 // ---------------------------------------------------------------------------
 
 type StageResearchResult =
-  | { kind: "succeeded"; value: Awaited<ReturnType<typeof generateFlightResearchStage>> }
+  | { kind: "succeeded"; value: InterpretedResearch }
   | { kind: "failed" };
 
 async function boundedUncertainStartRecovery(
@@ -497,91 +502,96 @@ function safeOuterStageFailure(): GoalResearchStageResult {
 }
 
 /**
- * Runs the flight research stage, isolating ResearchInterpreterError as a
- * non-fatal stage failure. The caught error is never exposed.
+ * Runs the flight stage directly through the authenticated SerpAPI
+ * planning-estimate path using only the saved goal's own inputs and the
+ * resolved search-location contracts. Tavily research and the flight
+ * research interpreter intentionally never run for production flight
+ * generation. A missing, malformed, unavailable, or rejected SerpAPI result
+ * marks the stage failed once, saves no flight payload, and never exposes
+ * provider internals. The caught error is never exposed.
  */
-async function runFlightStageResearch(
+async function runFlightStageSerpApiEstimate(
   runningStage: VerifiedRunningResearchStage,
-  executor: VerifiedStageQueryExecutor,
-  interpreter: ResearchInterpreter,
+  dependencies: ReturnType<typeof getStrategyStageActionDependencies>,
   supabase: Parameters<typeof saveGoalStrategyRunStage>[2],
   fenceExecutor: Parameters<typeof saveGoalStrategyRunStage>[3],
-  context: Parameters<typeof generateFlightResearchStage>[0],
-  catalogRewardPrograms: Parameters<typeof generateFlightResearchStage>[1],
-  signal: AbortSignal,
+  goal: Parameters<typeof buildFlightPlanningEstimate>[0],
   runId: string,
   goalId: string,
-): Promise<StageResearchResult> {
+  signal: AbortSignal,
+): Promise<{ kind: "succeeded"; estimate: FlightPlanningEstimate } | { kind: "failed" }> {
+  if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+  let estimate: FlightPlanningEstimate | null = null;
   try {
-    const interpreted = await generateFlightResearchStage(
-      context,
-      catalogRewardPrograms,
-      { executor, interpreter },
-    );
-    return { kind: "succeeded", value: interpreted };
-  } catch (err) {
-    if (signal.aborted) throw new StrategyResearchStageDeadlineError();
-    if (err instanceof ResearchInterpreterError) {
-      try {
-        await failGoalStrategyRunStage(runningStage, supabase, fenceExecutor);
-      } catch {
-        if (process.env.STRATEGY_DEBUG === "1") {
-          console.error("[strategy-stage-error]", JSON.stringify({ stage: "flight", runId, goalId, category: "stage_marking_failed" }));
-        }
-      }
-      if (process.env.STRATEGY_DEBUG === "1") {
-        console.error("[strategy-stage-error]", JSON.stringify({
-          stage: "flight", runId, goalId, category: "research_stage_failed",
-        }));
-      }
-      return { kind: "failed" };
-    }
-    throw err;
+    estimate = dependencies.createFlightPlanningEstimate
+      ? await dependencies.createFlightPlanningEstimate(goal)
+      : null;
+  } catch {
+    logFlightPlanningEstimateDiagnostic("unexpected_estimate_dependency_failure");
+    estimate = null;
   }
+  if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+  if (!estimate) {
+    try {
+      await failGoalStrategyRunStage(runningStage, supabase, fenceExecutor);
+    } catch {
+      if (process.env.STRATEGY_DEBUG === "1") {
+        console.error("[strategy-stage-error]", JSON.stringify({ stage: "flight", runId, goalId, category: "stage_marking_failed" }));
+      }
+    }
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.error("[strategy-stage-error]", JSON.stringify({
+        stage: "flight", runId, goalId, category: "research_stage_failed",
+      }));
+    }
+    return { kind: "failed" };
+  }
+  return { kind: "succeeded", estimate };
 }
 
 /**
- * Runs the hotel research stage, isolating ResearchInterpreterError as a
- * non-fatal stage failure. The caught error is never exposed.
+ * Runs the hotel stage directly through the authenticated SerpAPI Google
+ * Hotels path using only the saved goal's own inputs. Tavily research and the
+ * research interpreter intentionally never run for production hotel
+ * generation. A missing, malformed, unavailable, or rejected SerpAPI result
+ * marks the stage failed once, saves no hotel payload, and never exposes
+ * provider internals. The caught error is never exposed.
  */
-async function runHotelStageResearch(
+async function runHotelStageSerpApiEstimate(
   runningStage: VerifiedRunningResearchStage,
-  executor: VerifiedStageQueryExecutor,
-  interpreter: ResearchInterpreter,
+  dependencies: ReturnType<typeof getStrategyStageActionDependencies>,
   supabase: Parameters<typeof saveGoalStrategyRunStage>[2],
   fenceExecutor: Parameters<typeof saveGoalStrategyRunStage>[3],
-  context: Parameters<typeof generateHotelResearchStage>[0],
-  catalogRewardPrograms: Parameters<typeof generateHotelResearchStage>[1],
-  signal: AbortSignal,
+  goal: Goal,
   runId: string,
   goalId: string,
-): Promise<StageResearchResult> {
+  signal: AbortSignal,
+): Promise<{ kind: "succeeded"; estimate: HotelPlanningEstimate } | { kind: "failed" }> {
+  if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+  let estimate: HotelPlanningEstimate | null = null;
   try {
-    const interpreted = await generateHotelResearchStage(
-      context,
-      catalogRewardPrograms,
-      { executor, interpreter },
-    );
-    return { kind: "succeeded", value: interpreted };
-  } catch (err) {
-    if (signal.aborted) throw new StrategyResearchStageDeadlineError();
-    if (err instanceof ResearchInterpreterError) {
-      try {
-        await failGoalStrategyRunStage(runningStage, supabase, fenceExecutor);
-      } catch {
-        if (process.env.STRATEGY_DEBUG === "1") {
-          console.error("[strategy-stage-error]", JSON.stringify({ stage: "hotel", runId, goalId, category: "stage_marking_failed" }));
-        }
-      }
-      if (process.env.STRATEGY_DEBUG === "1") {
-        console.error("[strategy-stage-error]", JSON.stringify({
-          stage: "hotel", runId, goalId, category: "research_stage_failed",
-        }));
-      }
-      return { kind: "failed" };
-    }
-    throw err;
+    estimate = await dependencies.createSerpApiHotelEstimate(goal);
+  } catch {
+    logSerpApiHotelEstimateDiagnostic("unexpected_hotel_estimate_failure");
+    estimate = null;
   }
+  if (signal.aborted) throw new StrategyResearchStageDeadlineError();
+  if (!estimate) {
+    try {
+      await failGoalStrategyRunStage(runningStage, supabase, fenceExecutor);
+    } catch {
+      if (process.env.STRATEGY_DEBUG === "1") {
+        console.error("[strategy-stage-error]", JSON.stringify({ stage: "hotel", runId, goalId, category: "stage_marking_failed" }));
+      }
+    }
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.error("[strategy-stage-error]", JSON.stringify({
+        stage: "hotel", runId, goalId, category: "research_stage_failed",
+      }));
+    }
+    return { kind: "failed" };
+  }
+  return { kind: "succeeded", estimate };
 }
 
 /**

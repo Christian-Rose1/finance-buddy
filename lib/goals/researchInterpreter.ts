@@ -6,6 +6,7 @@ import type {
   StrategySource,
 } from "./strategyTypes";
 import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
+import type { HotelPlanningEstimate } from "./hotelPlanningEstimate";
 
 export interface InterpretedResearch {
   awardOptions: StrategyAwardOption[];
@@ -14,6 +15,8 @@ export interface InterpretedResearch {
   assumptions: string[];
   warnings: string[];
   flightPlanningEstimate?: FlightPlanningEstimate | null;
+  /** Optional, hotel-stage-only; mirrors the flight estimate field. */
+  hotelPlanningEstimate?: HotelPlanningEstimate | null;
 }
 
 export interface ResearchRewardProgram {

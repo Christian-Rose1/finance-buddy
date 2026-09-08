@@ -1,6 +1,7 @@
 import type {
   PersonalizedStrategy,
   PersonalizedStrategyContext,
+  StrategyAwardOption,
 } from "./strategyTypes";
 import { buildPointsInventory } from "./pointsInventoryBuilder";
 import { buildStrategyAllocationScenarios } from "./strategyAllocationBuilder";
@@ -79,36 +80,65 @@ async function resolveResearchPlan(
 }
 
 /**
- * Researches and interprets flight options for a goal in isolation.
- *
- * @param context Complete PersonalizedStrategyContext containing the customer's goal.
- * @param catalogRewardPrograms Complete reward-program catalog. Passed to the research interpreter so sourced options may reference any real catalog program.
- * @returns The validated flight-focused InterpretedResearch.
+ * Destination-mismatched hotel options are never usable recommendations for
+ * the saved goal. The validated research classification contract requires a
+ * `different_destination` classification to carry a "destination" mismatch
+ * reason; either signal alone rejects the option. The saved goal's own
+ * destination remains authoritative.
  */
-export async function generateFlightResearchStage(
-  context: PersonalizedStrategyContext,
-  catalogRewardPrograms: StrategyRewardProgram[],
-  dependencies: StagedResearchDependencies,
-): Promise<InterpretedResearch> {
-  assertVerifiedStageQueryExecutor(dependencies?.executor);
-  const plan = await resolveResearchPlan(context, catalogRewardPrograms);
-  const flightPlanQueries = plan.queries.filter((q) => q.category === "flight");
-  const flightResponses = await executeVerifiedStageQueries(dependencies.executor, plan, flightPlanQueries);
-  if (flightPlanQueries.length > 0 && flightResponses.length === 0) {
+function isDestinationMismatchedHotelOption(
+  option: StrategyAwardOption,
+): boolean {
+  return (
+    option.goalMatch === "different_destination" ||
+    option.goalMismatchReasons?.includes("destination") === true
+  );
+}
+
+/** Safe fixed warning; never names a rejected property or provider. */
+const HOTEL_DESTINATION_MISMATCH_WARNING =
+  "Hotel options for a different destination than your goal were omitted from your recommendations.";
+
+/**
+ * Applies the destination-mismatch boundary to a validated hotel-stage
+ * interpretation before it can reach persistence or presentation:
+ * - every destination-mismatched option is removed;
+ * - if no matching option remains, the established safe research failure is
+ *   thrown so no hotel payload is saved;
+ * - if matching options remain, only sources referenced by retained options
+ *   are kept (exact structured `sourceId` matching; never label, URL, or
+ *   name heuristics), original option and source order is preserved, and
+ *   model-generated assumptions/warnings are replaced by one fixed safe
+ *   warning because their free-text provenance cannot be bounded to the
+ *   retained options.
+ */
+function rejectDestinationMismatchedHotels(
+  interpreted: InterpretedResearch,
+): InterpretedResearch {
+  const matching = interpreted.awardOptions.filter(
+    (option) => !isDestinationMismatchedHotelOption(option),
+  );
+  if (matching.length === interpreted.awardOptions.length) {
+    return interpreted;
+  }
+  if (matching.length === 0) {
     throw new ResearchInterpreterError(
-      "No planned flight research queries completed.",
-      "tavily",
-      "unknown",
+      "Every researched hotel option was for a different destination than the saved goal.",
+      "research",
+      "deterministic_destination_gate",
     );
   }
-
-  const interpreter = dependencies.interpreter ?? createResearchInterpreter();
-  return interpreter.interpret({
-    goal: context.goal,
-    rewardPrograms: catalogRewardPrograms,
-    research: flightResponses,
-    focus: "flight_options",
-  });
+  const retainedSourceIds = new Set(matching.map((option) => option.sourceId));
+  const retainedSources = interpreted.sources.filter(
+    (source) => retainedSourceIds.has(source.id),
+  );
+  return {
+    ...interpreted,
+    awardOptions: matching,
+    sources: retainedSources,
+    assumptions: [],
+    warnings: [HOTEL_DESTINATION_MISMATCH_WARNING],
+  };
 }
 
 /**
@@ -116,7 +146,7 @@ export async function generateFlightResearchStage(
  *
  * @param context Complete PersonalizedStrategyContext containing the customer's goal.
  * @param catalogRewardPrograms Complete reward-program catalog. Passed to the research interpreter so sourced options may reference any real catalog program.
- * @returns The validated hotel-focused InterpretedResearch.
+ * @returns The validated hotel-focused InterpretedResearch with destination-mismatched options removed.
  */
 export async function generateHotelResearchStage(
   context: PersonalizedStrategyContext,
@@ -147,12 +177,13 @@ export async function generateHotelResearchStage(
   }
 
   const interpreter = dependencies.interpreter ?? createResearchInterpreter();
-  return interpreter.interpret({
+  const interpreted = await interpreter.interpret({
     goal: context.goal,
     rewardPrograms: catalogRewardPrograms,
     research: hotelResponses,
     focus: "hotel_options",
   });
+  return rejectDestinationMismatchedHotels(interpreted);
 }
 
 export interface VerifiedStrategyResearchStages {

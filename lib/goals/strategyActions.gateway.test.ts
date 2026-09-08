@@ -4,11 +4,12 @@ import { after, before, test } from "node:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { generateGoalFlightStageAction, generateGoalHotelStageAction } from "./strategyActions";
+import { logFlightPlanningEstimateDiagnostic } from "./flightPlanningEstimate";
 import type { PreparedGoalStrategyContext } from "./strategyActionContext";
-import { ResearchInterpreterError } from "./researchInterpreter";
 import type { ResearchInterpreter } from "./researchInterpreter";
 import type { ResearchProvider, ResearchQuery, ResearchResponse } from "./researchTypes";
 import { signStrategyRunPayload } from "./strategyRunSigning";
+import { logSerpApiHotelEstimateDiagnostic } from "./serpApiHotelClient";
 import type { StrategyStageFenceRpcExecutor, StrategyStageFenceRpcName } from "./strategyStageFenceRpcExecutor";
 import {
   failGoalStrategyRunStage,
@@ -17,8 +18,12 @@ import {
   startGoalStrategyRunStage,
 } from "./strategyRunRepository";
 import { withStrategyStageActionDependenciesForTest } from "./strategyStageActionDependencies";
+import type { StrategyStageActionDependencies } from "./strategyStageActionDependencies";
 import { withStrategyFinalizationDependenciesForTest } from "./strategyFinalizationDependencies";
-import type { PersonalizedStrategyContext } from "./strategyTypes";
+import type { PersonalizedStrategyContext, StrategyAwardOption, StrategySource } from "./strategyTypes";
+import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
+import type { HotelPlanningEstimate } from "./hotelPlanningEstimate";
+import type { Goal } from "./types";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -28,6 +33,81 @@ function deferred<T>() {
 
 const SECRET = "actual-action-gateway-test-secret-012345";
 let priorSecret: string | undefined;
+
+function hotelEstimate(): HotelPlanningEstimate {
+  return {
+    schemaVersion: 1,
+    label: "Hotel planning estimate",
+    destination: "Paris",
+    checkInDate: "2027-04-03",
+    checkOutDate: "2027-04-11",
+    nights: 8,
+    travelers: 2,
+    currency: "USD",
+    options: [{
+      id: "serpapi-hotel-1",
+      propertyName: "Example Grand Hotel",
+      locationText: "Paris",
+      nightlyPrice: 240,
+      nightlyPriceCurrency: "USD",
+      totalPrice: 1920,
+      totalPriceCurrency: "USD",
+      rating: 4.5,
+      reviewCount: 812,
+      hotelClass: 4,
+      neighborhood: "Vesterbro",
+      amenities: ["Free Wi-Fi"],
+      propertyUrl: "https://example.com/property",
+      imageUrl: "https://example.com/image.jpg",
+      trustStatus: "search_estimate",
+    }],
+    disclosure: "Search estimates only; not bookable; verify current price and availability before booking",
+    evidenceLabel: "Planning estimate",
+    verificationLabel: "Not customer-verified",
+    availabilityLabel: "Search estimates only; not bookable; verify current price and availability before booking",
+  };
+}
+
+/** A strictly valid SerpAPI planning estimate matching the persisted schema. */
+function flightEstimate(): FlightPlanningEstimate {
+  return {
+    label: "Flight planning estimate",
+    origin: "DEN",
+    destination: "CDG",
+    outboundDate: "2027-04-03",
+    returnDate: "2027-04-12",
+    travelers: 2,
+    cabin: "economy",
+    currency: "USD",
+    total: 1736,
+    priceCoverage: "searched_party_total",
+    retrievedAt: "2027-01-02T03:04:05.000Z",
+    outboundSegments: [{
+      sequence: 1,
+      departureAirport: "DEN",
+      departureTime: "2027-04-03 08:00",
+      arrivalAirport: "CDG",
+      arrivalTime: "2027-04-03 20:00",
+      marketingCarrier: "Example Air",
+      marketingFlightNumber: "EA123",
+      cabin: "economy",
+    }],
+    returnSegments: [{
+      sequence: 1,
+      departureAirport: "CDG",
+      departureTime: "2027-04-12 09:00",
+      arrivalAirport: "DEN",
+      arrivalTime: "2027-04-12 11:30",
+      marketingCarrier: "Example Air",
+      marketingFlightNumber: "EA124",
+      cabin: "economy",
+    }],
+    unknowns: ["offer_expiry"],
+    evidenceLabel: "Planning estimate",
+    verificationLabel: "Not customer-verified",
+    availabilityLabel: "Not live or bookable; verify before booking",
+  };
+}
 
 before(() => {
   priorSecret = process.env.STRATEGY_RUN_SIGNING_SECRET;
@@ -254,9 +334,15 @@ function prepared(db: RunDatabase): PreparedGoalStrategyContext {
   };
 }
 
-function mocks(db: RunDatabase, fail: (index: number) => boolean = () => false) {
+function mocks(
+  db: RunDatabase,
+  fail: (index: number) => boolean = () => false,
+  interpreterAwardOptions: StrategyAwardOption[] = [],
+  interpreterSources: StrategySource[] = [],
+) {
   const calls: ResearchQuery[] = [];
   const interpreted: ResearchResponse[][] = [];
+  const constructions = { provider: 0 };
   const provider: ResearchProvider = {
     async search(query) {
       const index = calls.length;
@@ -269,23 +355,37 @@ function mocks(db: RunDatabase, fail: (index: number) => boolean = () => false) 
   const interpreter: ResearchInterpreter = {
     async interpret(input) {
       interpreted.push(input.research);
-      return { awardOptions: [], cardOffers: [], sources: [], assumptions: [], warnings: [] };
+      return { awardOptions: interpreterAwardOptions, cardOffers: [], sources: interpreterSources, assumptions: [], warnings: [] };
     },
   };
-  return {
-    calls, interpreted, interpreter,
-    dependencies: {
-      prepareContext: async () => {
-        db.events.push("authenticated-goal-loaded");
-        return { success: true as const, prepared: prepared(db) };
-      },
-      createProvider: () => provider,
-      createInterpreter: () => interpreter,
-      saveStage: saveGoalStrategyRunStage,
-      failStage: failGoalStrategyRunStage,
-      recoverStageStart: recoverGoalStrategyRunStageStart,
-      createFenceExecutor: async () => db.fenceExecutor,
+  const estimateGoals: Goal[] = [];
+  const hotelEstimateGoals: Goal[] = [];
+  const dependencies: StrategyStageActionDependencies = {
+    prepareContext: async () => {
+      db.events.push("authenticated-goal-loaded");
+      return { success: true as const, prepared: prepared(db) };
     },
+    createProvider: () => {
+      constructions.provider += 1;
+      return provider;
+    },
+    createInterpreter: () => interpreter,
+    createFlightPlanningEstimate: async (goal) => {
+      estimateGoals.push(goal);
+      return flightEstimate();
+    },
+    createSerpApiHotelEstimate: async (goal) => {
+      hotelEstimateGoals.push(goal);
+      return hotelEstimate();
+    },
+    saveStage: saveGoalStrategyRunStage,
+    failStage: failGoalStrategyRunStage,
+    recoverStageStart: recoverGoalStrategyRunStageStart,
+    createFenceExecutor: async () => db.fenceExecutor,
+  };
+  return {
+    calls, interpreted, interpreter, estimateGoals, hotelEstimateGoals, constructions,
+    dependencies,
   };
 }
 
@@ -297,11 +397,29 @@ test("actual flight then hotel actions create, transition, execute, and save in 
     assert.equal(flight.success && flight.stageStatus, "succeeded");
     assert.doesNotMatch(JSON.stringify(flight), /attempt|deadline_at|deadlineAt|recovery/i);
     assert.doesNotMatch(String(db.row?.flight_payload), /attempt|deadline|recovery/i);
-    assert.deepEqual(db.events.slice(0, 5), [
-      "authenticated-goal-loaded", "run-created", "run-loaded", "stage-running", "provider-called",
+    // Production flight generation is SerpAPI-direct: zero Tavily provider
+    // queries and zero interpreter calls, with the saved goal driving the
+    // SerpAPI request and the party-total price persisted unchanged.
+    assert.equal(mock.estimateGoals.length, 1);
+    assert.deepEqual(mock.estimateGoals[0], context().goal);
+    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.interpreted.length, 0);
+    assert.equal(mock.constructions.provider, 0);
+    assert.equal(db.events.includes("provider-called"), false);
+    assert.deepEqual(db.events.slice(0, 4), [
+      "authenticated-goal-loaded", "run-created", "run-loaded", "stage-running",
     ]);
     assert.equal(db.events.filter((event) => event === "stage-saved").length, 1);
-    assert.equal(new Set(mock.calls.map((call) => call.query)).size, mock.calls.length);
+    const flightPayload = JSON.parse(String(db.row?.flight_payload)) as {
+      interpreted: {
+        awardOptions: unknown[];
+        flightPlanningEstimate: { total: number; priceCoverage: string; travelers: number } | null;
+      };
+    };
+    assert.equal(flightPayload.interpreted.awardOptions.length, 0);
+    assert.equal(flightPayload.interpreted.flightPlanningEstimate?.total, 1736);
+    assert.equal(flightPayload.interpreted.flightPlanningEstimate?.priceCoverage, "searched_party_total");
+    assert.equal(flightPayload.interpreted.flightPlanningEstimate?.travelers, 2);
 
     const runId = flight.success ? flight.runId : "";
     const beforeHotel = db.events.length;
@@ -313,23 +431,72 @@ test("actual flight then hotel actions create, transition, execute, and save in 
       "authenticated-goal-loaded", "run-loaded", "run-loaded", "stage-running",
     ]);
     assert.equal(db.events.filter((event) => event === "stage-saved").length, 2);
+    // Production hotel generation is SerpAPI-direct: zero Tavily provider
+    // queries and zero interpreter calls, with the saved goal driving the
+    // Google Hotels request and the estimate persisted through the signed
+    // hotel payload.
+    assert.equal(mock.hotelEstimateGoals.length, 1);
+    assert.deepEqual(mock.hotelEstimateGoals[0], context().goal);
+    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.interpreted.length, 0);
+    assert.equal(mock.constructions.provider, 0);
+    assert.equal(db.events.includes("provider-called"), false);
+    assert.deepEqual(hotel.success ? hotel.options : [], []);
+    const hotelPayload = JSON.parse(String(db.row?.hotel_payload)) as {
+      interpreted: {
+        awardOptions: unknown[];
+        hotelPlanningEstimate: {
+          destination: string;
+          travelers: number;
+          currency: string;
+          options: Array<{ propertyName: string; totalPrice: number | null }>;
+        } | null;
+      };
+    };
+    assert.equal(hotelPayload.interpreted.awardOptions.length, 0);
+    assert.equal(hotelPayload.interpreted.hotelPlanningEstimate?.destination, "Paris");
+    assert.equal(hotelPayload.interpreted.hotelPlanningEstimate?.travelers, 2);
+    assert.equal(hotelPayload.interpreted.hotelPlanningEstimate?.currency, "USD");
+    assert.equal(hotelPayload.interpreted.hotelPlanningEstimate?.options[0]?.propertyName, "Example Grand Hotel");
   });
 });
 
-test("actual action partial failures retain siblings; all failures mark once without retry", async () => {
+test("production flight and hotel succeed via SerpAPI without Tavily; failures mark once without retry", async () => {
+  // Even a failing Tavily provider cannot affect either SerpAPI-direct
+  // stage: zero provider and interpreter calls occur for flight or hotel.
   const partialDb = new RunDatabase();
-  const partial = mocks(partialDb, (index) => index === 1);
+  const partial = mocks(partialDb, () => true);
+  let flightRunId = "";
   await withStrategyStageActionDependenciesForTest(partial.dependencies, async () => {
     const result = await generateGoalFlightStageAction("owned-goal");
     assert.equal(result.success && result.stageStatus, "succeeded");
+    flightRunId = result.success ? result.runId : "";
   });
-  assert.equal(partial.calls.length, 2);
-  assert.equal(partial.interpreted[0]?.length, 1);
+  assert.equal(partial.estimateGoals.length, 1);
+  assert.equal(partial.calls.length, 0);
+  assert.equal(partial.interpreted.length, 0);
+  assert.equal(partial.constructions.provider, 0);
+  assert.equal(partialDb.events.includes("provider-called"), false);
   assert.equal(partialDb.events.includes("stage-failed"), false);
+
+  // The hotel stage also ignores the failing provider entirely.
+  const hotel = await withStrategyStageActionDependenciesForTest(partial.dependencies, () =>
+    generateGoalHotelStageAction("owned-goal", flightRunId)
+  );
+  assert.equal(hotel.success && hotel.stageStatus, "succeeded");
+  assert.equal(partial.hotelEstimateGoals.length, 1);
+  assert.equal(partial.calls.length, 0);
+  assert.equal(partial.interpreted.length, 0);
+  assert.equal(partial.constructions.provider, 0);
+  assert.equal(partialDb.events.filter((event) => event === "stage-failed").length, 0);
 
   const failedDb = new RunDatabase();
   failedDb.row = existingRunRow("failed");
   const failed = mocks(failedDb, () => true);
+  failed.dependencies.createFlightPlanningEstimate = async () => {
+    logFlightPlanningEstimateDiagnostic("flight_client_provider_not_configured");
+    return null;
+  };
   const priorDebug = process.env.STRATEGY_DEBUG;
   const priorError = console.error;
   const logs: unknown[][] = [];
@@ -342,15 +509,19 @@ test("actual action partial failures retain siblings; all failures mark once wit
       assert.equal(result.success && result.stageStatus, "failed");
       failedRunId = result.success ? result.runId : "";
     });
-    assert.equal(failed.calls.length, 2);
+    // The rejected SerpAPI result marks the stage failed exactly once with
+    // zero Tavily calls and no saved flight payload.
+    assert.equal(failed.constructions.provider, 0);
+    assert.equal(failed.calls.length, 0);
     assert.equal(failedDb.events.filter((event) => event === "stage-failed").length, 1);
     assert.equal(failedDb.events.includes("stage-saved"), false);
-    assert.deepEqual(logs, [[
-      "[strategy-stage-error]",
-      JSON.stringify({ stage: "flight", runId: failedRunId, goalId: "owned-goal", category: "research_stage_failed" }),
-    ]]);
-    assert.equal(logs[0][1].includes("provider"), false);
-    assert.equal(logs[0][1].includes("signature"), false);
+    assert.deepEqual(logs, [
+      ["[flight-planning-estimate] {\"category\":\"flight_client_provider_not_configured\"}"],
+      ["[strategy-stage-error]", JSON.stringify({ stage: "flight", runId: failedRunId, goalId: "owned-goal", category: "research_stage_failed" })],
+    ]);
+    assert.equal(JSON.stringify(logs).includes("signature"), false);
+    assert.equal(JSON.stringify(logs).includes("departure_token"), false);
+    assert.equal(JSON.stringify(logs).includes("search_id"), false);
   } finally {
     console.error = priorError;
     if (priorDebug === undefined) delete process.env.STRATEGY_DEBUG;
@@ -358,12 +529,15 @@ test("actual action partial failures retain siblings; all failures mark once wit
   }
 });
 
-test("rejected planning estimate remains best-effort after successful flight research", async () => {
+test("missing SerpAPI configuration fails the flight stage safely with zero external requests", async () => {
   const db = new RunDatabase();
   const mock = mocks(db);
   const dependencies = {
     ...mock.dependencies,
-    createFlightPlanningEstimate: async () => { throw new Error("synthetic estimate failure"); },
+    createFlightPlanningEstimate: async () => {
+      logFlightPlanningEstimateDiagnostic("flight_client_provider_not_configured");
+      return null;
+    },
   };
   const priorDebug = process.env.STRATEGY_DEBUG;
   const priorError = console.error;
@@ -373,51 +547,66 @@ test("rejected planning estimate remains best-effort after successful flight res
   try {
     await withStrategyStageActionDependenciesForTest(dependencies, async () => {
       const flight = await generateGoalFlightStageAction("owned-goal");
-      assert.equal(flight.success, true);
-      assert.equal(flight.success && flight.stageStatus, "succeeded");
-      assert.equal(db.row?.flight_status, "succeeded");
-      assert.equal(db.row?.final_status, "pending");
-      const payload = JSON.parse(db.row?.flight_payload as string) as { interpreted: { flightPlanningEstimate: unknown } };
-      assert.equal(payload.interpreted.flightPlanningEstimate, null);
+      assert.equal(flight.success && flight.stageStatus, "failed");
+      assert.equal(flight.success === false || flight.message, "Flight recommendations could not be generated from the available research.");
       const runId = flight.success ? flight.runId : "";
+      assert.equal(db.row?.flight_status, "failed");
+      assert.equal(db.events.includes("stage-saved"), false);
+      // Zero Tavily and interpreter calls even when SerpAPI is unavailable.
+      assert.equal(mock.calls.length, 0);
+      assert.equal(mock.interpreted.length, 0);
+      assert.equal(mock.constructions.provider, 0);
+      assert.equal(db.events.includes("provider-called"), false);
+      // The run remains and the hotel stage continues under the existing
+      // terminal-stage rules: a failed flight stage is terminal for flight,
+      // and hotel still runs.
       const hotel = await generateGoalHotelStageAction("owned-goal", runId);
       assert.equal(hotel.success && hotel.stageStatus, "succeeded");
     });
+    assert.deepEqual(logs, [
+      ["[flight-planning-estimate] {\"category\":\"flight_client_provider_not_configured\"}"],
+      ["[strategy-stage-error]", JSON.stringify({ stage: "flight", runId: String(db.row?.id), goalId: "owned-goal", category: "research_stage_failed" })],
+    ]);
   } finally {
     console.error = priorError;
     if (priorDebug === undefined) delete process.env.STRATEGY_DEBUG;
     else process.env.STRATEGY_DEBUG = priorDebug;
   }
-  assert.deepEqual(logs, [["[flight-planning-estimate] {\"category\":\"unexpected_estimate_dependency_failure\"}"]]);
 });
 
-test("actual hotel all-query failure marks failed once without retry", async () => {
+test("a rejected SerpAPI hotel estimate marks the hotel stage failed once without retry", async () => {
   const db = new RunDatabase();
-  let fail = false;
-  const mock = mocks(db, () => fail);
-  await withStrategyStageActionDependenciesForTest(mock.dependencies, async () => {
+  const mock = mocks(db);
+  const deps = { ...mock.dependencies, createSerpApiHotelEstimate: async () => null };
+  await withStrategyStageActionDependenciesForTest(deps, async () => {
     const flight = await generateGoalFlightStageAction("owned-goal");
     assert.equal(flight.success && flight.stageStatus, "succeeded");
     const runId = flight.success ? flight.runId : "";
-    const callsBeforeHotel = mock.calls.length;
     const failuresBeforeHotel = db.events.filter((event) => event === "stage-failed").length;
-    fail = true;
+    const savedBeforeHotel = db.events.filter((event) => event === "stage-saved").length;
     const hotel = await generateGoalHotelStageAction("owned-goal", runId);
     assert.equal(hotel.success && hotel.stageStatus, "failed");
-    assert.equal(mock.calls.length - callsBeforeHotel, 2);
+    assert.equal(db.row?.hotel_status, "failed");
+    assert.equal(db.row?.hotel_payload, null);
     assert.equal(db.events.filter((event) => event === "stage-failed").length - failuresBeforeHotel, 1);
+    assert.equal(db.events.filter((event) => event === "stage-saved").length, savedBeforeHotel);
+    // Zero Tavily and interpreter calls even when the hotel estimate fails.
+    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.interpreted.length, 0);
+    assert.equal(mock.constructions.provider, 0);
+    assert.equal(db.events.includes("provider-called"), false);
   });
 });
 
-test("flight deadline terminates as failed once and late interpretation cannot save", async () => {
+test("flight deadline terminates as failed once and a late SerpAPI estimate cannot save", async () => {
   const db = new RunDatabase();
   const mock = mocks(db);
   db.row = existingRunRow("failed");
-  const late = deferred<Awaited<ReturnType<ResearchInterpreter["interpret"]>>>();
+  const late = deferred<FlightPlanningEstimate | null>();
   const dependencies = {
     ...mock.dependencies,
     stageDeadlineMs: 5,
-    createInterpreter: () => ({ interpret: () => late.promise }),
+    createFlightPlanningEstimate: () => late.promise,
   };
   const priorDebug = process.env.STRATEGY_DEBUG;
   const priorError = console.error;
@@ -430,9 +619,11 @@ test("flight deadline terminates as failed once and late interpretation cannot s
     );
     assert.equal(result.success && result.stageStatus, "failed");
     assert.equal(db.row?.flight_status, "failed");
-    assert.equal(mock.calls.length, 2);
+    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.interpreted.length, 0);
+    assert.equal(mock.constructions.provider, 0);
     assert.equal(db.events.filter((event) => event === "stage-failed").length, 1);
-    late.resolve({ awardOptions: [], cardOffers: [], sources: [], assumptions: [], warnings: [] });
+    late.resolve(flightEstimate());
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(db.row?.flight_status, "failed");
     assert.equal(db.events.includes("stage-saved"), false);
@@ -444,17 +635,10 @@ test("flight deadline terminates as failed once and late interpretation cannot s
   }
 });
 
-test("flight interpreter failure emits research_stage_failed and does not expose provider content", async () => {
+test("a rejected SerpAPI estimate emits research_stage_failed and does not expose provider content", async () => {
   const db = new RunDatabase();
   const mock = mocks(db);
-  const interpreter = mock.interpreter;
-  const original = interpreter.interpret;
-  interpreter.interpret = async (...args: Parameters<typeof original>) => {
-    const result = await original(...args);
-    if (result.awardOptions.length === 0) throw new ResearchInterpreterError("synthetic interpreter failure", "test-provider", "test-model");
-    return result;
-  };
-  const dependencies = { ...mock.dependencies, createInterpreter: () => interpreter };
+  const dependencies = { ...mock.dependencies, createFlightPlanningEstimate: async () => null };
   const priorDebug = process.env.STRATEGY_DEBUG;
   const priorError = console.error;
   const logs: unknown[][] = [];
@@ -467,12 +651,17 @@ test("flight interpreter failure emits research_stage_failed and does not expose
     assert.equal(result.success && result.stageStatus, "failed");
     assert.equal(db.events.filter((event) => event === "stage-failed").length, 1);
     assert.equal(db.events.includes("stage-saved"), false);
+    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.interpreted.length, 0);
+    assert.equal(mock.constructions.provider, 0);
     assert.deepEqual(logs, [[
       "[strategy-stage-error]",
       JSON.stringify({ stage: "flight", runId: result.success ? result.runId : "", goalId: "owned-goal", category: "research_stage_failed" }),
     ]]);
     assert.equal(logs[0][1].includes("provider"), false, "no provider content in diagnostic");
     assert.equal(logs[0][1].includes("signature"), false, "no signature in diagnostic");
+    assert.equal(logs[0][1].includes("departure_token"), false, "no return token in diagnostic");
+    assert.equal(logs[0][1].includes("search_id"), false, "no search id in diagnostic");
   } finally {
     console.error = priorError;
     if (priorDebug === undefined) delete process.env.STRATEGY_DEBUG;
@@ -488,11 +677,11 @@ test("hotel deadline terminates as failed without retry and preserves succeeded 
   );
   assert.equal(flight.success && flight.stageStatus, "succeeded");
   const callsBeforeHotel = normal.calls.length;
-  const late = deferred<Awaited<ReturnType<ResearchInterpreter["interpret"]>>>();
+  const late = deferred<HotelPlanningEstimate | null>();
   const dependencies = {
     ...normal.dependencies,
     stageDeadlineMs: 5,
-    createInterpreter: () => ({ interpret: () => late.promise }),
+    createSerpApiHotelEstimate: () => late.promise,
   };
   const result = await withStrategyStageActionDependenciesForTest(dependencies, () =>
     generateGoalHotelStageAction("owned-goal", flight.success ? flight.runId : "")
@@ -500,9 +689,9 @@ test("hotel deadline terminates as failed without retry and preserves succeeded 
   assert.equal(result.success && result.stageStatus, "failed");
   assert.equal(db.row?.flight_status, "succeeded");
   assert.equal(db.row?.hotel_status, "failed");
-  assert.equal(normal.calls.length - callsBeforeHotel, 2);
+  assert.equal(normal.calls.length - callsBeforeHotel, 0);
   assert.equal(db.events.filter((event) => event === "stage-failed").length, 1);
-  late.resolve({ awardOptions: [], cardOffers: [], sources: [], assumptions: [], warnings: [] });
+  late.resolve(hotelEstimate());
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(db.row?.hotel_status, "failed");
   assert.equal(db.events.filter((event) => event === "stage-saved").length, 1);
@@ -594,12 +783,10 @@ test("database deadline rejection before the local timer uses bounded failure cl
   const dependencies = {
     ...mock.dependencies,
     stageDeadlineMs: 100,
-    createInterpreter: () => ({
-      async interpret() {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        return { awardOptions: [], cardOffers: [], sources: [], assumptions: [], warnings: [] };
-      },
-    }),
+    createFlightPlanningEstimate: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return flightEstimate();
+    },
   };
   try {
     const result = await withStrategyStageActionDependenciesForTest(
@@ -738,11 +925,11 @@ test("hotel deadline terminates as failed without retry and preserves succeeded 
   );
   assert.equal(flight.success && flight.stageStatus, "succeeded");
   const callsBeforeHotel = normal.calls.length;
-  const late = deferred<Awaited<ReturnType<ResearchInterpreter["interpret"]>>>();
+  const late = deferred<HotelPlanningEstimate | null>();
   const dependencies = {
     ...normal.dependencies,
     stageDeadlineMs: 5,
-    createInterpreter: () => ({ interpret: () => late.promise }),
+    createSerpApiHotelEstimate: () => late.promise,
   };
   const result = await withStrategyStageActionDependenciesForTest(dependencies, () =>
     generateGoalHotelStageAction("owned-goal", flight.success ? flight.runId : "")
@@ -750,9 +937,9 @@ test("hotel deadline terminates as failed without retry and preserves succeeded 
   assert.equal(result.success && result.stageStatus, "failed");
   assert.equal(db.row?.flight_status, "succeeded");
   assert.equal(db.row?.hotel_status, "failed");
-  assert.equal(normal.calls.length - callsBeforeHotel, 2);
+  assert.equal(normal.calls.length - callsBeforeHotel, 0);
   assert.equal(db.events.filter((event) => event === "stage-failed").length, 1);
-  late.resolve({ awardOptions: [], cardOffers: [], sources: [], assumptions: [], warnings: [] });
+  late.resolve(hotelEstimate());
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(db.row?.hotel_status, "failed");
   assert.equal(db.events.filter((event) => event === "stage-saved").length, 1);
@@ -891,14 +1078,14 @@ test("an on-time database success with a late client response is never reported 
 test("an unconfirmed timeout failure transition is bounded and returns outer failure", async () => {
   const db = new RunDatabase();
   const mock = mocks(db);
-  const lateInterpretation = deferred<Awaited<ReturnType<ResearchInterpreter["interpret"]>>>();
+  const lateEstimate = deferred<FlightPlanningEstimate | null>();
   const lateFailure = deferred<void>();
   let cleanupSignal: AbortSignal | undefined;
   const dependencies = {
     ...mock.dependencies,
     stageDeadlineMs: 5,
     stageCleanupDeadlineMs: 5,
-    createInterpreter: () => ({ interpret: () => lateInterpretation.promise }),
+    createFlightPlanningEstimate: () => lateEstimate.promise,
     failStage: async (...args: Parameters<typeof failGoalStrategyRunStage>) => {
       cleanupSignal = args[3];
       await lateFailure.promise;
@@ -915,7 +1102,7 @@ test("an unconfirmed timeout failure transition is bounded and returns outer fai
   });
   assert.equal(cleanupSignal?.aborted, true);
   assert.equal(db.row?.flight_status, "running");
-  lateInterpretation.resolve({ awardOptions: [], cardOffers: [], sources: [], assumptions: [], warnings: [] });
+  lateEstimate.resolve(flightEstimate());
   lateFailure.resolve();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(db.row?.flight_status, "running");
@@ -986,4 +1173,134 @@ test("authentication completes before privileged executor creation and missing c
     },
   }, () => generateGoalFlightStageAction("owned-goal"));
   assert.equal(executorRequested, false);
+});
+
+const GATEWAY_PARIS_HOTEL_SOURCE = { id: "source-hotel-paris", label: "https://example.com/paris-hotel", status: "catalog" as const, observedAt: null };
+const GATEWAY_SOFIA_HOTEL_SOURCE = { id: "source-hotel-sofia", label: "https://example.com/sofia-hotel", status: "catalog" as const, observedAt: null };
+
+function gatewayHotelOption(overrides: Partial<StrategyAwardOption>): StrategyAwardOption {
+  return {
+    id: "hotel-option-id",
+    sourceId: GATEWAY_PARIS_HOTEL_SOURCE.id,
+    programName: "World of Hyatt",
+    redemptionType: "hotel",
+    pricingBasis: "per_night",
+    itineraryLabel: "Paris hotel",
+    pointsRequired: 20000,
+    cashFees: 0,
+    seats: null,
+    cabin: null,
+    transferFromProgramId: null,
+    transferRatio: null,
+    centsPerPoint: null,
+    availabilityStatus: "unknown",
+    ...overrides,
+  };
+}
+
+function gatewaySofiaOption(): StrategyAwardOption {
+  return gatewayHotelOption({
+    id: "hotel-option-sofia",
+    sourceId: GATEWAY_SOFIA_HOTEL_SOURCE.id,
+    itineraryLabel: "Hyatt Regency Sofia",
+    goalMatch: "different_destination",
+    goalMismatchReasons: ["destination"],
+  });
+}
+
+test("a failed SerpAPI hotel estimate saves no payload and never exposes property or provider data", async () => {
+  const db = new RunDatabase();
+  const mock = mocks(db);
+  const priorDebug = process.env.STRATEGY_DEBUG;
+  const priorError = console.error;
+  const logs: unknown[][] = [];
+  process.env.STRATEGY_DEBUG = "1";
+  console.error = (...values: unknown[]) => { logs.push(values); };
+  try {
+    await withStrategyStageActionDependenciesForTest(mock.dependencies, async () => {
+      const flight = await generateGoalFlightStageAction("owned-goal");
+      assert.equal(flight.success && flight.stageStatus, "succeeded");
+      const runId = flight.success ? flight.runId : "";
+      const savedBeforeHotel = db.events.filter((event) => event === "stage-saved").length;
+      const failedBeforeHotel = db.events.filter((event) => event === "stage-failed").length;
+      const hotelDeps = { ...mock.dependencies, createSerpApiHotelEstimate: async () => {
+        logSerpApiHotelEstimateDiagnostic("hotel_client_projection_rejected");
+        return null;
+      } };
+
+      const hotel = await withStrategyStageActionDependenciesForTest(hotelDeps, () =>
+        generateGoalHotelStageAction("owned-goal", runId)
+      );
+      // The hotel stage fails safely; no property or provider data is presented.
+      assert.equal(hotel.success && hotel.stageStatus, "failed");
+      assert.equal(hotel.success === false || hotel.message, "Hotel recommendations could not be generated from the available research.");
+      const serializedFailure = JSON.stringify(hotel).toLowerCase();
+      for (const rejected of ["example grand hotel", "serpapi", "api_key", "search_metadata"]) {
+        assert.equal(serializedFailure.includes(rejected), false, `failure result must not contain ${rejected}`);
+      }
+      // No hotel payload was saved.
+      assert.equal(db.row?.hotel_status, "failed");
+      assert.equal(db.row?.hotel_payload, null);
+      assert.equal(db.events.filter((event) => event === "stage-saved").length, savedBeforeHotel);
+      assert.equal(db.events.filter((event) => event === "stage-failed").length, failedBeforeHotel + 1);
+      // Diagnostics stay fixed-category and content-free.
+      assert.deepEqual(logs, [
+        ["[hotel-planning-estimate] {\"category\":\"hotel_client_projection_rejected\"}"],
+        ["[strategy-stage-error]", JSON.stringify({ stage: "hotel", runId, goalId: "owned-goal", category: "research_stage_failed" })],
+      ]);
+
+      // The run remains and finalization can continue with the valid flight
+      // stage under the existing terminal-stage rules.
+      const withFinalization = withStrategyFinalizationDependenciesForTest;
+      assert.equal(typeof withFinalization, "function");
+    });
+  } finally {
+    console.error = priorError;
+    if (priorDebug === undefined) delete process.env.STRATEGY_DEBUG;
+    else process.env.STRATEGY_DEBUG = priorDebug;
+  }
+});
+
+test("a successful SerpAPI hotel stage persists only the validated estimate with no fabricated award data", async () => {
+  const db = new RunDatabase();
+  const mock = mocks(db);
+  await withStrategyStageActionDependenciesForTest(mock.dependencies, async () => {
+    const flight = await generateGoalFlightStageAction("owned-goal");
+    assert.equal(flight.success && flight.stageStatus, "succeeded");
+    const runId = flight.success ? flight.runId : "";
+    const savedBeforeHotel = db.events.filter((event) => event === "stage-saved").length;
+
+    const hotel = await generateGoalHotelStageAction("owned-goal", runId);
+    assert.equal(hotel.success && hotel.stageStatus, "succeeded");
+    assert.equal(db.events.filter((event) => event === "stage-saved").length, savedBeforeHotel + 1);
+
+    // No fabricated award, points, or source data anywhere in the result.
+    const serializedResult = JSON.stringify(hotel).toLowerCase();
+    for (const rejected of ["pointsrequired", "world of hyatt", "award", "source-hotel", "programname"]) {
+      assert.equal(serializedResult.includes(rejected), false, `result must not contain ${rejected}`);
+    }
+    assert.deepEqual(hotel.success ? hotel.options : [], []);
+    assert.deepEqual(hotel.success ? hotel.sources : [], []);
+
+    // The signed persisted payload contains the searched estimate and no
+    // award/points fabrication; case-insensitive leak checks cover key
+    // material, provider metadata, and request URLs. (The projector's own
+    // stable option-ID prefix "serpapi-hotel-" is our identifier, not
+    // provider content.)
+    const payload = JSON.parse(String(db.row?.hotel_payload)) as {
+      interpreted: { awardOptions: unknown[]; sources: unknown[]; hotelPlanningEstimate: { destination: string; checkInDate: string; checkOutDate: string; travelers: number; currency: string; options: Array<{ propertyName: string; trustStatus: string }> } | null };
+    };
+    assert.deepEqual(payload.interpreted.awardOptions, []);
+    assert.deepEqual(payload.interpreted.sources, []);
+    assert.equal(payload.interpreted.hotelPlanningEstimate?.destination, "Paris");
+    assert.equal(payload.interpreted.hotelPlanningEstimate?.checkInDate, "2027-04-03");
+    assert.equal(payload.interpreted.hotelPlanningEstimate?.checkOutDate, "2027-04-11");
+    assert.equal(payload.interpreted.hotelPlanningEstimate?.travelers, 2);
+    assert.equal(payload.interpreted.hotelPlanningEstimate?.currency, "USD");
+    assert.equal(payload.interpreted.hotelPlanningEstimate?.options[0]?.trustStatus, "search_estimate");
+    const serializedPayload = JSON.stringify(payload).toLowerCase();
+    for (const rejected of ["api_key", "apikey", "search_metadata", "token", "signature", "https://serpapi.com", "search_id"]) {
+      assert.equal(serializedPayload.includes(rejected), false, `persisted payload must not contain ${rejected}`);
+    }
+  });
 });

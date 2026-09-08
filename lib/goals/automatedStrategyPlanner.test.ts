@@ -3,7 +3,6 @@ import { after, before, test } from "node:test";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
-  generateFlightResearchStage,
   generateHotelResearchStage,
   shouldRunOptionalCardResearch,
   type StagedResearchDependencies,
@@ -16,7 +15,7 @@ import {
 } from "./webTravelDiscoveryPlanner";
 import type { ResearchResponse } from "./researchTypes";
 import type { ResearchProvider } from "./researchTypes";
-import type { PersonalizedStrategyContext } from "./strategyTypes";
+import type { PersonalizedStrategyContext, StrategyAwardOption, StrategySource } from "./strategyTypes";
 import { createProviderExecutionGateway, type VerifiedStageQueryExecutor } from "./providerExecutionGateway";
 import { startGoalStrategyRunStage, type StrategyResearchStage } from "./strategyRunRepository";
 import { signStrategyRunPayload } from "./strategyRunSigning";
@@ -78,7 +77,14 @@ function response(query: string): ResearchResponse {
   return { query, results: [], searchedAt: "2026-08-01T00:00:00.000Z" };
 }
 
-async function dependencies(stage: StrategyResearchStage, fail: (query: string) => boolean = () => false) {
+async function dependencies(
+  stage: StrategyResearchStage,
+  fail: (query: string) => boolean = () => false,
+  interpreterAwardOptions: StrategyAwardOption[] = [],
+  interpreterSources: StrategySource[] = [],
+  interpreterAssumptions: string[] = [],
+  interpreterWarnings: string[] = [],
+) {
   const calls: string[] = [];
   const interpretedResearch: ResearchResponse[][] = [];
   const provider: ResearchProvider = {
@@ -128,13 +134,19 @@ async function dependencies(stage: StrategyResearchStage, fail: (query: string) 
   const interpreter: ResearchInterpreter = {
     async interpret(input) {
       interpretedResearch.push(input.research);
-      return { awardOptions: [], cardOffers: [], sources: [], assumptions: [], warnings: [] };
+      return {
+        awardOptions: interpreterAwardOptions,
+        cardOffers: [],
+        sources: interpreterSources,
+        assumptions: interpreterAssumptions,
+        warnings: interpreterWarnings,
+      };
     },
   };
   return { calls, interpretedResearch, dependencies: { executor, interpreter } satisfies StagedResearchDependencies };
 }
 
-function selectedQueries(kind: "flight" | "hotel", value = context()): string[] {
+function selectedQueries(kind: "hotel", value = context()): string[] {
   return buildSavedGoalWebTravelDiscoveryPlan(
     toSavedGoalWebDiscoveryInput(buildResearchPlannerInput(value, CATALOG)),
   ).queries.filter((query) => query.category === kind).map((query) => query.query);
@@ -149,7 +161,6 @@ test("finalization retry skips planning, searches, and card interpretation", () 
 });
 
 for (const [label, stage, kind] of [
-  ["flight", generateFlightResearchStage, "flight"],
   ["hotel", generateHotelResearchStage, "hotel"],
 ] as const) {
   test(`${label} stage executes each selected saved-goal query once`, async () => {
@@ -185,21 +196,6 @@ for (const [label, stage, kind] of [
   });
 }
 
-test("runtime-corrupted priority uses the balanced saved-goal plan through the staged path", async () => {
-  const value = context();
-  (value.goal as unknown as { optimizationPriority: unknown }).optimizationPriority = "legacy-priority";
-  const sanitized = buildResearchPlannerInput(value, CATALOG);
-  const expected = buildSavedGoalWebTravelDiscoveryPlan(toSavedGoalWebDiscoveryInput(sanitized));
-  const mock = await dependencies("flight");
-
-  await generateFlightResearchStage(value, CATALOG, mock.dependencies);
-
-  assert.deepEqual(
-    mock.calls,
-    expected.queries.filter((query) => query.category === "flight").map((query) => query.query),
-  );
-});
-
 test("real sanitized planner input and resulting plan exclude sensitive research data", () => {
   const sanitized = buildResearchPlannerInput(context(), CATALOG);
   const webInput = toSavedGoalWebDiscoveryInput(sanitized);
@@ -217,9 +213,8 @@ test("real sanitized planner input and resulting plan exclude sensitive research
   }
 });
 
-test("staged flight and hotel planners have no capability-free execution path", async () => {
+test("staged hotel planner has no capability-free execution path", async () => {
   for (const [stage, fake] of [
-    [generateFlightResearchStage, {}],
     [generateHotelResearchStage, async () => []],
   ] as const) {
     let planningTouched = false;
@@ -235,4 +230,184 @@ test("staged flight and hotel planners have no capability-free execution path", 
     );
     assert.equal(planningTouched, false);
   }
+});
+
+const PARIS_HOTEL_SOURCE = { id: "source-hotel-paris", label: "https://example.com/paris-hotel", status: "catalog" as const, observedAt: null };
+const SOFIA_HOTEL_SOURCE = { id: "source-hotel-sofia", label: "https://example.com/sofia-hotel", status: "catalog" as const, observedAt: null };
+
+function hotelOption(overrides: Partial<StrategyAwardOption>): StrategyAwardOption {
+  return {
+    id: "hotel-option-id",
+    sourceId: PARIS_HOTEL_SOURCE.id,
+    programName: "World of Hyatt",
+    redemptionType: "hotel",
+    pricingBasis: "per_night",
+    itineraryLabel: "Paris hotel",
+    pointsRequired: 20000,
+    cashFees: 0,
+    seats: null,
+    cabin: null,
+    transferFromProgramId: null,
+    transferRatio: null,
+    centsPerPoint: null,
+    availabilityStatus: "unknown",
+    ...overrides,
+  };
+}
+
+function sofiaOption(): StrategyAwardOption {
+  return hotelOption({
+    id: "hotel-option-sofia",
+    sourceId: SOFIA_HOTEL_SOURCE.id,
+    itineraryLabel: "Hyatt Regency Sofia",
+    goalMatch: "different_destination",
+    goalMismatchReasons: ["destination"],
+  });
+}
+
+function sofiaOptions(...extra: StrategyAwardOption[]): StrategyAwardOption[] {
+  return [sofiaOption(), ...extra];
+}
+
+function parisOption(): StrategyAwardOption {
+  return hotelOption({ id: "hotel-option-paris", itineraryLabel: "Paris hotel" });
+}
+
+test("hotel stage rejects a solely destination-mismatched option and fails safely", async () => {
+  const mock = await dependencies("hotel", () => false, sofiaOptions());
+
+  await assert.rejects(
+    generateHotelResearchStage(context(), CATALOG, mock.dependencies),
+    (error: unknown) => error instanceof ResearchInterpreterError,
+  );
+  // The rejected property never reaches persistence or presentation: the
+  // interpretation failed, so no InterpretedResearch value exists to save.
+  assert.equal(mock.interpretedResearch.length, 1);
+});
+
+test("hotel stage removes destination-mismatched options while preserving valid siblings", async () => {
+  const interpreterWarning = "Hyatt Regency Sofia offers great value this season.";
+  const interpreterAssumption = "Assumes the Hyatt Regency Sofia rate is a 1-bedroom suite.";
+  const sharedSource = { id: "source-shared", label: "https://example.com/comparison", status: "catalog" as const, observedAt: null };
+  const mock = await dependencies(
+    "hotel",
+    () => false,
+    [
+      hotelOption({ id: "hotel-option-sofia", sourceId: SOFIA_HOTEL_SOURCE.id, itineraryLabel: "Hyatt Regency Sofia", goalMatch: "different_destination", goalMismatchReasons: ["destination"] }),
+      hotelOption({ id: "hotel-option-paris-a", sourceId: PARIS_HOTEL_SOURCE.id, itineraryLabel: "Paris hotel A" }),
+      hotelOption({ id: "hotel-option-paris-b", sourceId: sharedSource.id, itineraryLabel: "Paris hotel B" }),
+      hotelOption({ id: "hotel-option-london", sourceId: SOFIA_HOTEL_SOURCE.id, itineraryLabel: "London hotel", goalMatch: "general", goalMismatchReasons: ["destination"] }),
+    ],
+    [SOFIA_HOTEL_SOURCE, PARIS_HOTEL_SOURCE, sharedSource],
+    [interpreterAssumption],
+    [interpreterWarning],
+  );
+  const interpreted = await generateHotelResearchStage(context(), CATALOG, mock.dependencies);
+
+  // Retained options keep their original relative order.
+  assert.deepEqual(
+    interpreted.awardOptions.map((option) => option.id),
+    ["hotel-option-paris-a", "hotel-option-paris-b"],
+  );
+  // The valid siblings keep their source references and validated evidence.
+  assert.equal(interpreted.awardOptions[0].sourceId, PARIS_HOTEL_SOURCE.id);
+  assert.equal(interpreted.awardOptions[0].programName, "World of Hyatt");
+  assert.equal(interpreted.awardOptions[0].pricingBasis, "per_night");
+  assert.equal(interpreted.awardOptions[0].pointsRequired, 20000);
+  // A source shared by a retained option remains; sources referenced only by
+  // rejected options are pruned, in original relative order.
+  assert.deepEqual(interpreted.sources.map((source) => source.id), ["source-hotel-paris", "source-shared"]);
+  // Model-generated assumptions/warnings cannot be bounded to retained
+  // options, so they are replaced by exactly one fixed safe warning.
+  assert.deepEqual(interpreted.assumptions, []);
+  assert.deepEqual(interpreted.warnings, [
+    "Hotel options for a different destination than your goal were omitted from your recommendations.",
+  ]);
+  // Case-insensitive: neither the property nor the orphan source survives.
+  const serialized = JSON.stringify(interpreted).toLowerCase();
+  for (const rejected of ["hyatt regency sofia", "sofia", "source-hotel-sofia", "sofia-hotel", "london hotel", interpreterWarning.toLowerCase(), interpreterAssumption.toLowerCase()]) {
+    assert.equal(serialized.includes(rejected), false, `filtered result must not contain ${rejected}`);
+  }
+  assert.equal(serialized.includes("source-hotel-paris"), true);
+  assert.equal(serialized.includes("source-shared"), true);
+});
+
+test("hotel stage removes every destination-mismatched option when several exist", async () => {
+  const secondMismatch = hotelOption({
+    id: "hotel-option-london",
+    sourceId: SOFIA_HOTEL_SOURCE.id,
+    itineraryLabel: "London hotel",
+    goalMatch: "general",
+    goalMismatchReasons: ["destination"],
+  });
+  const mock = await dependencies(
+    "hotel",
+    () => false,
+    sofiaOptions(secondMismatch, parisOption()),
+    [SOFIA_HOTEL_SOURCE, PARIS_HOTEL_SOURCE],
+  );
+  const interpreted = await generateHotelResearchStage(context(), CATALOG, mock.dependencies);
+
+  assert.deepEqual(interpreted.awardOptions.map((option) => option.id), ["hotel-option-paris"]);
+  // The Sofia-only source is pruned even though a rejected option used it.
+  assert.deepEqual(interpreted.sources.map((source) => source.id), ["source-hotel-paris"]);
+  const serialized = JSON.stringify(interpreted).toLowerCase();
+  assert.equal(serialized.includes("london hotel"), false);
+  assert.equal(serialized.includes("hyatt regency sofia"), false);
+  assert.equal(serialized.includes("sofia-hotel"), false);
+});
+
+test("hotel stage preserves original option and source order around rejected options", async () => {
+  const firstSource = { id: "source-first", label: "https://example.com/first", status: "catalog" as const, observedAt: null };
+  const lastSource = { id: "source-last", label: "https://example.com/last", status: "catalog" as const, observedAt: null };
+  const mismatchSource = { id: "source-mismatch-only", label: "https://example.com/mismatch-only", status: "catalog" as const, observedAt: null };
+  const mock = await dependencies(
+    "hotel",
+    () => false,
+    [
+      hotelOption({ id: "hotel-option-keep-1", sourceId: firstSource.id, itineraryLabel: "Keep one" }),
+      hotelOption({ id: "hotel-option-drop-1", sourceId: mismatchSource.id, itineraryLabel: "Drop one", goalMatch: "different_destination", goalMismatchReasons: ["destination"] }),
+      hotelOption({ id: "hotel-option-keep-2", sourceId: PARIS_HOTEL_SOURCE.id, itineraryLabel: "Keep two" }),
+      hotelOption({ id: "hotel-option-drop-2", sourceId: SOFIA_HOTEL_SOURCE.id, itineraryLabel: "Drop two", goalMismatchReasons: ["destination"] }),
+      hotelOption({ id: "hotel-option-keep-3", sourceId: lastSource.id, itineraryLabel: "Keep three" }),
+    ],
+    [firstSource, mismatchSource, PARIS_HOTEL_SOURCE, SOFIA_HOTEL_SOURCE, lastSource],
+  );
+  const interpreted = await generateHotelResearchStage(context(), CATALOG, mock.dependencies);
+
+  assert.deepEqual(
+    interpreted.awardOptions.map((option) => option.id),
+    ["hotel-option-keep-1", "hotel-option-keep-2", "hotel-option-keep-3"],
+  );
+  assert.deepEqual(
+    interpreted.sources.map((source) => source.id),
+    ["source-first", "source-hotel-paris", "source-last"],
+  );
+});
+
+test("hotel stage preserves an exact matching option unchanged", async () => {
+  const assumptions = ["Standard nightly pricing assumption."];
+  const warnings = ["Rates observed at research time."];
+  const exact = hotelOption({ id: "hotel-option-paris", goalMatch: "exact", goalMismatchReasons: [] });
+  const mock = await dependencies("hotel", () => false, [exact], [PARIS_HOTEL_SOURCE], assumptions, warnings);
+  const interpreted = await generateHotelResearchStage(context(), CATALOG, mock.dependencies);
+
+  // Nothing was rejected: assumptions, warnings, sources, and options are
+  // passed through unchanged.
+  assert.deepEqual(interpreted.awardOptions, [exact]);
+  assert.deepEqual(interpreted.assumptions, assumptions);
+  assert.deepEqual(interpreted.warnings, warnings);
+  assert.deepEqual(interpreted.sources, [PARIS_HOTEL_SOURCE]);
+});
+
+test("hotel stage preserves general planning-benchmark options without destination mismatch", async () => {
+  const assumptions = ["Benchmark planning assumption."];
+  const warnings = ["Planning benchmark warning."];
+  const general = hotelOption({ id: "hotel-option-general", goalMatch: "general", goalMismatchReasons: [] });
+  const mock = await dependencies("hotel", () => false, [general], [PARIS_HOTEL_SOURCE], assumptions, warnings);
+  const interpreted = await generateHotelResearchStage(context(), CATALOG, mock.dependencies);
+
+  assert.deepEqual(interpreted.awardOptions, [general]);
+  assert.deepEqual(interpreted.assumptions, assumptions);
+  assert.deepEqual(interpreted.warnings, warnings);
 });

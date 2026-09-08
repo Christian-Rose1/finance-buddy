@@ -7,6 +7,9 @@ import type { ResearchProvider } from "./researchTypes";
 import { TavilyResearchProvider } from "./tavilyResearchProvider";
 import { buildFlightPlanningEstimate } from "./flightPlanningEstimate";
 import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
+import { buildSerpApiHotelEstimateFromGoal } from "./serpApiHotelClient";
+import type { HotelPlanningEstimate } from "./hotelPlanningEstimate";
+import type { Goal } from "./types";
 import {
   failGoalStrategyRunStage,
   recoverGoalStrategyRunStageStart,
@@ -19,6 +22,12 @@ export interface StrategyStageActionDependencies {
   createProvider: () => ResearchProvider;
   createInterpreter: () => ResearchInterpreter;
   createFlightPlanningEstimate?: (goal: Parameters<typeof buildFlightPlanningEstimate>[0]) => Promise<FlightPlanningEstimate | null>;
+  /**
+   * Production hotel stage authority: the authenticated saved goal is the only
+   * search input; the strict SerpAPI Google Hotels client is the only source.
+   * Returns null for every missing, malformed, or rejected result.
+   */
+  createSerpApiHotelEstimate: (goal: Goal) => Promise<HotelPlanningEstimate | null>;
   saveStage: typeof saveGoalStrategyRunStage;
   failStage: typeof failGoalStrategyRunStage;
   recoverStageStart: typeof recoverGoalStrategyRunStageStart;
@@ -34,6 +43,7 @@ const productionDependencies: StrategyStageActionDependencies = Object.freeze({
   createProvider: () => new TavilyResearchProvider(),
   createInterpreter: createResearchInterpreter,
   createFlightPlanningEstimate: buildFlightPlanningEstimate,
+  createSerpApiHotelEstimate: buildSerpApiHotelEstimateFromGoal,
   saveStage: saveGoalStrategyRunStage,
   failStage: failGoalStrategyRunStage,
   recoverStageStart: recoverGoalStrategyRunStageStart,

@@ -1,6 +1,7 @@
 import type { StrategyAwardOption, StrategyCardOffer, StrategySource } from "./strategyTypes";
 import type { InterpretedResearch } from "./researchInterpreter";
 import { projectFlightPlanningEstimate } from "./flightPlanningEstimate";
+import { projectHotelPlanningEstimate } from "./hotelPlanningEstimate";
 
 export type StrategyRunPayloadStage = "flight" | "hotel";
 
@@ -469,6 +470,7 @@ const INTERPRETED_KEYS = new Set([
   "assumptions",
   "warnings",
   "flightPlanningEstimate",
+  "hotelPlanningEstimate",
 ]);
 
 /**
@@ -533,6 +535,16 @@ export function validateStrategyRunStagePayload(
     ? null
     : projectFlightPlanningEstimate(interpreted.flightPlanningEstimate) ?? safeThrow();
 
+  // Hotel estimates are hotel-stage-only. Undefined stays undefined (absent);
+  // null is preserved; a non-null value must pass the strict hotel projector.
+  const hotelPlanningEstimate = interpreted.hotelPlanningEstimate === undefined
+    ? undefined
+    : interpreted.hotelPlanningEstimate === null
+      ? null
+      : expectedStage === "hotel"
+        ? projectHotelPlanningEstimate(interpreted.hotelPlanningEstimate) ?? safeThrow()
+        : safeThrow();
+
   // Cross-reference: each option.sourceId must match a source
   validateSourceReferences(awardOptions, sources);
 
@@ -546,6 +558,7 @@ export function validateStrategyRunStagePayload(
       assumptions,
       warnings,
       flightPlanningEstimate,
+      ...(hotelPlanningEstimate === undefined ? {} : { hotelPlanningEstimate }),
     },
   };
 }
