@@ -14,7 +14,20 @@ export interface SerpApiFlightLocationCandidate {
   readonly airportIds: readonly string[];
 }
 
-export type SerpApiFlightLocationProjection =
+export type FlightLocationFailureReason =
+  | "ambiguous_matches"
+  | "empty_suggestions"
+  | "no_matching_city"
+  | "matching_city_rejected";
+
+export interface FlightLocationDiagnostic {
+  readonly reason?: FlightLocationFailureReason;
+  // Only proves that the inspected suggestion set was truncated, not that
+  // a usable candidate was omitted or the outcome would have differed.
+  readonly suggestionLimit?: "suggestions_truncated";
+}
+
+export type SerpApiFlightLocationProjection = { readonly diagnostic?: FlightLocationDiagnostic } & (
   | {
       readonly status: "resolved";
       readonly selected: SerpApiFlightLocationCandidate;
@@ -29,7 +42,7 @@ export type SerpApiFlightLocationProjection =
       readonly status: "unresolved" | "malformed_response";
       readonly selected: null;
       readonly candidates: readonly [];
-    };
+    });
 
 const MAX_LOCATION_LENGTH = 100;
 const MAX_SUGGESTIONS = 25;
@@ -69,6 +82,34 @@ function matchesSavedLocation(name: string, savedLocation: string): boolean {
   return fullName === expected || primaryName === expected;
 }
 
+/**
+ * Second-tier match for qualified saved locations (e.g. "Denver, CO" against
+ * the provider's canonical "Denver, Colorado"). The suggestion must carry the
+ * same primary name and a qualifier compatible with the saved qualifier by
+ * prefix in either direction, with at least two characters on the shorter
+ * side. A suggestion without a qualifier can never confirm a qualified saved
+ * location, and a saved location without a qualifier never reaches this tier
+ * (the exact primary-name rule already covers it). This tier only widens the
+ * candidate set: multiple lenient matches still return `ambiguous` and are
+ * never selected among.
+ */
+function matchesSavedLocationLenient(name: string, savedLocation: string): boolean {
+  const savedCommaIndex = savedLocation.indexOf(",");
+  if (savedCommaIndex === -1) return false;
+  const nameCommaIndex = name.indexOf(",");
+  if (nameCommaIndex === -1) return false;
+  if (
+    normalizedMatchText(savedLocation.slice(0, savedCommaIndex)) !==
+    normalizedMatchText(name.slice(0, nameCommaIndex))
+  ) {
+    return false;
+  }
+  const savedQualifier = normalizedMatchText(savedLocation.slice(savedCommaIndex + 1));
+  const nameQualifier = normalizedMatchText(name.slice(nameCommaIndex + 1));
+  if (savedQualifier.length < 2 || nameQualifier.length < 2) return false;
+  return nameQualifier.startsWith(savedQualifier) || savedQualifier.startsWith(nameQualifier);
+}
+
 function projectAirportIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const airportIds: string[] = [];
@@ -88,11 +129,12 @@ function projectAirportIds(value: unknown): string[] {
 function projectCitySuggestion(
   value: unknown,
   savedLocation: string,
+  nameMatches: (name: string, savedLocation: string) => boolean = matchesSavedLocation,
 ): SerpApiFlightLocationCandidate | null {
   if (!isPlainObject(value) || value.type !== "city") return null;
 
   const name = normalizeSerpApiFlightLocationInput(value.name);
-  if (!name || !matchesSavedLocation(name, savedLocation)) return null;
+  if (!name || !nameMatches(name, savedLocation)) return null;
   if (typeof value.id !== "string" || !LOCATION_ID.test(value.id)) return null;
 
   const airportIds = projectAirportIds(value.airports);
@@ -123,13 +165,20 @@ function freezeCandidate(
 
 function emptyProjection(
   status: "unresolved" | "malformed_response",
+  diagnostic?: FlightLocationDiagnostic,
 ): SerpApiFlightLocationProjection {
-  return Object.freeze({ status, selected: null, candidates: EMPTY_CANDIDATES });
+  return Object.freeze({ status, selected: null, candidates: EMPTY_CANDIDATES, ...(diagnostic ? { diagnostic: Object.freeze(diagnostic) } : {}) });
 }
 
 /**
  * Resolves an explicit saved IATA code without provider data. Otherwise it
- * projects exact-name city matches and resolves only a unique candidate.
+ * projects exact-name city matches and resolves only a unique candidate;
+ * when nothing matches exactly, a lenient second tier accepts the same
+ * primary name with a prefix-compatible qualifier (e.g. "Denver, CO" →
+ * "Denver, Colorado"), and a lone structurally-valid city suggestion is the
+ * provider's authoritative interpretation of the saved string. Lenient
+ * matching and single-suggestion resolution only ever avoid a false
+ * no-match: multiple candidates still fail closed without selecting.
  */
 export function projectSerpApiFlightLocation(
   savedLocation: unknown,
@@ -159,27 +208,97 @@ export function projectSerpApiFlightLocation(
     return emptyProjection("malformed_response");
   }
 
-  const candidates: SerpApiFlightLocationCandidate[] = [];
-  const seen = new Set<string>();
+  const exactCandidates: SerpApiFlightLocationCandidate[] = [];
+  const lenientCandidates: SerpApiFlightLocationCandidate[] = [];
+  const seenExact = new Set<string>();
+  const seenLenient = new Set<string>();
   const boundedSuggestions = rawResponse.suggestions.slice(0, MAX_SUGGESTIONS);
+  const suggestionLimit = rawResponse.suggestions.length > MAX_SUGGESTIONS
+    ? "suggestions_truncated" as const : undefined;
+  let exactMatchRejected = false;
+  let lenientMatchRejected = false;
   let structurallyValidCount = 0;
+  let validCityCount = 0;
+  let singleValidCity: unknown = null;
   for (const rawSuggestion of boundedSuggestions) {
-    if (isStructurallyValidSuggestion(rawSuggestion)) structurallyValidCount += 1;
-    const candidate = projectCitySuggestion(rawSuggestion, location);
-    if (!candidate || seen.has(candidate.locationId)) continue;
-    seen.add(candidate.locationId);
-    candidates.push(freezeCandidate(candidate));
+    if (isStructurallyValidSuggestion(rawSuggestion)) {
+      structurallyValidCount += 1;
+      if (isPlainObject(rawSuggestion) && rawSuggestion.type === "city") {
+        validCityCount += 1;
+        singleValidCity = rawSuggestion;
+      }
+    }
+    const exactCandidate = projectCitySuggestion(rawSuggestion, location);
+    if (exactCandidate) {
+      if (!seenExact.has(exactCandidate.locationId)) {
+        seenExact.add(exactCandidate.locationId);
+        exactCandidates.push(freezeCandidate(exactCandidate));
+      }
+      continue;
+    }
+    if (isPlainObject(rawSuggestion) && rawSuggestion.type === "city") {
+      const name = normalizeSerpApiFlightLocationInput(rawSuggestion.name);
+      if (name && matchesSavedLocation(name, location)) {
+        exactMatchRejected = true;
+        continue;
+      }
+    }
+    // Exact matches always take precedence: the lenient qualifier tier is
+    // consulted only when no exact candidate exists and no exact match was
+    // rejected as malformed, so a malformed exact match keeps its own
+    // diagnostic instead of being masked by a lenient resolve.
+    const lenientCandidate = projectCitySuggestion(rawSuggestion, location, matchesSavedLocationLenient);
+    if (lenientCandidate) {
+      if (!seenLenient.has(lenientCandidate.locationId)) {
+        seenLenient.add(lenientCandidate.locationId);
+        lenientCandidates.push(freezeCandidate(lenientCandidate));
+      }
+      continue;
+    }
+    if (isPlainObject(rawSuggestion) && rawSuggestion.type === "city") {
+      const name = normalizeSerpApiFlightLocationInput(rawSuggestion.name);
+      if (name && matchesSavedLocationLenient(name, location)) lenientMatchRejected = true;
+    }
   }
+  const useLenient = exactCandidates.length === 0 && !exactMatchRejected;
+  const candidates = useLenient ? lenientCandidates : exactCandidates;
+  const matchingCityRejected = exactMatchRejected || (useLenient && lenientMatchRejected);
   Object.freeze(candidates);
 
   if (candidates.length === 0) {
     if (boundedSuggestions.length > 0 && structurallyValidCount === 0) {
-      return emptyProjection("malformed_response");
+      return emptyProjection("malformed_response", Object.freeze({
+        ...(matchingCityRejected ? { reason: "matching_city_rejected" as const } : {}),
+        ...(suggestionLimit ? { suggestionLimit } : {}),
+      }));
     }
-    return emptyProjection("unresolved");
+    // Provider-authoritative single-city resolution: when no name tier
+    // matched but the provider's own disambiguation returned exactly one
+    // usable city suggestion, that suggestion IS the interpretation of the
+    // saved string (e.g. "Raleigh, NC" → "Raleigh, North Carolina"). This is
+    // how the provider resolves free-text for its own autocomplete; nothing
+    // is invented. Multiple candidates and malformed exact matches still
+    // fail closed below.
+    if (!exactMatchRejected && validCityCount === 1 && singleValidCity) {
+      const selected = projectCitySuggestion(singleValidCity, location, () => true);
+      if (selected) {
+        const frozenSelected = freezeCandidate(selected);
+        return Object.freeze({
+          status: "resolved",
+          selected: frozenSelected,
+          candidates: Object.freeze([frozenSelected]),
+          ...(suggestionLimit ? { diagnostic: Object.freeze({ suggestionLimit }) } : {}),
+        });
+      }
+    }
+    return emptyProjection("unresolved", Object.freeze({
+      reason: boundedSuggestions.length === 0 ? "empty_suggestions"
+        : matchingCityRejected ? "matching_city_rejected" : "no_matching_city",
+      ...(suggestionLimit ? { suggestionLimit } : {}),
+    }));
   }
   if (candidates.length > 1) {
-    return Object.freeze({ status: "ambiguous", selected: null, candidates });
+    return Object.freeze({ status: "ambiguous", selected: null, candidates, diagnostic: Object.freeze({ reason: "ambiguous_matches" as const, ...(suggestionLimit ? { suggestionLimit } : {}) }) });
   }
-  return Object.freeze({ status: "resolved", selected: candidates[0], candidates });
+  return Object.freeze({ status: "resolved", selected: candidates[0], candidates, ...(suggestionLimit ? { diagnostic: Object.freeze({ suggestionLimit }) } : {}) });
 }

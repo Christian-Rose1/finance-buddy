@@ -111,6 +111,7 @@ test("distinguishes malformed autocomplete envelopes from valid unresolved resul
     status: "unresolved",
     selected: null,
     candidates: [],
+    diagnostic: { reason: "empty_suggestions" },
   });
   assert.equal(Object.isFrozen(malformedEnvelope), true);
   assert.equal(Object.isFrozen(malformedEnvelope.candidates), true);
@@ -120,13 +121,16 @@ test("distinguishes malformed autocomplete envelopes from valid unresolved resul
     projectSerpApiFlightLocation("Paris", {
       suggestions: [{ type: "city", name: "Paris", id: "invalid", airports: [] }],
     }),
-    { status: "malformed_response", selected: null, candidates: [] },
+    { status: "malformed_response", selected: null, candidates: [], diagnostic: { reason: "matching_city_rejected" } },
   );
   assert.deepEqual(
     projectSerpApiFlightLocation("Paris", {
-      suggestions: [citySuggestion({ name: "London, United Kingdom", id: "/m/04jpl" })],
+      suggestions: [
+        citySuggestion({ name: "London, United Kingdom", id: "/m/04jpl" }),
+        citySuggestion({ name: "Lyon, France", id: "/m/lyon1", airports: [{ id: "LYS" }] }),
+      ],
     }),
-    { status: "unresolved", selected: null, candidates: [] },
+    { status: "unresolved", selected: null, candidates: [], diagnostic: { reason: "no_matching_city" } },
   );
 });
 
@@ -179,4 +183,198 @@ test("reconstructs an allowlisted frozen result without provider metadata", () =
   assert.ok(!serialized.includes("description"));
   assert.ok(!serialized.includes("distance"));
   assert.ok(!serialized.includes("city_id"));
+});
+
+
+test("fixed reasons distinguish matching failures without altering selection", () => {
+  const cases = [
+    { suggestions: [], reason: "empty_suggestions", status: "unresolved" },
+    // Two non-matching cities: the single-suggestion rule cannot apply, so
+    // the no-match failure remains fail-closed.
+    { suggestions: [citySuggestion({ name: "London" }), citySuggestion({ name: "Lyon, France", id: "/m/lyon1", airports: [{ id: "LYS" }] })], reason: "no_matching_city", status: "unresolved" },
+    { suggestions: [citySuggestion(), citySuggestion({ id: "/m/other" })], reason: "ambiguous_matches", status: "ambiguous" },
+    { suggestions: [citySuggestion({ id: "invalid" })], reason: "matching_city_rejected", status: "malformed_response" },
+    { suggestions: [citySuggestion({ airports: [] })], reason: "matching_city_rejected", status: "malformed_response" },
+    { suggestions: [citySuggestion({ airports: [] }), citySuggestion({ name: "London" })], reason: "matching_city_rejected", status: "unresolved" },
+  ];
+  for (const item of cases) {
+    const snapshot = structuredClone(item.suggestions);
+    const result = projectSerpApiFlightLocation("Paris", { suggestions: item.suggestions });
+    assert.equal(result.diagnostic?.reason, item.reason);
+    assert.equal(result.status, item.status);
+    assert.equal(result.selected, null);
+    assert.deepEqual(item.suggestions, snapshot);
+  }
+});
+
+test("truncation reports only the inspection limit and preserves bounded selection", () => {
+  const prefix = Array.from({ length: 25 }, () => citySuggestion({ name: "London" }));
+  const limited = projectSerpApiFlightLocation("Paris", { suggestions: [...prefix, citySuggestion()] });
+  assert.equal(limited.status, "unresolved");
+  assert.deepEqual(limited.diagnostic, { reason: "no_matching_city", suggestionLimit: "suggestions_truncated" });
+  const ordinary = projectSerpApiFlightLocation("Paris", { suggestions: [citySuggestion()] });
+  const success = projectSerpApiFlightLocation("Paris", { suggestions: [citySuggestion(), ...prefix] });
+  assert.equal(success.status, "resolved");
+  assert.deepEqual(success.selected, ordinary.selected);
+  assert.deepEqual(success.candidates, ordinary.candidates);
+  assert.deepEqual(success.diagnostic, { suggestionLimit: "suggestions_truncated" });
+  assert.equal(projectSerpApiFlightLocation("Paris", { suggestions: prefix }).diagnostic?.suggestionLimit, undefined);
+});
+
+test("lenient tier: qualified saved location resolves against a compatible canonical qualifier", () => {
+  // "Denver, CO" vs Google's canonical "Denver, Colorado": no exact match,
+  // resolved uniquely through the lenient qualifier tier.
+  const result = projectSerpApiFlightLocation("Denver, CO", {
+    suggestions: [
+      {
+        position: 1,
+        name: "Denver, Colorado",
+        type: "city",
+        description: "City in Colorado",
+        id: "/m/01_d4",
+        airports: [
+          { name: "Denver International Airport", id: "DEN", city: "Denver" },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(result.status, "resolved");
+  assert.deepEqual(result.selected, {
+    locationId: "/m/01_d4",
+    kind: "city",
+    name: "Denver, Colorado",
+    airportIds: ["DEN"],
+  });
+});
+
+test("lenient tier: multiple qualifier-compatible matches stay ambiguous without selecting", () => {
+  // "Denver, CO" is genuinely ambiguous between Colorado and Connecticut:
+  // both lenient-compatible, no exact match, so selection is prohibited.
+  const result = projectSerpApiFlightLocation("Denver, CO", {
+    suggestions: [
+      {
+        position: 1,
+        name: "Denver, Colorado",
+        type: "city",
+        description: "City in Colorado",
+        id: "/m/01_d4",
+        airports: [{ id: "DEN" }],
+      },
+      {
+        position: 2,
+        name: "Denver, Connecticut",
+        type: "city",
+        description: "City in Connecticut",
+        id: "/m/fake01",
+        airports: [{ id: "XXX" }],
+      },
+    ],
+  });
+
+  assert.equal(result.status, "ambiguous");
+  assert.equal(result.selected, null);
+  assert.deepEqual(result.diagnostic, { reason: "ambiguous_matches" });
+});
+
+test("lenient tier: exact matches always take precedence over lenient candidates", () => {
+  // "Paris, France" matches the first suggestion exactly; the lenient-only
+  // sibling must not widen or reorder the candidate set.
+  const result = projectSerpApiFlightLocation("Paris, France", {
+    suggestions: [
+      citySuggestion(),
+      citySuggestion({ position: 2, name: "Paris, Texas, United States", id: "/m/0td75", airports: [{ id: "PRX" }] }),
+    ],
+  });
+
+  assert.equal(result.status, "resolved");
+  assert.equal(result.selected?.locationId, "/m/05qtj");
+  assert.equal(result.candidates.length, 1);
+});
+
+test("lenient and single-suggestion tiers keep their fail-closed boundaries", () => {
+  // Different primary name, two cities → no tier matches, no single rule.
+  const wrongPrimary = projectSerpApiFlightLocation("Denver, CO", {
+    suggestions: [
+      { type: "city", name: "London, England", id: "/m/04jpl", airports: [{ id: "LHR" }] },
+      { type: "city", name: "Lyon, France", id: "/m/lyon1", airports: [{ id: "LYS" }] },
+    ],
+  });
+  assert.equal(wrongPrimary.status, "unresolved");
+  assert.deepEqual(wrongPrimary.diagnostic, { reason: "no_matching_city" });
+
+  // Disjoint qualifiers with no prefix relationship never lenient-match:
+  // both cities fail closed as a plain no-match.
+  const disjoint = projectSerpApiFlightLocation("Denver, Ohio", {
+    suggestions: [
+      { type: "city", name: "Denver, Colorado", id: "/m/01_d4", airports: [{ id: "DEN" }] },
+      { type: "city", name: "Raleigh, North Carolina", id: "/m/01f_2", airports: [{ id: "RDU" }] },
+    ],
+  });
+  assert.equal(disjoint.status, "unresolved");
+  assert.deepEqual(disjoint.diagnostic, { reason: "no_matching_city" });
+
+  // Single-character qualifier is below the two-character floor: not even
+  // the lenient near-miss flag fires, so it stays a plain no-match.
+  const tooShort = projectSerpApiFlightLocation("Paris, F", {
+    suggestions: [citySuggestion(), citySuggestion({ name: "London, United Kingdom", id: "/m/04jpl" })],
+  });
+  assert.equal(tooShort.status, "unresolved");
+  assert.deepEqual(tooShort.diagnostic, { reason: "no_matching_city" });
+
+  // Unqualified saved location never enters the lenient tier and matches
+  // exactly through the primary-name rule regardless of suggestion count.
+  const bareSaved = projectSerpApiFlightLocation("Denver", {
+    suggestions: [
+      { type: "city", name: "Denver, Colorado", id: "/m/01_d4", airports: [{ id: "DEN" }] },
+      { type: "city", name: "Raleigh, North Carolina", id: "/m/01f_2", airports: [{ id: "RDU" }] },
+    ],
+  });
+  assert.equal(bareSaved.status, "resolved");
+  assert.equal(bareSaved.selected?.locationId, "/m/01_d4");
+});
+
+test("lenient tier: rejected lenient match still reports matching_city_rejected", () => {
+  // A lenient-matching city whose structure fails validation must keep the
+  // established rejected-match diagnostic instead of degrading silently.
+  const result = projectSerpApiFlightLocation("Denver, CO", {
+    suggestions: [{ type: "city", name: "Denver, Colorado", id: "invalid", airports: [] }],
+  });
+
+  assert.equal(result.status, "malformed_response");
+  assert.deepEqual(result.diagnostic, { reason: "matching_city_rejected" });
+});
+
+test("single-suggestion rule: multiple city suggestions stay fail-closed", () => {
+  const result = projectSerpApiFlightLocation("Raleigh, NC", {
+    suggestions: [
+      { type: "city", name: "Raleigh, North Carolina", id: "/m/01f_2", airports: [{ id: "RDU" }] },
+      { type: "city", name: "Raleigh, Mississippi", id: "/m/fake02", airports: [{ id: "RYY" }] },
+    ],
+  });
+
+  assert.equal(result.status, "unresolved");
+  assert.equal(result.selected, null);
+  assert.deepEqual(result.diagnostic, { reason: "no_matching_city" });
+});
+
+test("single-suggestion rule: never overrides exact-rejection or non-city suggestion sets", () => {
+  // An exact-matching city that failed structural validation keeps its
+  // rejected-match diagnostic; the unrelated valid sibling must not be
+  // substituted for it.
+  const rejected = projectSerpApiFlightLocation("Paris", {
+    suggestions: [
+      { type: "city", name: "Paris", id: "invalid", airports: [] },
+      { type: "city", name: "Lyon, France", id: "/m/lyon1", airports: [{ id: "LYS" }] },
+    ],
+  });
+  assert.equal(rejected.status, "unresolved");
+  assert.deepEqual(rejected.diagnostic, { reason: "matching_city_rejected" });
+
+  // No city-type suggestion (region only) → nothing to resolve.
+  const regionsOnly = projectSerpApiFlightLocation("France", {
+    suggestions: [{ type: "region", name: "France", id: "/m/0f8l9c" }],
+  });
+  assert.equal(regionsOnly.status, "unresolved");
+  assert.deepEqual(regionsOnly.diagnostic, { reason: "no_matching_city" });
 });

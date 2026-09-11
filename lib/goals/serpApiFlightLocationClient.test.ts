@@ -102,10 +102,31 @@ test("preserves ambiguous city projections without choosing or retrying", async 
   assert.equal(callCount, 1);
 });
 
-test("preserves a valid unresolved result without guessing", async () => {
+test("resolves the provider's lone city suggestion as the authoritative interpretation", async () => {
+  // The provider's autocomplete is the same disambiguation the customer
+  // would see on Google Flights: one returned city IS the interpretation of
+  // the saved text, even when the canonical name differs from the input.
   const client = buildSerpApiFlightLocationClient(
     "test-key",
     async () => response({ suggestions: [citySuggestion({ name: "London, United Kingdom" })] }),
+  );
+
+  const result = await client.resolveLocation("Paris");
+
+  assert.equal(result.error, null);
+  assert.equal(result.projection?.status, "resolved");
+  assert.equal(result.projection?.selected?.name, "London, United Kingdom");
+});
+
+test("stays unresolved without guessing among multiple non-matching cities", async () => {
+  const client = buildSerpApiFlightLocationClient(
+    "test-key",
+    async () => response({
+      suggestions: [
+        citySuggestion({ name: "London, United Kingdom" }),
+        citySuggestion({ name: "Lyon, France", id: "/m/lyon1", airports: [{ id: "LYS" }] }),
+      ],
+    }),
   );
 
   const result = await client.resolveLocation("Paris");
@@ -222,4 +243,19 @@ test("never returns the API key or raw provider metadata", async () => {
   assert.ok(!serialized.includes("https://"));
   assert.ok(!serialized.includes("search_metadata"));
   assert.ok(!serialized.includes("description"));
+});
+
+
+test("forwards fixed projector reasons while malformed matches remain unusable", async () => {
+  for (const overrides of [{ id: "invalid" }, { airports: [] }]) {
+    const client = buildSerpApiFlightLocationClient("fixture", async () => response({ suggestions: [citySuggestion(overrides)] }));
+    assert.deepEqual(await client.resolveLocation("Paris"), {
+      projection: null, error: "malformed_response", diagnostic: { reason: "matching_city_rejected" },
+    });
+  }
+  const client = buildSerpApiFlightLocationClient("fixture", async () => response({ suggestions: [] }));
+  const result = await client.resolveLocation("Paris");
+  assert.equal(result.projection?.status, "unresolved");
+  assert.equal(result.error, null);
+  assert.deepEqual(result.diagnostic, { reason: "empty_suggestions" });
 });

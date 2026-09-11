@@ -11,6 +11,7 @@ import {
   normalizeSerpApiFlightLocationInput,
   projectSerpApiFlightLocation,
   type SerpApiFlightLocationProjection,
+  type FlightLocationDiagnostic,
 } from "./serpApiFlightLocationProjection";
 
 export type SerpApiFlightLocationClientError =
@@ -22,6 +23,7 @@ export type SerpApiFlightLocationClientError =
 export interface SerpApiFlightLocationClientResult {
   readonly projection: SerpApiFlightLocationProjection | null;
   readonly error: SerpApiFlightLocationClientError | null;
+  readonly diagnostic?: FlightLocationDiagnostic;
 }
 
 type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
@@ -86,11 +88,12 @@ export function buildSerpApiFlightLocationClient(
     }
 
     const projection = projectSerpApiFlightLocation(normalizedLocation, body);
+    const diagnostic = projection.diagnostic ? { diagnostic: projection.diagnostic } : {};
     if (projection.status === "malformed_response") {
-      return { projection: null, error: "malformed_response" };
+      return { projection: null, error: "malformed_response", ...diagnostic };
     }
 
-    return { projection, error: null };
+    return { projection, error: null, ...diagnostic };
   }
 
   return Object.freeze({ resolveLocation });

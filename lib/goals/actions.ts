@@ -20,15 +20,17 @@ async function getAuthenticatedUserId(): Promise<string> {
   return userData.user.id;
 }
 
-function normalizeCommaSeparated(value: string): string[] {
-  return Array.from(
-    new Set(
-      value
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-    )
-  );
+/**
+ * Locations are stored as single-element arrays: one origin and one
+ * destination per goal. A location string may itself contain a comma
+ * qualifier (e.g. "Copenhagen, Denmark"), which the SerpAPI autocomplete
+ * query accepts natively — splitting on commas would fabricate extra
+ * destinations and break the one-location contract required by the flight
+ * and hotel stages.
+ */
+function normalizeSingleLocation(value: string): string[] {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? [trimmed] : [];
 }
 
 export async function createGoalAction(
@@ -44,14 +46,14 @@ export async function createGoalAction(
     }
 
     const originInput = String(formData.get("origins") ?? "");
-    const origin = normalizeCommaSeparated(originInput);
+    const origin = normalizeSingleLocation(originInput);
 
     if (origin.length === 0) {
       return { success: false, error: "At least one origin is required." };
     }
 
     const destinationsInput = String(formData.get("destinations") ?? "");
-    const destinations = normalizeCommaSeparated(destinationsInput);
+    const destinations = normalizeSingleLocation(destinationsInput);
     if (destinations.length === 0) {
       return { success: false, error: "At least one destination is required." };
     }
@@ -61,8 +63,8 @@ export async function createGoalAction(
       return { success: false, error: "Traveler count is required." };
     }
     const travelerCount = Number(travelerCountRaw);
-    if (!Number.isInteger(travelerCount) || travelerCount <= 0) {
-      return { success: false, error: "Traveler count must be a positive integer greater than zero." };
+    if (!Number.isInteger(travelerCount) || travelerCount <= 0 || travelerCount > 9) {
+      return { success: false, error: "Traveler count must be a positive integer between 1 and 9." };
     }
 
     const minNightsRaw = formData.get("minimumNights");

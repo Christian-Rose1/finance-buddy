@@ -51,13 +51,13 @@ export function GoalForm({ onSuccess }: GoalFormProps) {
         {/* Origins */}
         <div className="space-y-2">
           <label htmlFor="origins" className="block text-sm font-medium text-slate-200">
-            Flying from <span className="text-slate-400">(cities or airports)</span>
+            Flying from <span className="text-slate-400">(city or airport)</span>
           </label>
           <input
             id="origins"
             name="origins"
             type="text"
-            placeholder="e.g., Denver, New York City"
+            placeholder="e.g., Denver"
             className="fb-input"
             required
             autoComplete="off"
@@ -67,22 +67,27 @@ export function GoalForm({ onSuccess }: GoalFormProps) {
         {/* Destinations */}
         <div className="space-y-2">
           <label htmlFor="destinations" className="block text-sm font-medium text-slate-200">
-            Destinations <span className="text-slate-400">(comma-separated locations)</span>
+            Destination <span className="text-slate-400">(city + country/region)</span>
           </label>
           <input
             id="destinations"
             name="destinations"
             type="text"
-            placeholder="e.g., London, Paris"
+            placeholder="e.g., Copenhagen, Denmark"
             className="fb-input"
             required
             autoComplete="off"
+            aria-describedby="destinations-specificity-hint"
           />
+          <p id="destinations-specificity-hint" className="text-xs text-slate-400">
+            Include the country or region — some city names exist in several places, and we search
+            flights only for the exact place you name. One destination per goal.
+            For multiple stops, create one goal per destination.
+          </p>
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        {/* Earliest Departure */}
+      <div className="grid gap-4 sm:grid-cols-2">        {/* Earliest Departure */}
         <div className="space-y-2">
           <label htmlFor="earliestDeparture" className="block text-sm font-medium text-slate-200">
             Earliest Departure
@@ -92,6 +97,7 @@ export function GoalForm({ onSuccess }: GoalFormProps) {
             name="earliestDeparture"
             type="date"
             className="fb-input"
+            required
           />
         </div>
 
@@ -105,6 +111,7 @@ export function GoalForm({ onSuccess }: GoalFormProps) {
             name="latestReturn"
             type="date"
             className="fb-input"
+            required
           />
         </div>
       </div>
@@ -152,6 +159,7 @@ export function GoalForm({ onSuccess }: GoalFormProps) {
             name="travelerCount"
             type="number"
             min="1"
+            max="9"
             step="1"
             defaultValue="1"
             className="fb-input"
@@ -177,7 +185,6 @@ export function GoalForm({ onSuccess }: GoalFormProps) {
             <option value="premium_economy">Premium Economy</option>
             <option value="business">Business</option>
             <option value="first">First Class</option>
-            <option value="flexible">Flexible / Any</option>
           </select>
         </div>
 
