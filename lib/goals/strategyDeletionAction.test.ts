@@ -74,7 +74,12 @@ test("unauthenticated and ownership-rejected deletion remain generic", async () 
 
 test("failed deletion preserves the displayed strategy and UI uses confirmation with generic errors", async () => {
   const component = await readFile(new URL("../../components/goal-strategy-panel.tsx", import.meta.url), "utf8");
-  assert.match(component, /strategy \? <button[^>]*[\s\S]*Delete strategy[\s\S]*<\/button> : null/);
+  // Match the complete conditional section on its own line; do not allow the
+  // assertion to span unrelated controls elsewhere in the component.
+  assert.match(
+    component,
+    /^[ \t]*\{strategy \? <div className="[^"\r\n]*"><button type="button" onClick=\{handleDelete\} disabled=\{runState\.isGenerating \|\| isDeleting\} className=\{`[^`\r\n]*`\}>\{isDeleting \? <><Loader2 [^<>\r\n]*\/>Deleting…<\/> : <><Trash2 [^<>\r\n]*\/>Delete strategy<\/>\}<\/button><\/div> : null\}[ \t]*$/m,
+  );
   assert.match(component, /window\.confirm\([\s\S]*removes the saved plan[\s\S]*build a new plan later/);
   assert.match(component, /if \(!result\.success\) \{[\s\S]*setDeleteError\("We couldn’t delete your strategy right now\. Your saved plan is unchanged\."\)[\s\S]*return;/);
   assert.match(component, /if \(!result\.success\)[\s\S]*return;[\s\S]*setStrategy\(null\)/);
