@@ -3,6 +3,7 @@
 // options and points inventory. Never mutates inputs.
 
 import type { Goal } from "./types";
+import type { VerifiedTransferPartner } from "@/lib/rewards/awardBenchmarks";
 import type {
   StrategyAwardOption,
   StrategyPointsInventoryItem,
@@ -64,6 +65,7 @@ function rankOptions(
   goal: Goal,
   inventory: StrategyPointsInventoryItem[],
   excludeDifferentDestination: boolean,
+  verifiedTransferPartners?: VerifiedTransferPartner[] | null,
 ): StrategyAwardOption[] {
   const scored: ScoredOption[] = [];
 
@@ -79,7 +81,8 @@ function rankOptions(
     if (excludeDifferentDestination && match === "different_destination") continue;
 
     const calculable = isOptionCalculable(option, goal);
-    const fundable = findFundingAccount(option, inventory) !== null;
+    const fundable =
+      findFundingAccount(option, inventory, verifiedTransferPartners) !== null;
 
     scored.push({
       option,
@@ -130,14 +133,25 @@ function calcRequirement(
 }
 
 /**
- * Build a single StrategyPointsAllocation from a funding match and
- * planned points requirement.
+ * Build a single StrategyPointsAllocation from a funding match and the
+ * destination-program requirement. Direct matches debit the requirement in
+ * the account’s native units. Transfer matches debit the verified partner’s
+ * source-program cost: requirement ÷ ratio, rounded UP (conservative, never
+ * prorated), with a fixed disclosure — transfer timing and promotions are
+ * never established here.
  */
 function buildAllocation(
   match: FundingAccountMatch,
-  plannedPoints: number,
+  requiredDestinationPoints: number,
 ): StrategyPointsAllocation {
   const availablePoints = match.account.balance;
+  let plannedPoints = requiredDestinationPoints;
+  if (match.method === "transfer_source" && match.transfer) {
+    plannedPoints = Math.ceil(
+      requiredDestinationPoints /
+        match.transfer.destinationPointsPerSourcePoint,
+    );
+  }
   return {
     accountId: match.account.accountId,
     rewardProgramId: match.account.rewardProgramId,
@@ -150,6 +164,13 @@ function buildAllocation(
     pointsGap: Math.max(plannedPoints - availablePoints, 0),
   };
 }
+
+/**
+ * Fixed, server-owned disclosure appended for transfer-funded allocations.
+ * Never mentions promotions, timing, or availability specifics.
+ */
+const TRANSFER_FUNDING_ASSUMPTION =
+  "Funding is planned through a verified transfer partner; the source points shown are the required destination points divided by the verified transfer ratio, rounded up. Transfer times and current promotions are not established.";
 
 /**
  * Merge string arrays without duplicates, preserving first-seen order.
@@ -191,6 +212,7 @@ function buildFlightFirst(
   flight: StrategyAwardOption | null,
   inventory: StrategyPointsInventoryItem[],
   tripNights: number | null,
+  verifiedTransferPartners?: VerifiedTransferPartner[] | null,
 ): StrategyAllocationScenario {
   const base = {
     id: "flight_first",
@@ -225,7 +247,7 @@ function buildFlightFirst(
     };
   }
 
-  const funding = findFundingAccount(flight, inventory);
+  const funding = findFundingAccount(flight, inventory, verifiedTransferPartners);
   if (!funding) {
     return {
       ...base,
@@ -234,7 +256,7 @@ function buildFlightFirst(
       status: "insufficient_information",
       assumptions: mergeUnique(base.assumptions, calc.assumptions),
       warnings: mergeUnique(base.warnings, calc.warnings, [
-        "No eligible funding account found for flight option",
+        "No eligible direct-program or verified-transfer funding account found for flight option; transfer terms and eligibility are not established",
       ]),
     };
   }
@@ -248,7 +270,11 @@ function buildFlightFirst(
     flightPointsRequired: calc.pointsRequired,
     status,
     allocations: [allocation],
-    assumptions: mergeUnique(base.assumptions, calc.assumptions),
+    assumptions: mergeUnique(
+      base.assumptions,
+      calc.assumptions,
+      funding.method === "transfer_source" ? [TRANSFER_FUNDING_ASSUMPTION] : [],
+    ),
     warnings: mergeUnique(base.warnings, calc.warnings),
   };
 }
@@ -258,6 +284,7 @@ function buildHotelFirst(
   hotel: StrategyAwardOption | null,
   inventory: StrategyPointsInventoryItem[],
   tripNights: number | null,
+  verifiedTransferPartners?: VerifiedTransferPartner[] | null,
 ): StrategyAllocationScenario {
   const base = {
     id: "hotel_first",
@@ -292,7 +319,7 @@ function buildHotelFirst(
     };
   }
 
-  const funding = findFundingAccount(hotel, inventory);
+  const funding = findFundingAccount(hotel, inventory, verifiedTransferPartners);
   if (!funding) {
     return {
       ...base,
@@ -301,7 +328,7 @@ function buildHotelFirst(
       status: "insufficient_information",
       assumptions: mergeUnique(base.assumptions, calc.assumptions),
       warnings: mergeUnique(base.warnings, calc.warnings, [
-        "No eligible funding account found for hotel option",
+        "No eligible direct-program or verified-transfer funding account found for hotel option; transfer terms and eligibility are not established",
       ]),
     };
   }
@@ -315,7 +342,11 @@ function buildHotelFirst(
     hotelPointsRequired: calc.pointsRequired,
     status,
     allocations: [allocation],
-    assumptions: mergeUnique(base.assumptions, calc.assumptions),
+    assumptions: mergeUnique(
+      base.assumptions,
+      calc.assumptions,
+      funding.method === "transfer_source" ? [TRANSFER_FUNDING_ASSUMPTION] : [],
+    ),
     warnings: mergeUnique(base.warnings, calc.warnings),
   };
 }
@@ -326,6 +357,7 @@ function buildBalanced(
   hotel: StrategyAwardOption | null,
   inventory: StrategyPointsInventoryItem[],
   tripNights: number | null,
+  verifiedTransferPartners?: VerifiedTransferPartner[] | null,
 ): StrategyAllocationScenario {
   const base = {
     id: "balanced",
@@ -359,14 +391,14 @@ function buildBalanced(
   if (flight) {
     flightCalc = calculateFlightPointsRequired(flight, goal);
     if (flightCalc.status === "calculated") {
-      flightFunding = findFundingAccount(flight, inventory);
+      flightFunding = findFundingAccount(flight, inventory, verifiedTransferPartners);
     }
   }
 
   if (hotel) {
     hotelCalc = calculateHotelPointsRequired(hotel, goal);
     if (hotelCalc.status === "calculated") {
-      hotelFunding = findFundingAccount(hotel, inventory);
+      hotelFunding = findFundingAccount(hotel, inventory, verifiedTransferPartners);
     }
   }
 
@@ -378,8 +410,8 @@ function buildBalanced(
     const allWarnings: string[] = [];
     if (flightCalc) allWarnings.push(...flightCalc.warnings);
     if (hotelCalc) allWarnings.push(...hotelCalc.warnings);
-    if (flight && !flightFunding) allWarnings.push("No eligible funding account found for flight option");
-    if (hotel && !hotelFunding) allWarnings.push("No eligible funding account found for hotel option");
+    if (flight && !flightFunding) allWarnings.push("No eligible direct-program or verified-transfer funding account found for flight option; transfer terms and eligibility are not established");
+    if (hotel && !hotelFunding) allWarnings.push("No eligible direct-program or verified-transfer funding account found for hotel option; transfer terms and eligibility are not established");
     return {
       ...base,
       flightOptionId: flight?.id ?? null,
@@ -405,6 +437,9 @@ function buildBalanced(
   if (flightOk && flightCalc && flightFunding) {
     flightAlloc = buildAllocation(flightFunding, flightCalc.pointsRequired!);
     allAssumptions.push(...flightCalc.assumptions);
+    if (flightFunding.method === "transfer_source") {
+      allAssumptions.push(TRANSFER_FUNDING_ASSUMPTION);
+    }
     allWarnings.push(...flightCalc.warnings);
   }
 
@@ -413,6 +448,9 @@ function buildBalanced(
   if (hotelOk && hotelCalc && hotelFunding) {
     hotelAlloc = buildAllocation(hotelFunding, hotelCalc.pointsRequired!);
     allAssumptions.push(...hotelCalc.assumptions);
+    if (hotelFunding.method === "transfer_source") {
+      allAssumptions.push(TRANSFER_FUNDING_ASSUMPTION);
+    }
     allWarnings.push(...hotelCalc.warnings);
   }
 
@@ -436,7 +474,16 @@ function buildBalanced(
     if (hotelAlloc) allocations.push(hotelAlloc);
   }
 
-  const status = determineStatus(allocations, false);
+  const hasUnfundedDemand = (flight !== null && !flightOk) || (hotel !== null && !hotelOk);
+  if (flight !== null && !flightOk) {
+    allWarnings.push("Flight funding is unresolved; transfer terms and eligibility are not established or coverage is missing");
+  }
+  if (hotel !== null && !hotelOk) {
+    allWarnings.push("Hotel funding is unresolved; transfer terms and eligibility are not established or coverage is missing");
+  }
+  const status = hasUnfundedDemand
+    ? "insufficient_information"
+    : determineStatus(allocations, false);
 
   return {
     ...base,
@@ -459,6 +506,7 @@ function buildFallback(
   tripNights: number | null,
   primaryFlightId: string | null,
   primaryHotelId: string | null,
+  verifiedTransferPartners?: VerifiedTransferPartner[] | null,
 ): StrategyAllocationScenario {
   const base = {
     id: "fallback",
@@ -500,9 +548,9 @@ function buildFallback(
   );
 
   // Within each group, rank by calculable+fundable, goal match, original order
-  const rankedNonDiffFlight = rankOptions(nonDiffFlight, goal, inventory, false);
-  const rankedNonDiffHotel = rankOptions(nonDiffHotel, goal, inventory, false);
-  const rankedDiffDest = rankOptions(diffDest, goal, inventory, false);
+  const rankedNonDiffFlight = rankOptions(nonDiffFlight, goal, inventory, false, verifiedTransferPartners);
+  const rankedNonDiffHotel = rankOptions(nonDiffHotel, goal, inventory, false, verifiedTransferPartners);
+  const rankedDiffDest = rankOptions(diffDest, goal, inventory, false, verifiedTransferPartners);
 
   // Try each group in order, picking the first calculable+fundable option
   const candidates = [
@@ -515,7 +563,7 @@ function buildFallback(
     const calc = calcRequirement(option, goal);
     if (calc.status !== "calculated") continue;
 
-    const funding = findFundingAccount(option, inventory);
+    const funding = findFundingAccount(option, inventory, verifiedTransferPartners);
     if (!funding) continue;
 
     const allocation = buildAllocation(funding, calc.pointsRequired!);
@@ -538,7 +586,11 @@ function buildFallback(
       hotelPointsRequired: isFlight ? null : calc.pointsRequired,
       status,
       allocations: [allocation],
-      assumptions: mergeUnique(base.assumptions, calc.assumptions),
+      assumptions: mergeUnique(
+        base.assumptions,
+        calc.assumptions,
+        funding.method === "transfer_source" ? [TRANSFER_FUNDING_ASSUMPTION] : [],
+      ),
       warnings: mergeUnique(base.warnings, warnings),
     };
   }
@@ -565,19 +617,31 @@ export function buildStrategyAllocationScenarios(
   flightOptions: StrategyAwardOption[],
   hotelOptions: StrategyAwardOption[],
   pointsInventory: StrategyPointsInventoryItem[],
+  verifiedTransferPartners?: VerifiedTransferPartner[] | null,
 ): StrategyAllocationScenario[] {
   const tripNights = calculateTripNights(goal);
 
   // Rank and select primary options (exclude different_destination)
-  const rankedFlights = rankOptions(flightOptions, goal, pointsInventory, true);
-  const rankedHotels = rankOptions(hotelOptions, goal, pointsInventory, true);
+  const rankedFlights = rankOptions(
+    flightOptions, goal, pointsInventory, true, verifiedTransferPartners,
+  );
+  const rankedHotels = rankOptions(
+    hotelOptions, goal, pointsInventory, true, verifiedTransferPartners,
+  );
 
   const primaryFlight = rankedFlights[0] ?? null;
   const primaryHotel = rankedHotels[0] ?? null;
 
-  const flightFirst = buildFlightFirst(goal, primaryFlight, pointsInventory, tripNights);
-  const hotelFirst = buildHotelFirst(goal, primaryHotel, pointsInventory, tripNights);
-  const balanced = buildBalanced(goal, primaryFlight, primaryHotel, pointsInventory, tripNights);
+  const flightFirst = buildFlightFirst(
+    goal, primaryFlight, pointsInventory, tripNights, verifiedTransferPartners,
+  );
+  const hotelFirst = buildHotelFirst(
+    goal, primaryHotel, pointsInventory, tripNights, verifiedTransferPartners,
+  );
+  const balanced = buildBalanced(
+    goal, primaryFlight, primaryHotel, pointsInventory, tripNights,
+    verifiedTransferPartners,
+  );
   const fallback = buildFallback(
     goal,
     flightOptions,
@@ -586,6 +650,7 @@ export function buildStrategyAllocationScenarios(
     tripNights,
     primaryFlight?.id ?? null,
     primaryHotel?.id ?? null,
+    verifiedTransferPartners,
   );
 
   return [flightFirst, hotelFirst, balanced, fallback];

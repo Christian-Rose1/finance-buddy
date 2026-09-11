@@ -41,7 +41,7 @@ function makeFlightOption(overrides: Partial<StrategyAwardOption> = {}): Strateg
   return {
     id: "flight-1",
     sourceId: "src-1",
-    programName: "Air France/KLM Flying Blue",
+    programName: "Fictional Travel Rewards",
     redemptionType: "flight",
     pricingBasis: "round_trip",
     itineraryLabel: "JFK-CDG",
@@ -49,8 +49,8 @@ function makeFlightOption(overrides: Partial<StrategyAwardOption> = {}): Strateg
     cashFees: null,
     seats: null,
     cabin: "economy",
-    transferFromProgramId: "chase_ur",
-    transferRatio: 1,
+    transferFromProgramId: null,
+    transferRatio: null,
     centsPerPoint: null,
     availabilityStatus: "available",
     travelerCountCovered: 1,
@@ -64,7 +64,7 @@ function makeHotelOption(overrides: Partial<StrategyAwardOption> = {}): Strategy
   return {
     id: "hotel-1",
     sourceId: "src-2",
-    programName: "World of Hyatt",
+    programName: "Fictional Travel Rewards",
     redemptionType: "hotel",
     pricingBasis: "per_night",
     itineraryLabel: "Park Hyatt Paris",
@@ -72,8 +72,8 @@ function makeHotelOption(overrides: Partial<StrategyAwardOption> = {}): Strategy
     cashFees: null,
     seats: null,
     cabin: null,
-    transferFromProgramId: "chase_ur",
-    transferRatio: 1,
+    transferFromProgramId: null,
+    transferRatio: null,
     centsPerPoint: null,
     availabilityStatus: "available",
     nightCountCovered: 1,
@@ -87,7 +87,7 @@ function makeInventoryItem(overrides: Partial<StrategyPointsInventoryItem> = {})
   return {
     accountId: "acct-chase",
     rewardProgramId: "chase_ur",
-    programName: "Chase Ultimate Rewards",
+    programName: "Fictional Travel Rewards",
     ownerLabel: "Me",
     ownerType: "self",
     balance: 100000,
@@ -228,7 +228,7 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 30000,
         pricingBasis: "round_trip",
         travelerCountCovered: 1,
-        transferFromProgramId: "chase_ur",
+        transferFromProgramId: null,
       }),
     ];
     const hotels = [
@@ -237,7 +237,7 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 35000,
         pricingBasis: "per_night",
         nightCountCovered: 1,
-        transferFromProgramId: "chase_ur",
+        transferFromProgramId: null,
       }),
     ];
     const inventory = [makeInventoryItem({ accountId: "acct-chase", rewardProgramId: "chase_ur", balance: 200000 })];
@@ -262,8 +262,8 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 30000,
         pricingBasis: "round_trip",
         travelerCountCovered: 1,
-        transferFromProgramId: "chase_ur",
-        programName: "Air France/KLM Flying Blue",
+        transferFromProgramId: null,
+        programName: "Fictional Travel Rewards",
       }),
     ];
     const hotels = [
@@ -272,21 +272,21 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 35000,
         pricingBasis: "per_night",
         nightCountCovered: 1,
-        transferFromProgramId: "amex_mr",
-        programName: "World of Hyatt",
+        transferFromProgramId: null,
+        programName: "Fictional Hotel Rewards",
       }),
     ];
     const inventory: StrategyPointsInventoryItem[] = [
       makeInventoryItem({
         accountId: "acct-chase",
         rewardProgramId: "chase_ur",
-        programName: "Chase Ultimate Rewards",
+        programName: "Fictional Travel Rewards",
         balance: 100000,
       }),
       makeInventoryItem({
         accountId: "acct-amex",
         rewardProgramId: "amex_mr",
-        programName: "Amex Membership Rewards",
+        programName: "Fictional Hotel Rewards",
         balance: 500000,
         ownerLabel: "Me",
         ownerType: "self",
@@ -313,7 +313,7 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 30000,
         pricingBasis: "round_trip",
         travelerCountCovered: 1,
-        transferFromProgramId: "chase_ur",
+        transferFromProgramId: null,
       }),
     ];
     const hotels: StrategyAwardOption[] = [];
@@ -339,7 +339,7 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 30000,
         pricingBasis: "round_trip",
         travelerCountCovered: 1,
-        transferFromProgramId: "chase_ur",
+        transferFromProgramId: null,
       }),
     ];
     const hotels: StrategyAwardOption[] = [];
@@ -531,7 +531,7 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 30000,
         pricingBasis: "round_trip",
         travelerCountCovered: 1,
-        transferFromProgramId: "chase_ur",
+        transferFromProgramId: null,
       }),
     ];
     const hotels = [
@@ -540,7 +540,8 @@ describe("buildStrategyAllocationScenarios", () => {
         pointsRequired: 35000,
         pricingBasis: "per_night",
         nightCountCovered: 1,
-        transferFromProgramId: "amex_mr",
+        transferFromProgramId: null,
+        programName: "Fictional Hotel Rewards",
       }),
     ];
     const inventory: StrategyPointsInventoryItem[] = [
@@ -552,6 +553,7 @@ describe("buildStrategyAllocationScenarios", () => {
       makeInventoryItem({
         accountId: "acct-amex",
         rewardProgramId: "amex_mr",
+        programName: "Fictional Hotel Rewards",
         balance: 500000,
         ownerLabel: "Me",
         ownerType: "self",
@@ -619,5 +621,76 @@ it("scenarios use the declared minimumNights, not the full date-window span", ()
     for (const s of scenarios) {
       assert.equal(s.tripNights, 8);
     }
+  });
+});
+
+
+describe("transfer-unit allocation regression", () => {
+  for (const ratio of [null, 0, -1, NaN, Infinity, 0.5, 1, 2]) {
+    it(`retains destination demand without a source debit for ratio ${ratio}`, () => {
+      const flight = makeFlightOption({
+        programName: "Fictional Airline Miles",
+        transferFromProgramId: "bank_points", transferRatio: ratio,
+      });
+      const source = makeInventoryItem({
+        rewardProgramId: "bank_points", programName: "Fictional Bank Points",
+        balance: 40000,
+      });
+      const scenarios = buildStrategyAllocationScenarios(makeGoal(), [flight], [], [source]);
+      const first = findScenario(scenarios, "flight_first");
+      assert.equal(first.flightPointsRequired, 60000);
+      assert.equal(first.status, "insufficient_information");
+      assert.deepEqual(first.allocations, []);
+      assert.ok(first.warnings.some((warning) => warning.includes("transfer terms")));
+      for (const scenario of scenarios) {
+        assert.deepEqual(scenario.allocations, []);
+        assert.equal(scenario.status, "insufficient_information");
+      }
+    });
+  }
+
+  it("two destination demands cannot debit one unsupported source account", () => {
+    const flights = [makeFlightOption({
+      programName: "Fictional Airline Miles", transferFromProgramId: "bank_points", transferRatio: 2,
+    })];
+    const hotels = [makeHotelOption({
+      programName: "Fictional Hotel Points", transferFromProgramId: "bank_points", transferRatio: 0.5,
+    })];
+    const source = makeInventoryItem({
+      rewardProgramId: "bank_points", programName: "Fictional Bank Points", balance: 1000000,
+    });
+    const result = findScenario(buildStrategyAllocationScenarios(makeGoal(), flights, hotels, [source]), "balanced");
+    assert.equal(result.flightPointsRequired, 60000);
+    assert.equal(result.hotelPointsRequired, 315000);
+    assert.equal(result.status, "insufficient_information");
+    assert.deepEqual(result.allocations, []);
+    assert.equal(source.balance, 1000000);
+  });
+
+  for (const blockedKind of ["flight", "hotel"] as const) {
+    it(`direct coverage cannot hide unresolved ${blockedKind} transfer funding`, () => {
+      const transfer = { programName: "Other Program", transferFromProgramId: "chase_ur", transferRatio: 2 };
+      const flight = makeFlightOption(blockedKind === "flight" ? transfer : {});
+      const hotel = makeHotelOption(blockedKind === "hotel" ? transfer : {});
+      const result = findScenario(buildStrategyAllocationScenarios(
+        makeGoal(), [flight], [hotel], [makeInventoryItem({ balance: 1000000 })],
+      ), "balanced");
+      assert.equal(result.status, "insufficient_information");
+      assert.equal(result.allocations.length, 1);
+      assert.equal(result.allocations[0].fundingMethod, "direct_program");
+      assert.equal(result.allocations[0].plannedPoints, blockedKind === "flight" ? 315000 : 60000);
+      assert.ok(result.warnings.some((warning) => warning.includes("funding is unresolved")));
+    });
+  }
+
+  it("direct funding reports insufficient balance in the same native units", () => {
+    const result = findScenario(buildStrategyAllocationScenarios(
+      makeGoal(), [makeFlightOption()], [], [makeInventoryItem({ balance: 40000 })],
+    ), "flight_first");
+    assert.equal(result.status, "gap");
+    assert.equal(result.flightPointsRequired, 60000);
+    assert.equal(result.allocations[0].plannedPoints, 60000);
+    assert.equal(result.allocations[0].pointsGap, 20000);
+    assert.equal(result.allocations[0].remainingPoints, 0);
   });
 });

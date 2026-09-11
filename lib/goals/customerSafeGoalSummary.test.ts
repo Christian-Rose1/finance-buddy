@@ -86,7 +86,15 @@ test("uses a complete fallback when no valid route labels remain", () => {
 
 test("builds a safe staged preview with fixed labels, keys, caps-compatible output, and invalid amounts omitted", () => {
   const preview = buildCustomerSafePlanningPreview(option(), "flight-preview-1");
-  assert.deepEqual(preview, { key: "flight-preview-1", programName: "Program A", itineraryLabel: "Paris itinerary", pointsRequired: 25_000, pricingLabel: "Round trip", coverageLabel: "Coverage stated by the research source", evidenceLabel: "Planning estimate", availabilityLabel: "Check current availability before acting" });
+  assert.deepEqual(preview, { key: "flight-preview-1", programName: "Program A", itineraryLabel: "Paris itinerary", pointsRequired: 25_000, pricingLabel: "Round trip", coverageLabel: "Coverage stated by the research source", evidenceLabel: "Planning estimate", availabilityLabel: "Check current availability before acting", feesLabel: null });
+  // A sourced, well-formed fee is surfaced honestly without a currency claim;
+  // hostile fee shapes are omitted entirely.
+  assert.equal(
+    buildCustomerSafePlanningPreview(option({ cashFees: 82.5 }), "k").feesLabel,
+    "Plus estimated taxes and fees of 82.5 (currency not confirmed)",
+  );
+  assert.equal(buildCustomerSafePlanningPreview(option({ cashFees: -5 }), "k").feesLabel, null);
+  assert.equal(buildCustomerSafePlanningPreview(option({ cashFees: Number.NaN }), "k").feesLabel, null);
   for (const pricingBasis of ["one_way", "round_trip", "per_night", "total_stay", "unknown"] as const) assert.equal(typeof buildCustomerSafePlanningPreview(option({ pricingBasis }), "k").pricingLabel, "string");
   for (const coverageStatus of ["source_explicit", "standard_assumption", "unknown"] as const) assert.equal(typeof buildCustomerSafePlanningPreview(option({ coverageStatus }), "k").coverageLabel, "string");
   for (const pointsRequired of [Number.NaN, Number.POSITIVE_INFINITY, -1, "25000"] as unknown[]) assert.equal(buildCustomerSafePlanningPreview(option({ pointsRequired: pointsRequired as number }), "k").pointsRequired, null);

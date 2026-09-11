@@ -27,6 +27,12 @@ export interface CustomerSafePlanningPreview {
   coverageLabel: string;
   evidenceLabel: "Planning estimate";
   availabilityLabel: "Check current availability before acting";
+  /**
+   * Sourced estimated taxes/fees for the same pricing basis and coverage.
+   * The award option carries no currency, so the label never states one.
+   * Null when unsourced or hostile-shaped.
+   */
+  feesLabel: string | null;
 }
 
 const priorityLabels: Record<string, string> = { lowest_cash: "Lowest cash cost", best_experience: "Best experience", simplest: "Simplest path", balanced: "Balanced" };
@@ -93,6 +99,12 @@ export function buildCustomerSafeGoalSummary(goal: Goal): CustomerSafeGoalSummar
 }
 
 export function buildCustomerSafePlanningPreview(option: StrategyAwardOption, key: string): CustomerSafePlanningPreview {
+  const fees =
+    typeof option.cashFees === "number" &&
+    Number.isFinite(option.cashFees) &&
+    option.cashFees >= 0
+      ? option.cashFees
+      : null;
   return {
     key,
     programName: toCustomerSafeResearchLabel(option.programName, "Reward program"),
@@ -102,6 +114,10 @@ export function buildCustomerSafePlanningPreview(option: StrategyAwardOption, ke
     coverageLabel: safeMap(coverageLabels, option.coverageStatus, "Coverage not confirmed"),
     evidenceLabel: "Planning estimate",
     availabilityLabel: "Check current availability before acting",
+    feesLabel:
+      fees !== null
+        ? `Plus estimated taxes and fees of ${fees.toLocaleString("en-US")} (currency not confirmed)`
+        : null,
   };
 }
 

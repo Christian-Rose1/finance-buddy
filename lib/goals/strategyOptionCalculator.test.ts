@@ -518,7 +518,7 @@ describe("calculateHotelPointsRequired", () => {
 // ---------------------------------------------------------------------------
 
 describe("findFundingAccount", () => {
-  it("exact transferFromProgramId match is preferred (transfer_source)", () => {
+  it("a transfer source reference and 1:1 ratio do not establish eligibility", () => {
     const option = makeFlightOption({
       transferFromProgramId: "chase_ur",
       programName: "Air France/KLM Flying Blue",
@@ -534,9 +534,7 @@ describe("findFundingAccount", () => {
       }),
     ];
     const match = findFundingAccount(option, inventory);
-    assert.ok(match !== null);
-    assert.equal(match!.method, "transfer_source");
-    assert.equal(match!.account.accountId, "acct-chase");
+    assert.equal(match, null);
   });
 
   it("exact direct-program name match works (direct_program)", () => {
@@ -560,7 +558,7 @@ describe("findFundingAccount", () => {
     assert.equal(match!.account.accountId, "acct-af");
   });
 
-  it("transfer_source takes priority over direct_program when both match", () => {
+  it("direct funding remains usable when transfer metadata is present", () => {
     const option = makeFlightOption({
       transferFromProgramId: "chase_ur",
       programName: "Chase Ultimate Rewards",
@@ -585,14 +583,15 @@ describe("findFundingAccount", () => {
     ];
     const match = findFundingAccount(option, inventory);
     assert.ok(match !== null);
-    // Should pick transfer_source even though direct has higher balance
-    assert.equal(match!.method, "transfer_source");
-    assert.equal(match!.account.accountId, "acct-chase");
+    // Transfer metadata does not override direct same-program matching.
+    assert.equal(match!.method, "direct_program");
+    assert.equal(match!.account.accountId, "acct-chase-direct");
   });
 
   it("unverified accounts are excluded", () => {
     const option = makeFlightOption({
-      transferFromProgramId: "chase_ur",
+      transferFromProgramId: null,
+      programName: "Chase Ultimate Rewards",
     });
     const inventory: StrategyPointsInventoryItem[] = [
       makeInventoryItem({
@@ -609,7 +608,8 @@ describe("findFundingAccount", () => {
 
   it("companion accounts are excluded", () => {
     const option = makeFlightOption({
-      transferFromProgramId: "chase_ur",
+      transferFromProgramId: null,
+      programName: "Chase Ultimate Rewards",
     });
     const inventory: StrategyPointsInventoryItem[] = [
       makeInventoryItem({
@@ -626,7 +626,8 @@ describe("findFundingAccount", () => {
 
   it("multiple accounts are never combined (returns single best match)", () => {
     const option = makeFlightOption({
-      transferFromProgramId: "chase_ur",
+      transferFromProgramId: null,
+      programName: "Chase Ultimate Rewards",
     });
     const inventory: StrategyPointsInventoryItem[] = [
       makeInventoryItem({
@@ -653,7 +654,8 @@ describe("findFundingAccount", () => {
 
   it("highest eligible balance wins among same-priority matches", () => {
     const option = makeFlightOption({
-      transferFromProgramId: "chase_ur",
+      transferFromProgramId: null,
+      programName: "Chase Ultimate Rewards",
     });
     const inventory: StrategyPointsInventoryItem[] = [
       makeInventoryItem({
@@ -686,7 +688,8 @@ describe("findFundingAccount", () => {
 
   it("stable tie behavior: first-seen order preserved for equal balances", () => {
     const option = makeFlightOption({
-      transferFromProgramId: "chase_ur",
+      transferFromProgramId: null,
+      programName: "Chase Ultimate Rewards",
     });
     const inventory: StrategyPointsInventoryItem[] = [
       makeInventoryItem({
@@ -711,7 +714,8 @@ describe("findFundingAccount", () => {
 
   it("returns null when no eligible accounts exist", () => {
     const option = makeFlightOption({
-      transferFromProgramId: "chase_ur",
+      transferFromProgramId: null,
+      programName: "Chase Ultimate Rewards",
     });
     const inventory: StrategyPointsInventoryItem[] = [];
     const match = findFundingAccount(option, inventory);
@@ -739,7 +743,8 @@ describe("findFundingAccount", () => {
 
   it("does not mutate the option or inventory", () => {
     const option = makeFlightOption({
-      transferFromProgramId: "chase_ur",
+      transferFromProgramId: null,
+      programName: "Chase Ultimate Rewards",
     });
     const inventory: StrategyPointsInventoryItem[] = [
       makeInventoryItem({
@@ -775,5 +780,35 @@ describe("findFundingAccount", () => {
     ];
     const match = findFundingAccount(option, inventory);
     assert.equal(match, null);
+  });
+});
+
+describe("transfer funding boundary", () => {
+  for (const ratio of [null, 0, -1, NaN, Infinity, 0.5, 1, 2]) {
+    it(`does not authorize source funding from bare ratio ${ratio}`, () => {
+      const option = makeFlightOption({ transferRatio: ratio });
+      assert.equal(findFundingAccount(option, [makeInventoryItem()]), null);
+    });
+  }
+
+  it("an explicitly named source does not define non-1:1 ratio units or eligibility", () => {
+    // The existing contract identifies the source and destination but cannot
+    // express destination units per source unit or account transfer eligibility.
+    const option = makeFlightOption({
+      programName: "Fictional Airline Miles",
+      transferFromProgramId: "bank_points",
+      transferRatio: 2,
+    });
+    const source = makeInventoryItem({
+      rewardProgramId: "bank_points", programName: "Fictional Bank Points",
+    });
+    assert.equal(findFundingAccount(option, [source]), null);
+    const direct = makeInventoryItem({
+      accountId: "direct", rewardProgramId: "airline_miles",
+      programName: "Fictional Airline Miles", balance: 50000,
+    });
+    assert.deepEqual(findFundingAccount(option, [source, direct]), {
+      account: direct, method: "direct_program",
+    });
   });
 });

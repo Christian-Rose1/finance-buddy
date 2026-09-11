@@ -2,6 +2,7 @@
 // These operate on the canonical strategy types and never mutate inputs.
 
 import type { Goal } from "./types";
+import type { VerifiedTransferPartner } from "@/lib/rewards/awardBenchmarks";
 import type {
   StrategyAwardOption,
   StrategyPointsInventoryItem,
@@ -24,7 +25,16 @@ export interface OptionRequirementCalculation {
 
 export interface FundingAccountMatch {
   account: StrategyPointsInventoryItem;
-  method: "transfer_source" | "direct_program";
+  method: "direct_program" | "transfer_source";
+  /**
+   * Transfer funding details. Set only for `transfer_source` matches:
+   * the source (owned) account's program id and the verified ratio of
+   * destination points per source point. The debit math uses these.
+   */
+  transfer?: {
+    fromProgramId: string;
+    destinationPointsPerSourcePoint: number;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -344,9 +354,11 @@ export function calculateHotelPointsRequired(
  * - verificationStatus === "verified"
  * - ownerType === "self"
  *
- * Match priority:
- * 1. Exact rewardProgramId === option.transferFromProgramId → "transfer_source"
- * 2. Exact non-null programName === option.programName → "direct_program"
+ * Only exact non-null programName matches fund directly. The existing award
+ * contract has a bare transferRatio, but no ratio unit convention, validated
+ * account eligibility, or transfer minimum/increment terms. A source-program
+ * reference alone therefore cannot authorize a transfer debit, even at 1:1.
+ * Destination requirements remain calculable separately from funding.
  *
  * Tiebreaker: highest balance, then first-seen order for equal balances.
  *
@@ -357,6 +369,7 @@ export function calculateHotelPointsRequired(
 export function findFundingAccount(
   option: StrategyAwardOption,
   pointsInventory: StrategyPointsInventoryItem[],
+  verifiedTransferPartners?: VerifiedTransferPartner[] | null,
 ): FundingAccountMatch | null {
   // Filter to eligible accounts only
   const eligible = pointsInventory.filter(
@@ -366,19 +379,7 @@ export function findFundingAccount(
 
   if (eligible.length === 0) return null;
 
-  // Priority 1: exact rewardProgramId match → transfer_source
-  const transferSourceMatches = eligible.filter(
-    (item) =>
-      option.transferFromProgramId !== null &&
-      item.rewardProgramId === option.transferFromProgramId,
-  );
-
-  if (transferSourceMatches.length > 0) {
-    const best = pickHighestBalance(transferSourceMatches);
-    return { account: best, method: "transfer_source" };
-  }
-
-  // Priority 2: exact programName match → direct_program
+  // Direct same-program funding needs no conversion or transfer assumptions.
   const directMatches = eligible.filter(
     (item) =>
       item.programName !== null &&
@@ -388,6 +389,66 @@ export function findFundingAccount(
   if (directMatches.length > 0) {
     const best = pickHighestBalance(directMatches);
     return { account: best, method: "direct_program" };
+  }
+
+  // Transfer funding: the option's program must be identified by catalog id,
+  // and a verified partner row must connect an owned account's program to it.
+  // Both identifiers must be structurally valid, positive-ratio, verified
+  // rows — selection is deterministic (highest partner ratio, then loader
+  // order via reduce-left keep-first on strictly-greater comparisons).
+  if (
+    verifiedTransferPartners &&
+    verifiedTransferPartners.length > 0 &&
+    typeof option.catalogRewardProgramId === "string" &&
+    option.catalogRewardProgramId.length > 0
+  ) {
+    const partnerById = new Map(
+      eligible.map((item) => [item.rewardProgramId, item]),
+    );
+    const usablePartners = verifiedTransferPartners.filter(
+      (partner) =>
+        partner &&
+        typeof partner === "object" &&
+        typeof partner.fromProgramId === "string" &&
+        partner.fromProgramId.length > 0 &&
+        typeof partner.toProgramId === "string" &&
+        partner.toProgramId === option.catalogRewardProgramId &&
+        typeof partner.destinationPointsPerSourcePoint === "number" &&
+        Number.isFinite(partner.destinationPointsPerSourcePoint) &&
+        partner.destinationPointsPerSourcePoint > 0 &&
+        typeof partner.lastVerifiedAt === "string" &&
+        partner.lastVerifiedAt.length > 0,
+    );
+    const matches: Array<{
+      item: StrategyPointsInventoryItem;
+      partner: VerifiedTransferPartner;
+    }> = [];
+    for (const partner of usablePartners) {
+      const item = partnerById.get(partner.fromProgramId);
+      if (item) {
+        matches.push({ item, partner });
+      }
+    }
+    if (matches.length > 0) {
+      let best = matches[0];
+      for (let i = 1; i < matches.length; i++) {
+        if (
+          matches[i].partner.destinationPointsPerSourcePoint >
+          best.partner.destinationPointsPerSourcePoint
+        ) {
+          best = matches[i];
+        }
+      }
+      return {
+        account: best.item,
+        method: "transfer_source",
+        transfer: {
+          fromProgramId: best.partner.fromProgramId,
+          destinationPointsPerSourcePoint:
+            best.partner.destinationPointsPerSourcePoint,
+        },
+      };
+    }
   }
 
   return null;
