@@ -1,19 +1,31 @@
 import type {
   PersonalizedStrategy,
   PersonalizedStrategyContext,
+  PersonalizedStrategyNarrative,
   StrategyAwardOption,
 } from "./strategyTypes";
 import { buildPointsInventory } from "./pointsInventoryBuilder";
 import { buildStrategyAllocationScenarios } from "./strategyAllocationBuilder";
+import { buildEarnPlan } from "./earnPlan";
+import {
+  buildAirportRegionMap,
+  selectFlightAwardBenchmarks,
+} from "@/lib/rewards/awardBenchmarks";
+import { projectBenchmarksToAwardOptions } from "./awardBenchmarkOptions";
+import {
+  createSeatsAeroClient,
+  type SeatsAeroCabin,
+} from "./seatsAeroClient";
+import { projectSeatsAeroRowsToAwardOptions } from "./seatsAeroFundingMapper";
 import { TRUSTED_DOMAINS } from "./researchTypes";
 import { TavilyResearchProvider } from "./tavilyResearchProvider";
 import { ResearchInterpreterError } from "./researchInterpreter";
 import type { InterpretedResearch, ResearchInterpreter } from "./researchInterpreter";
 import { createResearchInterpreter } from "./researchInterpreterFactory";
-import { createStrategyProvider } from "./strategyProviderFactory";
 import { buildStrategyResearchQueries } from "./strategyResearchQueries";
-import { buildSanitizedStrategyPayload } from "./sanitizedStrategyPayload";
-import { applyNarrativeTrustGateToNarrative } from "./strategyNarrativeTrustGate";
+import { deterministicNarrativeCopy } from "./strategyNarrativeTrustGate";
+import { StrategyFinalizationDeadlineError } from "./strategyFinalizationDeadline";
+import { deduplicateByOptionId } from "./strategyProviderCore";
 import { buildResearchPlannerInput } from "./researchPlannerInputBuilder";
 import type { ResearchPlanQuery } from "./researchPlannerTypes";
 import {
@@ -25,6 +37,36 @@ import {
   executeVerifiedStageQueries,
   type VerifiedStageQueryExecutor,
 } from "./providerExecutionGateway";
+
+/**
+ * Extract a strictly-shaped IATA airport code from the server-validated
+ * flight planning estimate. Fails closed: anything that is not exactly a
+ * three-letter A–Z code yields null — goal text, city names, and provider
+ * free text are never parsed into a code here.
+ */
+function estimateIataCode(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Z]{3}$/.test(value) ? value : null;
+}
+
+/**
+ * Map the saved goal's cabin vocabulary onto the Seats.aero cabin set.
+ * Returns null for the non-specific "flexible" preference and any unknown
+ * value: an unmappable cabin yields no observed-price search at all.
+ */
+function seatsAeroCabinForCabin(cabin: string): SeatsAeroCabin | null {
+  switch (cabin) {
+    case "economy":
+      return "economy";
+    case "premium_economy":
+      return "premium";
+    case "business":
+      return "business";
+    case "first":
+      return "first";
+    default:
+      return null;
+  }
+}
 
 export interface StrategyRewardProgram {
   id: string;
@@ -363,18 +405,215 @@ export async function generateAutomatedStrategyFromResearchStages(
     generatedAt: context.generatedAt || new Date().toISOString(),
   };
 
-  // 5. Sanitize and generate the narrative once, then apply the deterministic
-  // narrative trust gate. When only planning benchmarks exist, the model
-  // narrative is replaced with fixed server-owned copy before anything is
-  // merged or persisted.
-  const strategyProvider = createStrategyProvider();
-  const sanitizedPrompt = buildSanitizedStrategyPayload(
-    enrichedContext,
-    catalogRewardPrograms
+  // 5. Deterministic structured lanes: the validated award options assembled
+  // above (flight options → hotel options → optional card offers) are the
+  // sole source of flight/hotel options. No narrative provider is invoked:
+  // headline/summary come from the same server-owned copy source the
+  // narrative trust gate uses, so the persisted strategy exactly matches the
+  // gate's unconditional suppression policy (structured evidence displayed
+  // with its own labels; no model-authored recommendation prose exists
+  // anywhere in the pipeline).
+  // Source eligibility is restored from the previous provider path
+  // (buildSanitizedStrategyPayload): an option whose sourceId is absent from
+  // the merged sources is excluded before lane construction. Each lane is
+  // then deduplicated by option id with first-occurrence ordering preserved
+  // (deduplicateByOptionId); dedup is per-lane, so the same id may appear in
+  // both the flight and hotel lists exactly as before.
+  const sourceIds = new Set(
+    enrichedContext.sources.map((source) => source.id),
   );
-  const strategy = applyNarrativeTrustGateToNarrative(
-    await strategyProvider.generateStrategy(sanitizedPrompt, { signal }),
+  const eligibleAwardOptions = enrichedContext.awardOptions.filter(
+    (option) => sourceIds.has(option.sourceId),
   );
+  const strategy: PersonalizedStrategyNarrative = {
+    headline: "",
+    summary: "",
+    feasibility: "insufficient_information",
+    pointsGap: null,
+    recommendedAwardOptionId: null,
+    recommendedCardOfferId: null,
+    flightOptions: deduplicateByOptionId(
+      eligibleAwardOptions.filter((option) => option.redemptionType === "flight"),
+    ),
+    hotelOptions: deduplicateByOptionId(
+      eligibleAwardOptions.filter((option) => option.redemptionType === "hotel"),
+    ),
+    actions: [],
+    alternatives: [],
+    assumptions: [],
+    warnings: [],
+    followUpQuestions: [],
+  };
+
+  // 5b. Deterministic award benchmarks (R2, Route A): project verified catalog
+  // benchmark rows into additional flight options. This is a server-side
+  // deterministic join — no model is involved, nothing is sourced from the
+  // browser, and a benchmark that cannot be projected honestly is skipped.
+  // Selection fails closed: an unmapped airport, an absent flight estimate
+  // (no resolved airport codes), or unknown cabin yields no benchmark options
+  // at all. Airport codes come only from the server-validated flight planning
+  // estimate, never from parsing saved goal text. When the saved cabin is the
+  // non-specific "flexible" preference, no cabin-specific row is selected.
+  const catalogProgramNames = new Map(
+    catalogRewardPrograms.map((program) => [program.id, program.name]),
+  );
+  const goalCabin = context.goal.cabinPreference;
+  const benchmarkOriginIata = estimateIataCode(
+    interpreted.flightPlanningEstimate?.origin ?? null,
+  );
+  const benchmarkDestinationIata = estimateIataCode(
+    interpreted.flightPlanningEstimate?.destination ?? null,
+  );
+  const benchmarkSelection =
+    goalCabin === "flexible" ||
+    benchmarkOriginIata === null ||
+    benchmarkDestinationIata === null
+      ? []
+      : selectFlightAwardBenchmarks({
+          benchmarks: context.awardPriceBenchmarks ?? [],
+          airportRegions: buildAirportRegionMap(context.airportRegionEntries ?? []),
+          originIata: benchmarkOriginIata,
+          destinationIata: benchmarkDestinationIata,
+          cabin: goalCabin,
+          now: new Date(context.generatedAt || Date.now()),
+        });
+  const benchmarkProjection = projectBenchmarksToAwardOptions(
+    benchmarkSelection,
+    catalogProgramNames,
+  );
+  if (benchmarkProjection.awardOptions.length > 0) {
+    strategy.flightOptions = deduplicateByOptionId([
+      ...strategy.flightOptions,
+      ...benchmarkProjection.awardOptions,
+    ]);
+    // The enriched context feeds no persistence path (the assembled strategy
+    // is persisted verbatim via RPC), but keeping it complete preserves the
+    // function's internal invariant that it mirrors every merged record.
+    enrichedContext.awardOptions = [
+      ...enrichedContext.awardOptions,
+      ...benchmarkProjection.awardOptions,
+    ];
+    enrichedContext.sources = [
+      ...enrichedContext.sources,
+      ...benchmarkProjection.sources,
+    ];
+  }
+
+  // 5c. Deterministic observed award prices (Seats.aero cached search):
+  // one outbound request and, for round-trip goals, one return request are
+  // made only when the verified flight estimate resolved exact airport codes
+  // and the saved cabin maps onto the provider's cabin set. Every failure is
+  // fail-closed and silent at the customer level: an error category, an abort,
+  // a rejection, or zero usable rows contributes no options and no invented
+  // substitutes — the chart-benchmark path below remains the fallback floor.
+  // Results are ordered strictly after the deadline signal is re-checked, and
+  // the deterministic funding mapper emits one option per program with a
+  // complete observation, never a partially observed total.
+  const observedCabin =
+    goalCabin === "flexible" ? null : seatsAeroCabinForCabin(goalCabin);
+  const canSearchObservedPrices =
+    benchmarkOriginIata !== null &&
+    benchmarkDestinationIata !== null &&
+    observedCabin !== null;
+  if (canSearchObservedPrices) {
+    if (signal?.aborted) throw new StrategyFinalizationDeadlineError();
+    const seatsAero = createSeatsAeroClient();
+    const observedRequest = {
+      originAirport: benchmarkOriginIata,
+      destinationAirport: benchmarkDestinationIata,
+      cabin: observedCabin as SeatsAeroCabin,
+      startDate: interpreted.flightPlanningEstimate!.outboundDate,
+      endDate: interpreted.flightPlanningEstimate!.returnDate,
+    };
+    const [outboundOutcome, returnOutcome] = await Promise.all([
+      seatsAero.searchAvailability(observedRequest, "outbound", signal),
+      // A one-way search has no return corridor; the return leg only exists
+      // when the estimate itself declares a return date.
+      interpreted.flightPlanningEstimate!.returnDate
+        ? seatsAero.searchAvailability(observedRequest, "return", signal)
+        : Promise.resolve({ rows: [] as never, error: null as never }),
+    ]);
+    if (signal?.aborted) throw new StrategyFinalizationDeadlineError();
+    if (
+      outboundOutcome.error === null &&
+      returnOutcome.error === null &&
+      outboundOutcome.rows !== null
+    ) {
+      const pricingBasis =
+        interpreted.flightPlanningEstimate!.returnDate ? "round_trip" : "one_way";
+      const observedProjection = projectSeatsAeroRowsToAwardOptions(
+        [...outboundOutcome.rows, ...(returnOutcome.rows ?? [])],
+        catalogProgramNames,
+        {
+          originIata: benchmarkOriginIata,
+          destinationIata: benchmarkDestinationIata,
+          cabin: goalCabin,
+          pricingBasis,
+        },
+      );
+      if (observedProjection.awardOptions.length > 0) {
+        // Observed prices supersede the chart-benchmark floor for the exact
+        // same program, pricing basis, and cabin — a same-basis benchmark
+        // would otherwise present a weaker, chart-only number next to a real
+        // observed one. A benchmark describing a DIFFERENT basis (e.g. a
+        // one-way floor beside an observed round-trip total) is not an
+        // equivalent product and is retained honestly.
+        const observedKeys = new Set(
+          observedProjection.awardOptions.map(
+            (option) =>
+              `${option.catalogRewardProgramId ?? ""}|${option.pricingBasis}|${option.cabin ?? ""}`,
+          ),
+        );
+        const superseded = strategy.flightOptions.filter(
+          (option) =>
+            (option.evidenceLevel ?? "planning_benchmark") ===
+              "planning_benchmark" &&
+            observedKeys.has(
+              `${option.catalogRewardProgramId ?? ""}|${option.pricingBasis}|${option.cabin ?? ""}`,
+            ),
+        );
+        if (superseded.length > 0) {
+          const supersededIds = new Set(superseded.map((option) => option.id));
+          const supersededSourceIds = new Set(
+            superseded.map((option) => option.sourceId),
+          );
+          strategy.flightOptions = strategy.flightOptions.filter(
+            (option) => !supersededIds.has(option.id),
+          );
+          enrichedContext.awardOptions = enrichedContext.awardOptions.filter(
+            (option) => !supersededIds.has(option.id),
+          );
+          enrichedContext.sources = enrichedContext.sources.filter(
+            (source) => !supersededSourceIds.has(source.id),
+          );
+        }
+        strategy.flightOptions = deduplicateByOptionId([
+          ...observedProjection.awardOptions,
+          ...strategy.flightOptions,
+        ]);
+        enrichedContext.awardOptions = [
+          ...observedProjection.awardOptions,
+          ...enrichedContext.awardOptions,
+        ];
+        enrichedContext.sources = [
+          ...observedProjection.sources,
+          ...enrichedContext.sources,
+        ];
+      }
+    }
+  }
+
+  // Server-owned narrative copy, from the same deterministic source the
+  // narrative trust gate uses. The gate's unconditional suppression policy is
+  // therefore exactly satisfied: no model-authored recommendation prose exists
+  // anywhere in the pipeline, and structured evidence is displayed with its
+  // own evidence labels.
+  const narrativeCopy = deterministicNarrativeCopy({
+    flightOptions: strategy.flightOptions,
+    hotelOptions: strategy.hotelOptions,
+  });
+  strategy.headline = narrativeCopy.headline;
+  strategy.summary = narrativeCopy.summary;
 
   // 6. Deterministically attach points inventory and allocation scenarios.
   const pointsInventory = buildPointsInventory(
@@ -386,10 +625,23 @@ export async function generateAutomatedStrategyFromResearchStages(
     context.goal,
     strategy.flightOptions,
     strategy.hotelOptions,
-    pointsInventory
+    pointsInventory,
+    context.verifiedTransferPartners ?? null
   );
 
-  // 7. Return the complete PersonalizedStrategy.
+  // 7. Deterministic earnings plan (R1): projects the customer's own balances
+  // forward using only verified catalog earn rates, their recorded spending,
+  // and their own accounts. Null when no verified rates exist. The searched
+  // flight party-total is carried through unchanged for the cash comparison;
+  // no points valuation or award pricing is performed here.
+  // (catalogProgramNames is built once above, in step 5b.)
+  const earnPlan = buildEarnPlan(
+    context,
+    catalogProgramNames,
+    interpreted.flightPlanningEstimate ?? null,
+  );
+
+  // 8. Return the complete PersonalizedStrategy.
   return {
     ...strategy,
     assumptions: [
@@ -404,5 +656,6 @@ export async function generateAutomatedStrategyFromResearchStages(
     allocationScenarios,
     flightPlanningEstimate: interpreted.flightPlanningEstimate ?? null,
     hotelPlanningEstimate: interpreted.hotelPlanningEstimate ?? null,
+    earnPlan,
   };
 }
