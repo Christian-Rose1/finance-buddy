@@ -1,6 +1,7 @@
 import type { Goal, RewardAccount } from "./types";
 import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
 import type { HotelPlanningEstimate } from "./hotelPlanningEstimate";
+import type { EarningRule } from "@/lib/rewards/catalogTypes";
 
 export type StrategyDataStatus =
   | "live"
@@ -25,6 +26,13 @@ export interface StrategyAwardOption {
   id: string;
   sourceId: string;
   programName: string;
+  /**
+   * Catalog reward-program id when the option's program is identified by a
+   * verified catalog row (benchmark-derived options). Null for model- or
+   * research-derived options, which are identified only by name. Drives
+   * deterministic transfer funding; never exposed to the customer payload.
+   */
+  catalogRewardProgramId?: string | null;
   redemptionType: "flight" | "hotel";
   pricingBasis:
     | "one_way"
@@ -67,6 +75,7 @@ export interface StrategyAwardOption {
 export type TravelEvidenceLevel =
   | "exact_cash_offer"
   | "customer_verified"
+  | "web_observed_not_live"
   | "planning_benchmark";
 
 /** Server-only identity for a provider quote. Never put this shape in a client payload. */
@@ -122,21 +131,56 @@ export interface StrategyCardOffer {
   destinationProgramId: string | null;
 }
 
+/** Monthly spending aggregated per wallet card and canonical category. */
+export interface StrategyCardSpendingCategory {
+  cardId: string;
+  category: string;
+  monthlyAverage: number;
+}
+
 export interface PersonalizedStrategyContext {
   goal: Goal;
   rewardAccounts: RewardAccount[];
-  walletCards: Array<{
-    id: string;
-    name: string;
-    issuer: string;
-    rewardCurrency: string;
-    cardProductId: string;
-  }>;
+  walletCards: Array<
+    {
+      id: string;
+      name: string;
+      issuer: string;
+      rewardCurrency: string;
+      cardProductId: string;
+    }
+  >;
   monthlySpendingByCategory: StrategySpendingCategory[];
+  /**
+   * Same spending attributed to the wallet card used for each purchase (the
+   * spend's `cardId`), aggregated per card and canonical category. Null when
+   * no accepted purchase carries a card attribution. Raw purchases never
+   * travel on the context; only this derived aggregate does.
+   */
+  monthlySpendingByCategoryCard?: StrategyCardSpendingCategory[] | null;
   awardOptions: StrategyAwardOption[];
   cardOffers: StrategyCardOffer[];
   sources: StrategySource[];
   generatedAt: string;
+  /**
+   * Catalog earning rules for the customer's wallet-card products, attached by
+   * `prepareGoalStrategyContext` after context construction. Only rules for
+   * products linked to the customer's own cards are included. Optional and
+   * null-safe so legacy builders/tests without catalog access remain valid.
+   */
+  earningRules?: EarningRule[] | null;
+  /** Wallet-card id → linked catalog reward-program id (null when unlinked). */
+  walletCardProgramIds?: Record<string, string | null>;
+  /**
+   * Verified award-benchmark catalog rows (Route A of the R2 milestone),
+   * attached by `prepareGoalStrategyContext`. Shared catalog data, not user
+   * data. Optional and null-safe for legacy builders/tests.
+   */
+  awardPriceBenchmarks?: import("@/lib/rewards/awardBenchmarks").AwardPriceBenchmark[] | null;
+  /** Verified IATA → route-region entries backing benchmark selection. */
+  airportRegionEntries?: import("@/lib/rewards/awardBenchmarks").AirportRegionEntry[] | null;
+  /** Verified airline transfer-partner rows backing transfer funding. */
+  verifiedTransferPartners?: import("@/lib/rewards/awardBenchmarks").VerifiedTransferPartner[] | null;
 }
 
 export type StrategyFeasibility =
@@ -229,6 +273,66 @@ export interface PersonalizedStrategy {
    * browser input, award options, warnings, or assumptions.
    */
   hotelPlanningEstimate?: HotelPlanningEstimate | null;
+  /**
+   * Deterministic earnings projection built only from verified catalog earn
+   * rules, recorded spending, and owned reward accounts. Null when no verified
+   * points/miles rules exist. Never model-authored.
+   */
+  earnPlan?: EarnPlan | null;
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic earnings plan (verified-catalog projections only)
+// ---------------------------------------------------------------------------
+
+/** Per-owner-and-program earnings projection. Currencies are never combined. */
+export interface EarnPlanAccountProjection {
+  key: string;
+  programName: string | null;
+  ownerType: "self" | "companion";
+  ownerLabel: string;
+  rewardCurrencyLabel: "points" | "miles";
+  /** Current recorded balance for this owner+program (may be unverified). */
+  currentBalance: number;
+  balanceVerification: "verified" | "unverified" | "no_account";
+  /** Monthly points/miles projected from verified earn rates (self cards only). */
+  monthlyPoints: number;
+  /** Whole calendar months from now to the goal's earliest departure (0–36). */
+  monthsProjected: number | null;
+  /** currentBalance + monthlyPoints × monthsProjected; null when undated/capped. */
+  projectedBalance: number | null;
+  /** True when the trip is more than 36 months away (no projection provided). */
+  horizonCapped: boolean;
+  /** Wallet cards contributing to this projection (bounded, deterministic order). */
+  cardNames: string[];
+}
+
+/** Searched cash total carried through unchanged from planning estimates. */
+export interface EarnPlanTripCash {
+  amount: number;
+  currency: string;
+  /** Fixed source labels; never provider- or model-authored. */
+  sources: string[];
+}
+
+/** Cash gap between the searched trip total and the goal's cash budget. */
+export interface EarnPlanCashGap {
+  currency: string;
+  tripTotal: number;
+  cashBudget: number;
+  /** budget − tripTotal; negative means the trip exceeds the budget. */
+  remaining: number;
+}
+
+export interface EarnPlan {
+  schemaVersion: 1;
+  label: "Earnings plan";
+  /** Fixed server-owned disclosure; never provider- or model-authored. */
+  disclosure: string;
+  accounts: EarnPlanAccountProjection[];
+  tripCash: EarnPlanTripCash | null;
+  cashGap: EarnPlanCashGap | null;
+  warnings: string[];
 }
 
 /**

@@ -21,6 +21,11 @@ import type {
   ProductBenefit,
   CardProductSource,
 } from "./catalogTypes";
+import type {
+  AirportRegionEntry,
+  AwardPriceBenchmark,
+  VerifiedTransferPartner,
+} from "./awardBenchmarks";
 import type { CardNetwork, RewardCurrency } from "@/lib/wallet/types";
 import type { CanonicalCategoryKey } from "./categories";
 
@@ -260,4 +265,149 @@ export async function getEarningRulesForProduct(
   }
 
   return (rows ?? []).map((row) => toEarningRule(row as Record<string, unknown>));
+}
+
+/**
+ * Load all earning rules for a set of card products in a single query.
+ * Empty input short-circuits with an empty result (no database round trip).
+ */
+export async function getEarningRulesForProducts(
+  productIds: string[],
+  options: { activeOnly?: boolean } = {},
+  client?: SupabaseClient
+): Promise<EarningRule[]> {
+  if (productIds.length === 0) {
+    return [];
+  }
+
+  const supabase = client ?? await createServerClient();
+
+  let query = supabase
+    .from("earning_rules")
+    .select("*")
+    .in("card_product_id", productIds)
+    .order("created_at", { ascending: false });
+
+  if (options.activeOnly) {
+    query = query.eq("active", true);
+  }
+
+  const { data: rows, error } = await query;
+
+  if (error) {
+    throw new Error("Failed to load earning rules.");
+  }
+
+  return (rows ?? []).map((row) => toEarningRule(row as Record<string, unknown>));
+}
+
+// ---------------------------------------------------------------------------
+// Award benchmarks (R2): airport regions, transfer partners, price benchmarks.
+// All trust gating (verification, validity windows, enum checks) happens in
+// lib/rewards/awardBenchmarks.ts; these loaders only map rows faithfully.
+// ---------------------------------------------------------------------------
+
+/**
+ * Load every airport -> region mapping row. Insertion order is the stable
+ * order the region map is built from.
+ */
+export async function getAirportRegionEntries(
+  client?: SupabaseClient
+): Promise<AirportRegionEntry[]> {
+  const supabase = client ?? await createServerClient();
+
+  const { data: rows, error } = await supabase
+    .from("airport_region_map")
+    .select("*")
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error("Failed to load airport region map.");
+  }
+
+  return (rows ?? []).map((row) => {
+    const record = row as Record<string, unknown>;
+    return {
+      iataCode: record.iata_code as string,
+      region: record.region as AirportRegionEntry["region"],
+      source: record.source as string,
+      lastVerifiedAt: record.last_verified_at as string,
+    };
+  });
+}
+
+/**
+ * Load every verified transfer-partner row, ordered deterministically by
+ * insertion order.
+ */
+export async function getVerifiedTransferPartners(
+  client?: SupabaseClient
+): Promise<VerifiedTransferPartner[]> {
+  const supabase = client ?? await createServerClient();
+
+  const { data: rows, error } = await supabase
+    .from("transfer_partners")
+    .select("*")
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error("Failed to load transfer partners.");
+  }
+
+  return (rows ?? []).map((row) => {
+    const record = row as Record<string, unknown>;
+    return {
+      id: record.id as string,
+      fromProgramId: record.from_program_id as string,
+      toProgramId: record.to_program_id as string,
+      destinationPointsPerSourcePoint:
+        parseNumeric(record.destination_points_per_source_point) ?? 0,
+      source: record.source as string,
+      lastVerifiedAt: record.last_verified_at as string,
+    };
+  });
+}
+
+/**
+ * Load active award-price benchmark rows, ordered deterministically by
+ * insertion order (first-occurrence wins downstream). The matcher in
+ * awardBenchmarks.ts re-validates every row; nothing here trusts the table.
+ */
+export async function getActiveAwardPriceBenchmarks(
+  client?: SupabaseClient
+): Promise<AwardPriceBenchmark[]> {
+  const supabase = client ?? await createServerClient();
+
+  const { data: rows, error } = await supabase
+    .from("award_price_benchmarks")
+    .select("*")
+    .eq("active", true)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error("Failed to load award price benchmarks.");
+  }
+
+  return (rows ?? []).map((row) => {
+    const record = row as Record<string, unknown>;
+    return {
+      id: record.id as string,
+      rewardProgramId: record.reward_program_id as string,
+      redemptionType: record.redemption_type as AwardPriceBenchmark["redemptionType"],
+      originRegion: record.origin_region as AirportRegionEntry["region"],
+      destinationRegion: record.destination_region as AirportRegionEntry["region"],
+      cabin: record.cabin as string,
+      pricingBasis: record.pricing_basis as AwardPriceBenchmark["pricingBasis"],
+      pointsRequired: parseNumeric(record.points_required) ?? 0,
+      cashFees: parseNumeric(record.cash_fees),
+      currency: record.currency as string,
+      travelerCountCovered: parseNumeric(record.traveler_count_covered) ?? 0,
+      nightCountCovered: parseNumeric(record.night_count_covered),
+      validFrom: (record.valid_from as string | null) ?? null,
+      validUntil: (record.valid_until as string | null) ?? null,
+      source: record.source as string,
+      lastVerifiedAt: record.last_verified_at as string | null,
+      active: (record.active as boolean | null) ?? true,
+    };
+  });
 }
