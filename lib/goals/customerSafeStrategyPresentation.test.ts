@@ -998,3 +998,286 @@ test("flight and hotel estimate lanes stay independent with safe-label enforceme
   // Fixed trust labels only; no provider- or model-authored copy.
   assert.equal(output.includes("Search estimates only; not bookable"), true);
 });
+
+// ---------------------------------------------------------------------------
+// Earn plan (R1): customer-safe presentation
+// ---------------------------------------------------------------------------
+
+import type { EarnPlan } from "./strategyTypes";
+import {
+  EARN_PLAN_DISCLOSURE,
+  EARN_PLAN_LABEL,
+  EARN_PLAN_TRIP_CASH_SOURCE,
+  EARN_PLAN_WARNING_UNVERIFIED_BALANCE,
+} from "./earnPlan";
+
+function earnPlanFixture(overrides: Partial<EarnPlan> = {}): EarnPlan {
+  return {
+    schemaVersion: 1,
+    label: EARN_PLAN_LABEL,
+    disclosure: EARN_PLAN_DISCLOSURE,
+    accounts: [
+      {
+        key: "earn-1",
+        programName: "Chase Ultimate Rewards",
+        ownerType: "self",
+        ownerLabel: "You",
+        rewardCurrencyLabel: "points",
+        currentBalance: 80000,
+        balanceVerification: "verified",
+        monthlyPoints: 1750,
+        monthsProjected: 10,
+        projectedBalance: 97500,
+        horizonCapped: false,
+        cardNames: ["Sapphire Preferred"],
+      },
+    ],
+    tripCash: {
+      amount: 1200,
+      currency: "USD",
+      sources: [EARN_PLAN_TRIP_CASH_SOURCE],
+    },
+    cashGap: {
+      currency: "USD",
+      tripTotal: 1200,
+      cashBudget: 5000,
+      remaining: 3800,
+    },
+    warnings: [],
+    ...overrides,
+  };
+}
+
+test("a valid earn plan is presented with native points units and fixed labels", () => {
+  const view = build(baseStrategy({ earnPlan: earnPlanFixture() }));
+  assert.ok(view.earnPlan);
+  assert.equal(view.earnPlan.label, EARN_PLAN_LABEL);
+  assert.equal(view.earnPlan.disclosure, EARN_PLAN_DISCLOSURE);
+
+  const account = view.earnPlan.accounts[0];
+  assert.ok(account);
+  assert.equal(account.programName, "Chase Ultimate Rewards");
+  assert.equal(account.currencyLabel, "points");
+  assert.equal(account.balanceLabel, "80,000 points · Confirmed rewards balance");
+  assert.equal(account.monthlyLabel, "~1,750 points/month");
+  assert.equal(account.projectedLabel, "~97,500 by departure (10 months)");
+  assert.equal(account.contributingCardsLabel, "Sapphire Preferred");
+
+  assert.equal(view.earnPlan.tripCashLabel, "Searched trip total: USD 1,200");
+  assert.equal(
+    view.earnPlan.cashGapLabel,
+    "Cash budget remaining after searched trip total: USD 3,800",
+  );
+
+  // Points are never converted to dollars anywhere in the output.
+  const output = JSON.stringify(view);
+  assert.equal(output.includes("$1,750"), false);
+  assert.equal(output.includes("cash value"), false);
+});
+
+test("an over-budget trip presents the shortfall without softening it", () => {
+  const view = build(
+    baseStrategy({
+      earnPlan: earnPlanFixture({
+        cashGap: {
+          currency: "USD",
+          tripTotal: 6000,
+          cashBudget: 5000,
+          remaining: -1000,
+        },
+      }),
+    }),
+  );
+  assert.ok(view.earnPlan);
+  assert.equal(
+    view.earnPlan.cashGapLabel,
+    "Searched trip total exceeds your cash budget by USD 1,000",
+  );
+});
+
+test("absent earn plans remain null and do not appear in the output", () => {
+  const view = build(baseStrategy({ earnPlan: null }));
+  assert.equal(view.earnPlan, null);
+});
+
+test("an unfixed warning string or unknown key rejects the whole plan at presentation", () => {
+  const fabricated = earnPlanFixture({
+    warnings: [EARN_PLAN_WARNING_UNVERIFIED_BALANCE, "Guaranteed 100k bonus!"],
+  });
+  const hostileView = build(baseStrategy({ earnPlan: fabricated as unknown as EarnPlan }));
+  assert.equal(hostileView.earnPlan, null);
+  assert.equal(JSON.stringify(hostileView).includes("Guaranteed 100k bonus!"), false);
+
+  const withUnknownKey = {
+    ...earnPlanFixture(),
+    providerNote: "internal metadata",
+  } as unknown;
+  const unknownView = build(baseStrategy({ earnPlan: withUnknownKey as unknown as EarnPlan }));
+  assert.equal(unknownView.earnPlan, null);
+  assert.equal(JSON.stringify(unknownView).includes("internal metadata"), false);
+});
+
+test("a plan with an unverified balance keeps its fixed warning and provisional label", () => {
+  const view = build(
+    baseStrategy({
+      earnPlan: earnPlanFixture({
+        accounts: [
+          {
+            key: "earn-1",
+            programName: "Chase Ultimate Rewards",
+            ownerType: "self",
+            ownerLabel: "You",
+            rewardCurrencyLabel: "points",
+            currentBalance: 80000,
+            balanceVerification: "unverified",
+            monthlyPoints: 1750,
+            monthsProjected: 10,
+            projectedBalance: 97500,
+            horizonCapped: false,
+            cardNames: ["Sapphire Preferred"],
+          },
+        ],
+        warnings: [EARN_PLAN_WARNING_UNVERIFIED_BALANCE],
+      }),
+    }),
+  );
+  assert.ok(view.earnPlan);
+  assert.equal(view.earnPlan.accounts[0]?.balanceLabel, "80,000 points · Balance needs confirmation");
+  assert.deepEqual(view.earnPlan.warnings, [EARN_PLAN_WARNING_UNVERIFIED_BALANCE]);
+});
+
+/**
+ * R2 follow-up: flight segment identity (carrier + flight number) must reach
+ * the customer-safe presentation. The strict flight projector already
+ * validates and persists both fields per segment; the presentation boundary
+ * previously rendered only airport/time pairs, hiding the specific flight
+ * behind generic times.
+ */
+import { projectFlightPlanningEstimate } from "./flightPlanningEstimate";
+
+function rawFlightEstimateFixture() {
+  return {
+    label: "Flight planning estimate" as const,
+    origin: "RDU",
+    destination: "CPH",
+    outboundDate: "2027-06-01",
+    returnDate: "2027-06-15",
+    travelers: 2,
+    cabin: "economy",
+    currency: "USD",
+    total: 1200,
+    priceCoverage: "searched_party_total" as const,
+    retrievedAt: "2027-01-02T03:04:05.000Z",
+    outboundSegments: [
+      {
+        sequence: 1,
+        departureAirport: "RDU",
+        departureTime: "2027-06-01 18:25",
+        arrivalAirport: "CPH",
+        arrivalTime: "2027-06-02 09:40",
+        marketingCarrier: "Scandinavian Airlines",
+        marketingFlightNumber: "SK542",
+        cabin: "Economy",
+      },
+    ],
+    returnSegments: [
+      {
+        sequence: 1,
+        departureAirport: "CPH",
+        departureTime: "2027-06-15 10:15",
+        arrivalAirport: "RDU",
+        arrivalTime: "2027-06-15 13:05",
+        marketingCarrier: "Scandinavian Airlines",
+        marketingFlightNumber: "SK543",
+        cabin: "Economy",
+      },
+    ],
+    unknowns: [],
+    evidenceLabel: "Planning estimate" as const,
+    verificationLabel: "Not customer-verified" as const,
+    availabilityLabel: "Not live or bookable; verify before booking" as const,
+  };
+}
+
+test("flight segments carry carrier and flight-number identity when validated", () => {
+  // Built through the real strict projector: only genuinely validated data
+  // can reach the presentation boundary under test.
+  const projected = projectFlightPlanningEstimate(rawFlightEstimateFixture());
+  assert.ok(projected);
+  const view = build(baseStrategy({
+    flightPlanningEstimate: projected as PersonalizedStrategy["flightPlanningEstimate"],
+  }));
+  const flight = view.flightPlanningEstimate;
+  assert.ok(flight);
+  assert.deepEqual(flight.segments, [
+    "RDU 2027-06-01 18:25 → CPH 2027-06-02 09:40 · Scandinavian Airlines SK542",
+    "CPH 2027-06-15 10:15 → RDU 2027-06-15 13:05 · Scandinavian Airlines SK543",
+  ]);
+});
+
+test("flight segments without carrier identity stay valid without invented text", () => {
+  const fixture = rawFlightEstimateFixture();
+  fixture.outboundSegments = [
+    {
+      sequence: 1,
+      departureAirport: "RDU",
+      departureTime: "2027-06-01 18:25",
+      arrivalAirport: "CPH",
+      arrivalTime: "2027-06-02 09:40",        marketingCarrier: null as unknown as string,
+        marketingFlightNumber: null as unknown as string,
+      cabin: "Economy",
+    },
+  ];
+  const projected = projectFlightPlanningEstimate(fixture);
+  assert.ok(projected);
+  const view = build(baseStrategy({
+    flightPlanningEstimate: projected as PersonalizedStrategy["flightPlanningEstimate"],
+  }));
+  const flight = view.flightPlanningEstimate;
+  assert.ok(flight);
+  // No separator, no invented identity — exactly the airport/time pair.
+  assert.deepEqual(flight.segments, [
+    "RDU 2027-06-01 18:25 → CPH 2027-06-02 09:40",
+    "CPH 2027-06-15 10:15 → RDU 2027-06-15 13:05 · Scandinavian Airlines SK543",
+  ]);
+});
+
+test("observed-price options render their own evidence and availability labels", () => {
+  const observedOption = awardOption("flight-observed-1", "flight", {
+    evidenceLevel: "web_observed_not_live",
+    availabilityStatus: "available",
+  });
+  const view = build(baseStrategy({ flightOptions: [observedOption] }));
+
+  const observed = view.flightEstimates[0];
+  assert.ok(observed, "observed option must reach the presentation boundary");
+  assert.equal(observed.evidenceLabel, "Observed price");
+  assert.equal(observed.availabilityLabel, "Observed result; verify before acting");
+  // A real observed points figure is still shown, never hidden or relabeled.
+  assert.equal(observed.pointsRequired, 10_000);
+});
+
+test("benchmark options keep the established labels alongside observed options", () => {
+  const benchmarkOption = awardOption("flight-benchmark-1", "flight");
+  const observedOption = awardOption("flight-observed-1", "flight", {
+    evidenceLevel: "web_observed_not_live",
+    availabilityStatus: "available",
+  });
+  const view = build(baseStrategy({ flightOptions: [benchmarkOption, observedOption] }));
+
+  assert.equal(view.flightEstimates[0]?.evidenceLabel, "Planning estimate");
+  assert.equal(
+    view.flightEstimates[0]?.availabilityLabel,
+    "Check current availability before acting",
+  );
+  assert.equal(view.flightEstimates[1]?.evidenceLabel, "Observed price");
+  assert.equal(
+    view.flightEstimates[1]?.availabilityLabel,
+    "Observed result; verify before acting",
+  );
+  // The two evidence tiers must never be conflated in the same list item.
+  assert.notEqual(
+    view.flightEstimates[0]?.evidenceLabel,
+    view.flightEstimates[1]?.evidenceLabel,
+  );
+});
