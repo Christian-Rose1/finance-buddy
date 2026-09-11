@@ -1,5 +1,455 @@
 # Finance Buddy Current Handoff
 
+## 2026-09-09 R2 Award Benchmarks, Route A (implemented, full suite verified; migration NOT yet pushed)
+
+First slice of real reward-travel redemptions in saved plans (the R2
+recommendation of the product architecture review). Route A ships the
+verified-benchmark foundation; Route B (a weekly AI research lane that
+updates the benchmark rows with citations) was explicitly deferred by the
+customer until later. Key decisions and trust boundaries, all test-pinned:
+
+- **Deterministic join, no model.** Verified `award_price_benchmarks` catalog
+  rows are selected by structured region match and projected into
+  `StrategyAwardOption`s inside `generateAutomatedStrategyFromResearchStages`
+  (step 5b). No model, browser input, or prompt is involved; a row that
+  cannot be projected honestly is skipped, never approximated.
+- **Airport codes come only from the server-validated flight estimate.**
+  Goal text like "Copenhagen, Denmark" is never parsed into an IATA code.
+  An absent estimate (or non-IATA code) yields zero benchmarks — fail
+  closed. `flexible` cabin never selects cabin-specific rows.
+- **Verification gate.** Rows without `lastVerifiedAt`/`active`/validity
+  window are invisible (`isUsableBenchmarkRow`); `availabilityStatus` is
+  always "unknown"; `centsPerPoint` is always null; region matching uses the
+  seeded `airport_region_map` (definitional geography, not pricing).
+- **Transfer funding is now real but conservative.**
+  `findFundingAccount` gained a `transfer_source` path: the option's
+  server-only `catalogRewardProgramId` is matched through verified
+  `transfer_partners` rows to an owned, verified, self-owned account.
+  Debit = destination requirement ÷ ratio, rounded UP, with a fixed
+  disclosure assumption (no timing/promotion claims). Direct matches keep
+  priority; the old direct-only warning text was harmonized to mention the
+  verified-transfer path.
+- **Server-only identity containment.**
+  `catalogRewardProgramId` is optional on `StrategyAwardOption`, rejected by
+  the signed stage-payload validator (`strategyRunPayload.ts` — the key must
+  never appear in stage envelopes), stripped from client projection
+  (`travelEvidence.ts`) and from the sanitized model payload
+  (`sanitizedStrategyPayload.ts`).
+- **Migration `20260909120000_create_award_benchmarks.sql` creates three
+  shared read-only tables** (`award_price_benchmarks`,
+  `transfer_partners`, `airport_region_map`) with catalog-idiom RLS
+  (authenticated select-only + restrictive no-write). Seeds: ~50
+  IATA→region rows and three verified Chase UR transfer partners
+  (Aeroplan 1:1 per Air Canada's official page; United MileagePlus and
+  Flying Blue 1:1 per issuer documentation) — each row carries its source
+  URL. **`award_price_benchmarks` is intentionally EMPTY**: during
+  verification, no primary source would serve specific award numbers
+  (Aeroplan's official PDF is bot-blocked and now publishes median
+  estimates; United/Flying Blue are dynamic). Inventing chart numbers is
+  forbidden; the Route B research lane fills this table with per-row
+  citations. The customer must run `supabase db push`.
+- **Presentation.** The funding label "Potential transfer path" already
+  existed and is tested to never leak the raw enum. `PreviewCard` now also
+  renders a new fixed `feesLabel` ("Plus estimated taxes and fees of N
+  (currency not confirmed)") sourced from the option's `cashFees` — hostile
+  fee shapes stay null; the award-option contract carries no currency, so
+  none is claimed.
+
+New/changed files: `lib/rewards/awardBenchmarks.ts` (+test, pure matcher),
+`lib/goals/awardBenchmarkOptions.ts` (+test, projection),
+`lib/rewards/catalogRepository.ts` (3 batched loaders),
+`lib/goals/strategyTypes.ts` (context fields + optional option field),
+`lib/goals/strategyOptionCalculator.ts` (transfer-aware funding match),
+`lib/goals/strategyAllocationBuilder.ts` (transfer threading + ceil math +
+fixed assumption), `lib/goals/automatedStrategyPlanner.ts` (step 5b join +
+allocation threading), `lib/goals/strategyActionContext.ts` +
+`strategyActionContextDependencies.ts` (+3 DI members, parallel loads),
+`lib/goals/strategyRunPayload.ts` (server-only key guard),
+`lib/goals/travelEvidence.ts` + `sanitizedStrategyPayload.ts` (strips),
+`lib/goals/customerSafeGoalSummary.ts` (feesLabel),
+`components/goal-strategy-panel.tsx` (renders feesLabel), the migration, and
+test updates (`automatedStrategyPlanner.test.ts` harness gained an optional
+catalog param; `strategyActionContext.test.ts` DI stubs;
+`customerSafeGoalSummary.test.ts`).
+
+Adversarial-review corrections (applied and re-verified): (I1)
+`isUsableBenchmarkRow` now fails closed on an invalid caller clock
+(NaN `now` previously opened the validity window for expired rows; pinned by
+two regressions); (I2) `buildFallback`'s three internal `rankOptions` calls
+now receive `verifiedTransferPartners` so fallback ranking sees
+transfer-fundable options consistently with the primary scenarios; (M1)
+planner step-5b comment corrected — the enriched context feeds no persistence
+path (the assembled strategy is persisted verbatim via RPC); the mirroring
+mutation is retained only as an internal invariant.
+
+Verification: matcher 12/12, projection 7/7, planner 33/33, affected-suite
+runs 140/140 and 124/124; post-correction affected run 133/133; full
+`npm test` **1162/1162 (44 suites)**; tsc clean; build clean;
+`git diff --check` clean. NOT verified: live browser
+
+Post-review production defect (found live, fixed): before the migration
+push, `prepareGoalStrategyContext`'s three R2 catalog loads queried tables
+that did not exist yet and their throws rejected context preparation, so
+every flight/hotel stage failed with `unexpected_stage_failure`
+(`runId: null` — preparation precedes run creation). Fix: the three loads
+are wrapped in a `bestEffortCatalogLoad` helper — on failure the context
+carries empty arrays (no benchmark options, no transfer funding; the
+fail-safe direction, nothing invented) plus a fixed, STRATEGY_DEBUG-gated
+diagnostic `[strategy-context] {"category":"award_benchmark_catalog_unavailable","catalogName":...}`.
+`earningRules` remains strict (pre-existing table; earn-plan gate).
+Regression tests: catalog-load failures degrade to empty arrays, successful
+loads attach unchanged, earning-rule failure still rejects (6/6 file).
+Post-fix verification: strategyActionContext 6/6, full `npm test`
+**1165/1165 (44 suites, exit 0)**, tsc clean, build clean, diff-check
+clean. Live browser re-check still pending the customer's
+`supabase db push`.
+
+Customer live re-test after push (2026-09-10) — diagnosis + follow-up
+milestone delivered: flight stage succeeded via SerpAPI and the pipeline ran
+end-to-end, but (a) the persisted segment data (carrier, flight number) was
+dropped at the presentation boundary (segments rendered as airport/time
+pairs only — fixed: segments now render "RDU … → CPH … · Scandinavian
+Airlines SK542" when validated, tests pin identity present and absent), and
+(b) zero reward options appeared because `award_price_benchmarks` is
+intentionally EMPTY (trust decision: no primary source would serve specific
+award numbers). The four "can't work out the full points requirement yet"
+scenario cards are the correct fail-closed output for an option-less plan.
+Also added migration `20260910120000_expand_airport_region_map.sql`:
+the original seed omitted RDU and ~30 other common airports, which would
+have failed benchmark selection closed for the customer's real origin.
+
+Route B (approved weekly research lane) implemented —
+`lib/rewards/awardBenchmarkResearch.ts` (+14 tests) and
+`scripts/research-award-benchmarks.ts` (`npm run research:award-benchmarks`):
+deterministic (no LLM) sentence-scoped extraction from allowed HTTPS domains
+only; a candidate requires one sentence containing a whole points figure,
+exactly one cabin term, one pricing basis, one known program name, and
+optional strict fees; every row carries its exact source quote + URL;
+region scope comes from the deterministic query plan and rows are flagged
+for human review before applying. Runner emits idempotent seed SQL (stdout)
+with per-row provenance comments; a reviewer confirms quotes, commits it as
+a migration, and runs `supabase db push`. Provider failures degrade per
+query; the emitter rejects the whole batch if any row fails re-validation.
+Adversarial-review corrections (applied and re-verified): (1) quote-
+consistency gate — the validator now re-derives cabin, pricing basis, and
+program from the source quote and requires exact agreement with the
+structured claims (a hand-crafted candidate whose quote mentioned two
+cabins previously passed); (2) party-total sentences ("for two travelers
+cost 120,000 points") are rejected at extraction and validation instead of
+being stored as per-person figures (2x downstream inflation); (3) control
+characters in quote/URL are rejected because the emitter embeds the quote
+in a SQL line comment — a newline previously allowed SQL injection into
+the emitted migration. Research suite now 17/17; full `npm test`
+**1184/1184 (44 suites, exit 0)**; tsc/build/diff-check clean.
+Acceptance-hardening pass (same day): (4) provenance integrity — the
+validator now requires the claimed `sourceDomain` to equal the URL's
+parsed HTTPS hostname exactly (a crafted URL like
+`https://evil.com/?u=https://www.aircanada.com` previously passed by
+substring match); (5) `extractedAt` must be a strict ISO-8601 UTC instant
+because it is interpolated into emitted SQL and `Date.parse` leniency is
+engine-defined. Research suite 19/19; full `npm test` **1186/1186 (44
+suites, exit 0)**; tsc/build/diff-check clean.
+
+Runner secret-loading fix: standalone tsx scripts do not inherit Next.js's
+automatic `.env.local` loading, so the research runner refused to start
+("TAVILY_API_KEY is required") even with the key configured for the app.
+Added `lib/envFile.ts` (+9 tests): a bounded, secret-safe env-file loader
+(values never logged or exposed; the loader API returns only a count;
+existing environment entries always win; missing/unreadable/oversized
+files contribute zero entries; malformed lines are skipped).
+`scripts/research-award-benchmarks.ts` now loads `.env.local` itself.
+Full `npm test` **1195/1195 (44 suites, exit 0)**; tsc/build/diff-check
+clean. NOT verified: live browser
+end-to-end (requires `supabase db push` of the new migration plus seeded
+benchmark rows — which do not exist yet by design) and the actual transfer
+flow in production. Route B (weekly AI research updating benchmark rows with
+citations) is the agreed follow-up that makes the feature visible.
+
+First live Route B run (2026-09-10): Tavily succeeded (queries=5,
+queryFailures=0, results=19) but zero sentences passed extraction — the
+gates were stricter than real source phrasing. Calibrated deliberately,
+never loosening provenance: (a) "60K"/"60k" specialist shorthand accepted
+exactly; (b) floor phrasing ("start at", "begin at", "as low as", "from")
+yields the exact stated figure; (c) "premium economy" no longer
+auto-rejects on the "economy" substring (longest-term match); (d) fee
+RANGES ("plus $80 or $120") and numeric point ranges ("45,000 to 60,000")
+now reject outright instead of silently taking the first figure; (e)
+each-way fee wording paired with a round-trip price is rejected as
+mis-scoped (storing it would understate fees 2x — same defect class as
+party-total scope). Research suite 24/24 (5 new regressions); full
+`npm test` **1200/1200 (45 suites, exit 0)**; tsc/diff-check clean. If a
+future run still yields zero candidates, widen via the query plan (more
+region pairs / specialist domains), never by weakening per-row gates.
+
+Second live run (same day): the pipeline emitted its first candidate, but
+human review REJECTED the row — the provenance quote was page furniture
+("Winner: Aeroplan Related: How to book Star Alliance business-class
+flights to Europe for 45,000 miles each way ## Flights to South America"),
+not authored prose: a related-article headline plus a section heading from
+a different region, with no stated origin. That defect class is now
+blocked at extraction and re-validated at the emitter: sentences
+containing `##` or unanchored furniture labels (`Winner:`, `Related:`,
+`Read more:`, `Editor's note:`, `Sponsored:`, etc.) are rejected outright.
+Unanchored matching is deliberately conservative — a false positive costs
+one candidate, never a fabricated row. Research suite 25/25 (1 new
+regression); full `npm test` **1201/1201 (45 suites, exit 0)**;
+tsc/build/diff-check clean. No benchmark row has been applied yet by
+design: the review gate did its job, and the next run should produce
+cleaner candidates.
+
+Post-rejection re-run yielded zero candidates: the surviving Tavily
+snippets are furniture-dominated. Response: widened the deterministic
+QUERY PLAN only, never the per-row gates — natural-language region nouns
+("from the U.S. to Europe" instead of concatenated directional labels),
+two query variants per program (award-chart lookup + a "how many miles
+... cost" question), and maxResults 10 (provider cap). Queries now read
+naturally instead of keyword soup. Gates, validator, and provider are
+untouched. Query-builder test updated to pin the two-variant plan.
+
+Third live run (same day, widened plan): queries=10, results=84,
+rawCandidates=6, deduped=4, emitted=4 — first substantive candidates.
+Human review: 3 of 4 ACCEPT (Aeroplan 60K business one-way via Frequent
+Miler prose; Virgin Atlantic 30K economy on Delta — operator mention, not
+mis-attribution; Flying Blue 50K business floor via TPG). 1 REJECT and
+converted into a new deterministic gate: the 57,500-mile figure belonged
+to American AAdvantage with Flying Blue only in the transfer clause, but
+the extractor attributed it to Flying Blue because AAdvantage was unknown
+(non-catalog names were invisible to attribution). Fix: a curated
+NON_CATALOG_PROGRAM_PATTERN (AAdvantage, SkyMiles, Bonvoy, World of
+Hyatt, KrisFlyer, Lifemiles, Miles&Smiles, etc.) rejects attribution
+whenever a known non-catalog program is named — airline OPERATOR mentions
+("awards on Delta") stay valid. Two initial pattern-list errors (escaped
+`miles\\&smiles` that could not match, `milege plan` typo) caught by
+self-audit and fixed before pinning. Research suite 26/26; full
+`npm test` **1202/1202 (45 suites, exit 0)**; tsc/build/diff-check clean.
+The user then ACCEPTED all three rows after checking the cited URLs.
+
+## Live observed award prices (Seats.aero cached search) — implemented, key pending
+
+The static-benchmark trust failure the user identified (a 30K floor presented
+as a price could make a customer transfer points against an 80K real price)
+led to the agreed direction: live award pricing. Seats.aero was selected
+after provider research (covers all four catalog airline programs;
+self-serve Partner API; Pro tier 1,000 calls/day at ~$10/mo). Decision:
+**Pro key now, written commercial agreement later** (Pro keys are documented
+non-commercial; commercial use and the always-current Live Search endpoint
+require a written agreement with Seats.aero — tracked as a product task).
+
+Implemented (all server-only, fail-closed, mirroring the SerpAPI client
+conventions):
+
+- `lib/goals/seatsAeroClient.ts` + tests (30/30): one cached-search GET per
+  call against `https://seats.aero/partnerapi/search` with the
+  `Partner-Authorization` header; injected fetch/clock; AbortSignal support;
+  fixed error categories (invalid_request, provider_not_configured,
+  http_failure, malformed_response, projection_rejected). The untrusted body
+  projects through `projectSeatsAeroAvailability`: envelope strictness
+  (count must equal the page length), corridor AND direction gates (a row
+  for any other corridor or the wrong leg rejects the whole response), date
+  window gate, per-cabin prefix fields (`Y/W/J/F`), the documented quirks
+  (`MileageCost` is a numeric STRING; `null`/`"0"`/`Available:false` mean
+  not-offered → row skipped; taxes are MINOR units with optional
+  `TaxesCurrency`; `RemainingSeats: 0` is untracked → null). One malformed
+  present field rejects everything; missing prices never become errors.
+- `lib/goals/seatsAeroFundingMapper.ts` + tests (20/20): pure projector into
+  the existing `StrategyAwardOption`/`StrategySource` contracts. A fixed
+  slug→catalog-name allowlist (aeroplan, united, flyingblue,
+  virginatlantic — all cataloged as airline programs) doubles as the
+  points-currency gate; unmapped slugs and programs without a catalog row
+  are skipped. Round trips sum two same-program legs (return must depart
+  strictly AFTER the chosen outbound; a missing leg yields no option).
+  Fees sum only complete same-currency per-leg taxes. Evidence is
+  `evidenceLevel: "web_observed_not_live"`, `availabilityStatus:
+  "available"`, source status `"live"` labeled "Observed award price (cached
+  provider result; verify before acting)" — an observed cached price is
+  never a bookable guarantee.
+- `lib/goals/automatedStrategyPlanner.ts` wiring (block 5c): after the
+  benchmark block, when the verified flight estimate resolved IATA codes and
+  the saved cabin maps to the provider set ("flexible" never searches), the
+  planner fires outbound+return cached searches inside the finalization
+  deadline (signal-checked, deadline-aware). Provider failures, rejections,
+  aborts, and zero usable rows contribute nothing — the chart-benchmark
+  floor remains the fallback. Observed options supersede a benchmark ONLY
+  for the same program + pricing basis + cabin (an observed round-trip total
+  next to a one-way chart floor is not an equivalent product, so both stay).
+- `lib/goals/customerSafeStrategyPresentation.ts`: observed options render
+  the fixed labels "Observed price" / "Observed result; verify before
+  acting"; every other tier keeps the exact established wording.
+- `lib/goals/strategyTypes.ts`: `TravelEvidenceLevel` gains
+  `"web_observed_not_live"` (additive; matches the SerpAPI flight
+  observation vocabulary already used by the normalizer).
+- Planner harness: the global fetch stub now routes seats.aero URLs to an
+  explicit per-test responder (default: throw), so an accidental observed-
+  price call can never reach the network; the narrative-provider tripwire
+  is unchanged. Planner suite 40/40 (7 new tests); focused group 173/173;
+  tsc, build, diff-check clean. NOT yet run: full `npm test`, and no
+  `SEATS_AERO_API_KEY` is configured yet — add the Pro key to `.env.local`
+  and generate a plan for a US→Europe goal to see live observed options.
+  Env contract: `SEATS_AERO_API_KEY` (server-only, `pro_`-prefixed key).
+  Rate limits: 1,000 calls/day (Pro) — the lane spends exactly 2 calls per
+  plan generation, only for goals with resolved IATA codes and a specific
+  cabin.
+Migration `20260910150000_seed_award_price_benchmarks_transatlantic.sql`
+seeds exactly those three rows (verbatim emitted SQL incl. escaping,
+transactional, idempotent not-exists guard, rejected AAdvantage row
+absent, no availability claims). First push attempt failed:
+SQLSTATE 42804 — in a values list Postgres infers an all-null column as
+text, which cannot assign into numeric `cash_fees` (all three rows had
+null fees). The failed push applied nothing (transactional), so the file
+was corrected in place: null fees now carry `null::numeric` in the
+migration, and the EMITTER was fixed the same way (a real production
+bug — every future null-fee candidate would have emitted un-appliable
+SQL), pinned by a regression. Second push attempt exposed the same
+inference class for `last_verified_at` (text literal in the values list
+cannot assign into timestamptz); fixed identically in the migration and
+the emitter (`v.last_verified_at::timestamptz`). All remaining columns
+were mechanically audited: text-target columns need no cast,
+`points_required` integer literal widens implicitly to numeric,
+`night_count_covered`/`valid_until` nulls sit in the typed select list,
+`now()`/`true` are correctly typed — no further values-list inference
+surfaces remain. Research suite 27/27; full `npm test`
+**1203/1203 (45 suites, exit 0)**; tsc/build/diff-check clean. PENDING:
+user re-runs `supabase db push`,
+then generates a plan in the browser — the first real award options
+should appear, funded by verified transfer partners from the user's own
+balances. Unverified until then: live browser end-to-end with seeded
+rows.
+
+## 2026-09-09 R1 Deterministic Earn Plan (implemented, full suite verified)
+
+First roadmap milestone toward showing reward-travel value in saved plans
+(the R1 recommendation from the 2026-09-09 product architecture review in this
+session's history: the plan previously surfaced no reward-earning picture at
+all). New deterministic engine `lib/goals/earnPlan.ts` projects the customer's
+own balances forward using only verified, active catalog `earning_rate` rules
+for their own wallet-card products, their recorded monthly spending by
+category, and their own reward accounts. Key trust decisions, all test-pinned:
+
+- Fail-closed verification gate: rules without `lastVerifiedAt` contribute
+  nothing (unverified rates are omitted, never guessed). Cash-back rates never
+  enter point math. Merchant-scoped/exclusion rules are skipped because
+  aggregated category spending cannot honor their eligibility.
+- Base-rate encoding: the verified seed catalog records base "all other
+  purchases" rates under canonical category `other` (root-only); the engine
+  treats null-category AND `other`-categorized earning rates as base rates
+  (highest verified rate wins among several). Root-only rules wildcard over
+  their leaves; leaf rules never cover root-level spending; spending categories
+  are normalized through the existing legacy-to-canonical mapping.
+- Category selection is order-independent (adversarial-review correction B1):
+  an exact category match beats a root wildcard, and the highest verified rate
+  wins within a specificity tier, regardless of catalog row order (the loader
+  orders by `created_at DESC`, which is arbitrary with respect to
+  specificity). Regression fixtures pin root-before-leaf, leaf-before-root,
+  higher-root-shadowing, and duplicate-category ordering.
+- Points and miles are never combined: a card (or program group) whose
+  verified rates mix currencies is omitted with a fixed warning. Companion
+  accounts are never combined with self earnings; projections attach to the
+  customer's self-owned account per program (or honestly report
+  `no_account`).
+- Horizon: whole calendar months (UTC) to earliest departure, capped at 36
+  months; beyond the cap, balances are shown without projections plus a fixed
+  warning. Trip cash carries the searched flight party-total through
+  unchanged (never derived from nightly/per-option hotel prices); the cash
+  gap compares it to the goal's budget only in matching currencies.
+- Account cap (adversarial-review correction I1): the builder emits at most
+  12 program-group accounts (first in wallet order) with a fixed
+  "Some reward programs were omitted from this plan." warning; the
+  presentation validator's cap is the same constant, so a built plan always
+  round-trips its own strict projector (previously a >12-program wallet
+  produced a plan the validator silently rejected to null).
+- `projectEarnPlan` strictly re-validates the persisted shape at the
+  presentation boundary (hotel-estimate convention): unknown keys, malformed
+  values, non-fixed warnings, or an inconsistent cash gap reject the whole
+  plan to null. All customer-facing strings are fixed server-owned copy.
+
+Wiring: `prepareGoalStrategyContext` loads earning rules via the new
+`getEarningRulesForProducts` catalog loader (new DI-seam member; test fixture
+updated) and attaches them to the strategy context post-construction with the
+wallet-card → program map (context shape extended; builder untouched). The
+planner's deterministic assembly invokes `buildEarnPlan` (null when no
+verified rates exist); `PersonalizedStrategy.earnPlan` persists through the
+existing strategy JSONB and loads through the existing client projection.
+Presentation adds `CustomerSafeEarnPlan` (native points/miles units, fixed
+trust labels, no cash value assigned to points) and the panel renders an
+"Earnings plan" disclosure in the rewards section.
+
+Verification after corrections: earnPlan 38/38 (was 33/33); presentation
+48/48; affected five-file run 149/149; full suite 1120/1120 (44 suites); tsc
+clean; build clean; `git diff --check` clean. The adversarial review's B1 and
+I1 corrections are in.
+
+I2 resolution (customer decision: use the data we already have) — REAL CARD
+ATTRIBUTION is implemented. `buildPersonalizedStrategyContext` now derives
+`monthlySpendingByCategoryCard` (per wallet card × category monthly averages,
+from each purchase's `cardId`, per-card month normalization; null when no
+accepted purchase carries a wallet-card attribution) alongside the unchanged
+wallet-wide lane. `buildEarnPlan` uses ONLY the attributed lane and is
+fail-closed: no attribution → no plan, never a fallback to crediting
+wallet-wide totals to every card. Each attributed dollar earns exactly once,
+on the card actually used, at that card's verified rates (attribution beats
+rate: spend on a 3x card earns 3x even when a 4x sibling exists).
+Mixed-currency cards are dropped before attribution so their spend earns
+nowhere; `cardNames` lists only cards whose attributed spend contributed.
+Raw purchases do not ride the strategy context — only the derived aggregate.
+New test file `strategyContextBuilder.test.ts` (9 tests) covers aggregation,
+attribution filtering, per-card month normalization, determinism, and input
+immutability. earnPlan 44/44, planner 26/26, builder 9/9; full suite
+1136/1136 (44 suites); tsc clean; build clean; `git diff --check` clean.
+Not yet live-verified in the browser — the earn plan now additionally
+requires purchases attributed to wallet cards (`purchase.card_id` set);
+check `/goals` with a catalog-linked wallet and card-attributed purchases on
+the next dev run. Award/points pricing (R2) and new-card incremental value
+(R4) remain future milestones; card-offer model research still runs during
+initial finalization (known latency).
+
+## 2026-09-09 Goal-Input Contract and Location-Resolution Fixes (live-verified)
+
+The customer's first full generation run failed through a ladder of distinct,
+now all fixed causes. Each fix is unit-tested and the final state was verified
+in a live run: the flight stage logged `success`, the signed flight payload
+persisted, and no stage-failure diagnostics appeared.
+
+Goal creation contract (`lib/goals/actions.ts`, `components/goal-form.tsx`):
+locations are stored as single-element arrays (`normalizeSingleLocation`)
+instead of comma-splitting, because a saved "City, Region" qualifier is a
+single SerpAPI autocomplete query and comma-splitting fabricated extra
+destinations that fail the stages' exactly-one-location gates. The form now
+has one origin and one destination field, requires departure/return dates
+(both stages hard-require them), bounds travelers to 1–9 in the action (the
+flight gate's bound), and removes the "Flexible / Any" cabin option (never
+accepted by the flight gate). SerpAPI's autocomplete `q` is free text and its
+canonical suggestion names are "City, Region" format; verified against the
+published Google Flights Autocomplete API documentation. Old goals saved under
+the comma-splitting contract keep failing the shape gate; recreate them.
+
+Location resolution (`lib/goals/serpApiFlightLocationProjection.ts`): the
+exact-name matcher was widened in two evidence-driven tiers. Tier 2 accepts a
+suggestion whose primary name matches and whose comma qualifier is
+prefix-compatible in either direction with a two-character floor ("Denver,
+CO" → "Denver, Colorado"). Finally, when no name tier matches but the
+provider returned exactly one structurally valid city suggestion, that
+suggestion resolves as the provider's authoritative interpretation of the
+saved text ("Raleigh, NC" → the lone "Raleigh, North Carolina" suggestion),
+mirroring what a customer sees on Google Flights itself. Multiple city
+suggestions still fail closed as `ambiguous_matches`/`no_matching_city`;
+malformed exact matches still report `matching_city_rejected` and are never
+substituted. Ambiguity protection demonstrated by the Copenhagen case is
+preserved (three genuine same-named cities with disjoint airports).
+
+Temporary diagnostics used to prove the root causes — the development+debug
+gated `ambiguous_location_candidates` dump and `no_matching_city_suggestions`
+near-miss names (with the projection's temporary `nearMisses` diagnostic
+fields) — were removed after their evidence was captured; the allowlisted
+category-only diagnostics are unchanged.
+
+Verification: focused projection/client/estimate suites (52) pass; full suite
+1077/1077 across 44 suites passes; `npx tsc --noEmit`, `npm run build`, and
+`git diff --check` pass. Nothing this session has been committed or pushed.
+The worktree also still carries earlier uncommitted work (Plan Results UI
+panel and lifecycle test, transfer-accounting calculators, hotel projection
+hardening, deletion-test regex fix) plus the three untouched
+`supabase/.temp` files; the pre-existing `<img>` build warning remains.
+
 ## 2026-09-06 Race-Safe Customer Strategy Deletion
 
 Implemented locally by amending the still-unapplied September 6 finalization
