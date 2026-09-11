@@ -3,7 +3,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createServerClient } from "@/lib/supabase-server";
 import { getWalletCardsForUser } from "@/lib/wallet/repository";
 import { getPurchasesForUser } from "@/lib/purchases/repository";
-import { getRewardPrograms, getCardProducts } from "@/lib/rewards/catalogRepository";
+import {
+  getRewardPrograms,
+  getCardProducts,
+  getEarningRulesForProducts,
+  getActiveAwardPriceBenchmarks,
+  getAirportRegionEntries,
+  getVerifiedTransferPartners,
+} from "@/lib/rewards/catalogRepository";
 import { getGoalForUser } from "./repository";
 import { getRewardAccountsForUser } from "./rewardAccountsRepository";
 
@@ -15,6 +22,10 @@ export interface StrategyActionContextDependencies {
   getPurchasesForUser: typeof getPurchasesForUser;
   getRewardPrograms: typeof getRewardPrograms;
   getCardProducts: typeof getCardProducts;
+  getEarningRulesForProducts: typeof getEarningRulesForProducts;
+  getAwardPriceBenchmarks: typeof getActiveAwardPriceBenchmarks;
+  getAirportRegionEntries: typeof getAirportRegionEntries;
+  getVerifiedTransferPartners: typeof getVerifiedTransferPartners;
 }
 
 const productionDependencies: StrategyActionContextDependencies = Object.freeze({
@@ -25,6 +36,10 @@ const productionDependencies: StrategyActionContextDependencies = Object.freeze(
   getPurchasesForUser,
   getRewardPrograms,
   getCardProducts,
+  getEarningRulesForProducts,
+  getAwardPriceBenchmarks: getActiveAwardPriceBenchmarks,
+  getAirportRegionEntries,
+  getVerifiedTransferPartners,
 });
 const testOverrides = new AsyncLocalStorage<StrategyActionContextDependencies>();
 

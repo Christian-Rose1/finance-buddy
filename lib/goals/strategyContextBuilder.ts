@@ -4,6 +4,7 @@ import type {
 } from "./types";
 import type {
   PersonalizedStrategyContext,
+  StrategyCardSpendingCategory,
   StrategySpendingCategory,
   StrategySource,
 } from "./strategyTypes";
@@ -99,12 +100,82 @@ export function buildPersonalizedStrategyContext(
   // Represent missing data honestly using the existing context status fields.
   const sources: StrategySource[] = [];
 
-  // 4. Final Context Construction
+  // 4. Per-card attribution: monthly spending attributed to the wallet card
+  // used for each purchase. Only purchases carrying a cardId that resolves to
+  // one of the customer's wallet cards contribute. The wallet-wide category
+  // aggregates above keep their existing semantics (all valid purchases,
+  // attributed or not); the card lane is a per-card subset of those same
+  // dollars. The two lanes feed different consumers, and the earn plan uses
+  // ONLY the card lane, so each attributed dollar earns exactly once.
+  const walletCardIds = new Set(walletCards.map((card) => card.id));
+  const cardCategoryTotals = new Map<string, Map<string, number>>();
+  const cardMonths = new Map<string, Set<string>>();
+
+  purchases.forEach((p) => {
+    if (!Number.isFinite(p.amount) || (p.amount as number) < 0) {
+      return;
+    }
+    if (typeof p.cardId !== "string" || !walletCardIds.has(p.cardId)) {
+      return;
+    }
+
+    const category = p.category ?? "uncategorized";
+    let categories = cardCategoryTotals.get(p.cardId);
+    if (!categories) {
+      categories = new Map();
+      cardCategoryTotals.set(p.cardId, categories);
+    }
+    categories.set(category, (categories.get(category) ?? 0) + (p.amount as number));
+
+    if (typeof p.date === "string") {
+      const match = /^(\d{4})-(\d{2})/.exec(p.date);
+      if (match) {
+        const month = Number(match[2]);
+        if (month >= 1 && month <= 12) {
+          const monthKey = `${match[1]}-${match[2]}`;
+          let monthsSet = cardMonths.get(p.cardId);
+          if (!monthsSet) {
+            monthsSet = new Set();
+            cardMonths.set(p.cardId, monthsSet);
+          }
+          monthsSet.add(monthKey);
+        }
+      }
+    }
+  });
+
+  // Monthly averages per (card, category), normalized by the distinct valid
+  // months represented among that card's own accepted purchases. Deterministic
+  // order: card wallet order, then monthly-average descending, then category.
+  const monthlySpendingByCategoryCard: StrategyCardSpendingCategory[] = [];
+  for (const card of walletCards) {
+    const categories = cardCategoryTotals.get(card.id);
+    const monthCount = cardMonths.get(card.id)?.size ?? 0;
+    if (!categories || monthCount === 0) continue;
+    const cardEntries: StrategyCardSpendingCategory[] = Array.from(
+      categories.entries(),
+    ).map(([category, total]) => ({
+      cardId: card.id,
+      category,
+      monthlyAverage: total / monthCount,
+    }));
+    cardEntries.sort((a, b) => {
+      if (b.monthlyAverage !== a.monthlyAverage) {
+        return b.monthlyAverage - a.monthlyAverage;
+      }
+      return a.category.localeCompare(b.category);
+    });
+    monthlySpendingByCategoryCard.push(...cardEntries);
+  }
+
+  // 5. Final Context Construction
   return {
     goal: { ...goal },
     rewardAccounts: rewardAccounts.map((acc) => ({ ...acc })), // Preserve manual balances as authoritative by not mutating
     walletCards: mappedWalletCards,
     monthlySpendingByCategory,
+    monthlySpendingByCategoryCard:
+      monthlySpendingByCategoryCard.length > 0 ? monthlySpendingByCategoryCard : null,
     awardOptions: [],
     cardOffers: [],
     sources,

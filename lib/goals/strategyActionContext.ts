@@ -28,6 +28,32 @@ export type PrepareGoalStrategyContextResult =
  * Repository/database/context-building exceptions are intentionally NOT caught
  * here; the calling server action's outer catch handles them.
  */
+/**
+ * Best-effort load for the R2 award-benchmark catalog inputs. These catalogs
+ * ENHANCE plans (benchmark options, transfer funding) but must never take
+ * down the core flight/hotel/finalization pipeline: on load failure the
+ * context simply carries empty arrays (no benchmark options, no transfer
+ * funding — the fail-safe direction; nothing is invented) and a fixed,
+ * debug-gated diagnostic is emitted. No error details, identifiers, or
+ * provider data are ever logged.
+ */
+async function bestEffortCatalogLoad<T>(
+  catalogName: "award_benchmarks" | "airport_region_map" | "transfer_partners",
+  load: () => Promise<T[]>,
+): Promise<T[]> {
+  try {
+    return await load();
+  } catch {
+    if (process.env.STRATEGY_DEBUG === "1") {
+      console.error(
+        "[strategy-context]",
+        JSON.stringify({ category: "award_benchmark_catalog_unavailable", catalogName }),
+      );
+    }
+    return [];
+  }
+}
+
 export async function prepareGoalStrategyContext(
   goalId: string
 ): Promise<PrepareGoalStrategyContextResult> {
@@ -58,18 +84,43 @@ export async function prepareGoalStrategyContext(
     };
   }
 
+  // Earning rules depend on the wallet-card product links, so the wallet-card
+  // fetch starts immediately and the rules query chains off it — everything
+  // still runs concurrently in a single Promise.all.
+  const walletCardsPromise = dependencies.getWalletCardsForUser(userId);
   const [
     rewardAccounts,
-    walletCards,
     purchases,
     rewardPrograms,
     cardProducts,
+    walletCards,
+    earningRules,
+    awardPriceBenchmarks,
+    airportRegionEntries,
+    verifiedTransferPartners,
   ] = await Promise.all([
     dependencies.getRewardAccountsForUser(userId),
-    dependencies.getWalletCardsForUser(userId),
     dependencies.getPurchasesForUser(userId),
     dependencies.getRewardPrograms(),
     dependencies.getCardProducts({ activeOnly: true }),
+    walletCardsPromise,
+    walletCardsPromise.then((cards) =>
+      dependencies.getEarningRulesForProducts(
+        cards
+          .map((card) => card.cardProductId)
+          .filter((id): id is string => typeof id === "string" && id.length > 0),
+        { activeOnly: true }
+      )
+    ),
+    bestEffortCatalogLoad("award_benchmarks", () =>
+      dependencies.getAwardPriceBenchmarks(),
+    ),
+    bestEffortCatalogLoad("airport_region_map", () =>
+      dependencies.getAirportRegionEntries(),
+    ),
+    bestEffortCatalogLoad("transfer_partners", () =>
+      dependencies.getVerifiedTransferPartners(),
+    ),
   ]);
 
   // Reward programs connected to the customer:
@@ -109,6 +160,32 @@ export async function prepareGoalStrategyContext(
     purchases,
     cardProducts
   );
+
+  // Attach verified-catalog earning inputs for the deterministic earn plan.
+  // Only rules for products linked to the customer's own wallet cards are
+  // included; the rules themselves remain catalog data and never imply
+  // ownership. Attached post-construction so the context builder contract is
+  // unchanged.
+  const cardProductByIdForRules = new Map(cardProducts.map((p) => [p.id, p]));
+  const linkedProductIds = new Set(
+    walletCards
+      .map((card) => card.cardProductId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0)
+  );
+  const walletCardProgramIds: Record<string, string | null> = {};
+  for (const card of walletCards) {
+    const programId = card.cardProductId
+      ? cardProductByIdForRules.get(card.cardProductId)?.rewardProgramId ?? null
+      : null;
+    walletCardProgramIds[card.id] = programId;
+  }
+  context.earningRules = earningRules.filter((rule) =>
+    linkedProductIds.has(rule.cardProductId)
+  );
+  context.walletCardProgramIds = walletCardProgramIds;
+  context.awardPriceBenchmarks = awardPriceBenchmarks;
+  context.airportRegionEntries = airportRegionEntries;
+  context.verifiedTransferPartners = verifiedTransferPartners;
 
   return {
     success: true,
