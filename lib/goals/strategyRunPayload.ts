@@ -192,6 +192,7 @@ const AWARD_OPTION_OPTIONAL_KEYS = new Set([
   "coverageStatus",
   "goalMatch",
   "goalMismatchReasons",
+  "catalogRewardProgramId",
 ]);
 
 const ALL_AWARD_OPTION_KEYS = new Set([...AWARD_OPTION_REQUIRED_KEYS, ...AWARD_OPTION_OPTIONAL_KEYS]);
@@ -233,6 +234,12 @@ function validateAwardOption(
   const transferRatio = validateNullOrNonNegativeFinite(raw.transferRatio);
   const centsPerPoint = validateNullOrNonNegativeFinite(raw.centsPerPoint);
   const availabilityStatus = validateStringEnum(raw.availabilityStatus, AVAILABILITY_STATUSES);
+  // Server-only program identity: never accepted from client/stage payloads.
+  // Stage-derived options are built server-side, so the key simply must not
+  // appear in a signed envelope's award options.
+  if ("catalogRewardProgramId" in raw) {
+    safeThrow();
+  }
   if ("evidenceLevel" in raw && raw.evidenceLevel !== "planning_benchmark") {
     safeThrow();
   }

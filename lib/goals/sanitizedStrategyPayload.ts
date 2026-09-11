@@ -124,12 +124,17 @@ export function buildSanitizedStrategyPayload(
     ...source,
     id: sourceReferences.get(source.id)!,
   }));
-  const publicAwardOptions = validAwardOptions.map((option) => ({
-    ...option,
-    id: awardReferences.get(option.id)!,
-    sourceId: sourceReferences.get(option.sourceId)!,
-    transferFromProgramId: null,
-  }));
+  const publicAwardOptions = validAwardOptions.map((option) => {
+    const safe = {
+      ...option,
+      id: awardReferences.get(option.id)!,
+      sourceId: sourceReferences.get(option.sourceId)!,
+      transferFromProgramId: null,
+    };
+    // Server-only catalog identity never enters a model payload.
+    delete safe.catalogRewardProgramId;
+    return safe;
+  });
   const publicCardOffers = validCardOffers.map((offer) => ({
     ...offer,
     id: cardReferences.get(offer.id)!,

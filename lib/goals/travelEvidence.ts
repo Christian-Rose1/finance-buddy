@@ -147,13 +147,16 @@ export function toClientSafeStrategy(strategy: PersonalizedStrategy): Personaliz
   const safeOptions = (options: StrategyAwardOption[]) => options.map((option) => {
     const sourceId = toSourceReference(option.sourceId);
     const benchmark = asPlanningBenchmark(option);
-    return {
+    const safe = {
       ...benchmark,
       sourceId,
       // Saved research is not a live inventory check, even if a legacy record
       // incorrectly carried the old "available" label.
       availabilityStatus: benchmark.availabilityStatus === "available" ? "unknown" : benchmark.availabilityStatus,
     };
+    // Server-only catalog identity never reaches the client.
+    delete safe.catalogRewardProgramId;
+    return safe;
   });
 
   const flightOptions = safeOptions(strategy.flightOptions);
@@ -193,10 +196,13 @@ export function toClientSafeResearch(
     const sourceId = sourceReferences.get(option.sourceId) ?? `source-${sourceReferences.size + 1}`;
     sourceReferences.set(option.sourceId, sourceId);
     const benchmark = asPlanningBenchmark(option);
-    return {
+    const safe = {
       ...benchmark,
       sourceId,
       availabilityStatus: benchmark.availabilityStatus === "available" ? "unknown" : benchmark.availabilityStatus,
     };
+    // Server-only catalog identity never reaches the client.
+    delete safe.catalogRewardProgramId;
+    return safe;
   });
 }

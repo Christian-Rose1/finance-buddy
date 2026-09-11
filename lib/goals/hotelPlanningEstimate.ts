@@ -557,7 +557,7 @@ export function parseDisplayedPrice(value: unknown): number | null {
     const lastIsDecimal = lastPart.length <= 2 && (lastPart.length !== 3 || earlierGroups.length === 0);
     if (lastIsDecimal) {
       // Earlier parts must be 3-digit groups (or a single leading group).
-      if (earlierGroups.some((group) => group.length !== 3) || (earlierGroups.length > 0 && earlierGroups[0].length === 0)) return null;
+      if (earlierGroups.length > 1 && earlierGroups.some((group) => group.length !== 3)) return null;
       if (earlierGroups.length === 0 && lastPart.length === 3 && parts.length === 1) {
         // A lone 3-digit token with the separator is impossible here.
         return null;
@@ -706,8 +706,17 @@ export function projectSerpApiHotelEstimate(
       if (nightlyRaw !== null && nightly === null) return null;
       const total = totalRaw === null ? null : parseDisplayedPrice(totalRaw);
       if (totalRaw !== null && total === null) return null;
-      const image = property.images?.find((candidate) => candidate.thumbnail !== null)?.thumbnail ?? null;
-      options.push({
+      // Optional provider URLs may be omitted, never rewritten. The persisted
+      // contract below continues to reject unsafe URLs.
+      const image = property.images?.map((candidate) => safeNullableUrl(candidate.thumbnail))
+        .find((url) => typeof url === "string") ?? null;
+      const amenities: string[] = [];
+      for (const item of property.amenities ?? []) {
+        const amenity = safeNullableText(item, MAX_TEXT);
+        if (amenity === undefined || amenity === null) return null;
+        if (!amenities.includes(amenity) && amenities.length < MAX_AMENITIES) amenities.push(amenity);
+      }
+      const option = projectOptionUnsafe({
         id: `serpapi-hotel-${options.length + 1}`,
         propertyName: property.name,
         locationText: null,
@@ -719,11 +728,14 @@ export function projectSerpApiHotelEstimate(
         reviewCount: property.reviews ?? null,
         hotelClass: property.hotelClass ?? null,
         neighborhood: null,
-        amenities: property.amenities ?? [],
-        propertyUrl: property.link ?? null,
+        amenities,
+        propertyUrl: safeNullableUrl(property.link ?? null) ?? null,
         imageUrl: image,
         trustStatus: nightly === null && total === null ? "price_unavailable" : "search_estimate",
       });
+      if (option === null) return null;
+      // Bound output, while preserving validation of every consumed property.
+      if (options.length < MAX_OPTIONS) options.push(option);
     }
     if (options.length === 0) return null;
     return projectHotelPlanningEstimateUnsafe({

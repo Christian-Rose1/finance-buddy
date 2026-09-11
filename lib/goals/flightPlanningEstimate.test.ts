@@ -1,3 +1,4 @@
+import { buildSerpApiFlightLocationClient } from "./serpApiFlightLocationClient";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildFlightPlanningEstimate, projectFlightPlanningEstimate } from "./flightPlanningEstimate";
@@ -81,6 +82,45 @@ async function captureEstimateDiagnostics<T>(debug: boolean, operation: () => Pr
     if (priorDebug === undefined) delete process.env.STRATEGY_DEBUG;
     else process.env.STRATEGY_DEBUG = priorDebug;
   }
+}
+
+/**
+ * Captures diagnostics while also controlling NODE_ENV, because the
+ * temporary ambiguous-candidate diagnostic requires BOTH NODE_ENV=development
+ * AND STRATEGY_DEBUG=1. NODE_ENV is always restored in `finally`.
+ */
+async function captureEstimateDiagnosticsWithNodeEnv<T>(
+  debug: boolean,
+  nodeEnv: "development" | "production" | undefined,
+  operation: () => Promise<T>,
+) {
+  // NODE_ENV is declared read-only by ambient types; the test harness needs
+  // to control it, so it is written through a typed record view and restored
+  // exactly in `finally`.
+  const env = process.env as Record<string, string | undefined>;
+  const priorNodeEnv = env.NODE_ENV;
+  if (nodeEnv === undefined) delete env.NODE_ENV;
+  else env.NODE_ENV = nodeEnv;
+  try {
+    return await captureEstimateDiagnostics(debug, operation);
+  } finally {
+    if (priorNodeEnv === undefined) delete env.NODE_ENV;
+    else env.NODE_ENV = priorNodeEnv;
+  }
+}
+
+/** The ambiguous-candidates diagnostic shape must contain only these keys. */
+const AMBIGUOUS_CANDIDATE_KEYS = new Set(["locationId", "name", "airportIds"]);
+
+function findAmbiguousDiagnostic(logs: unknown[][]): Record<string, unknown> | null {
+  for (const values of logs) {
+    for (const value of values) {
+      if (typeof value !== "string" || !value.startsWith("[flight-planning-estimate] ")) continue;
+      const parsed = JSON.parse(value.slice("[flight-planning-estimate] ".length)) as Record<string, unknown>;
+      if (parsed.category === "ambiguous_location_candidates") return parsed;
+    }
+  }
+  return null;
 }
 
 const resolvedDependencies: FlightPlanningEstimateDependencies = {
@@ -325,4 +365,113 @@ test("hostile accessors and revoked proxies are safely omitted by every boundary
   const revoked = Proxy.revocable(target, {});
   revoked.revoke();
   for (const value of [topLevel, nested, revoked.proxy]) assertSafelyOmittedEverywhere(value);
+});
+
+
+test("real resolver forwards fixed failure diagnostics including rejected exact matches", async () => {
+  const city = { type: "city", name: "Paris", id: "/m/example", airports: [{ id: "CDG" }] };
+  const cases = [
+    { suggestions: [], reason: "empty_suggestions", generic: "unresolved" },
+    // A lone non-matching city now resolves via the provider-authoritative
+    // single-suggestion rule, so the no-match failure requires >= 2 cities.
+    { suggestions: [{ ...city, name: "London" }, { ...city, name: "Lyon", id: "/m/lyon2" }], reason: "no_matching_city", generic: "unresolved" },
+    { suggestions: [city, { ...city, id: "/m/other" }], reason: "ambiguous_matches", generic: "unresolved" },
+    { suggestions: [{ ...city, id: "invalid" }], reason: "matching_city_rejected", generic: "unavailable" },
+    { suggestions: [{ ...city, airports: [] }], reason: "matching_city_rejected", generic: "unavailable" },
+  ];
+  for (const item of cases) {
+    const client = buildSerpApiFlightLocationClient("fixture", async () => ({ ok: true, json: async () => ({ suggestions: item.suggestions }) }) as Response);
+    for (const debug of [true, false]) {
+      const captured = await captureEstimateDiagnostics(debug, () => buildFlightPlanningEstimate(goal, {
+        resolveLocation: client.resolveLocation,
+        fetchFlight: async () => { assert.fail("failed resolution must not fetch flights"); },
+      }));
+      assert.equal(captured.value, null);
+      assert.deepEqual(captured.logs, debug ? [
+        [`[flight-planning-estimate] {"category":"destination_resolution_${item.reason}"}`],
+        [`[flight-planning-estimate] {"category":"destination_resolution_${item.generic}"}`],
+      ] : []);
+    }
+  }
+});
+
+test("truncated successful resolution retains flight success and emits only a fixed limit category", async () => {
+  const city = { type: "city", name: "Paris", id: "/m/example", airports: [{ id: "CDG" }] };
+  const client = buildSerpApiFlightLocationClient("fixture", async () => ({ ok: true, json: async () => ({ suggestions: Array.from({ length: 26 }, () => city) }) }) as Response);
+  const captured = await captureEstimateDiagnostics(true, () => buildFlightPlanningEstimate(goal, {
+    ...resolvedDependencies, resolveLocation: client.resolveLocation,
+  }));
+  assert.deepEqual(captured.value, await buildFlightPlanningEstimate(goal, resolvedDependencies));
+  assert.deepEqual(captured.logs, [
+    ['[flight-planning-estimate] {"category":"destination_resolution_suggestions_truncated"}'],
+    ['[flight-planning-estimate] {"category":"success"}'],
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// TEMPORARY local ambiguous-candidate diagnostics (NODE_ENV + STRATEGY_DEBUG)
+// ---------------------------------------------------------------------------
+
+function ambiguousDependencies(hostileCandidate?: Record<string, unknown>): FlightPlanningEstimateDependencies {
+  const candidates: Array<Record<string, unknown>> = [
+    { locationId: "/m/copenhagen", kind: "city", name: "Copenhagen, Denmark", airportIds: ["CPH", "KRK"] },
+    { locationId: "/g/copenhagen-alias", kind: "city", name: "Copenhagen, Denmark", airportIds: ["CPH"] },
+  ];
+  if (hostileCandidate) candidates.unshift(hostileCandidate);
+  return {
+    // Mirrors the real client result: ambiguous projections carry the fixed
+    // reason diagnostic, copied onto the client result.
+    resolveLocation: async (value) => value === "Paris"
+      ? {
+          projection: { status: "ambiguous", selected: null, candidates, diagnostic: { reason: "ambiguous_matches" } } as never,
+          error: null,
+          diagnostic: { reason: "ambiguous_matches" } as never,
+        }
+      : resolvedDependencies.resolveLocation(value),
+    fetchFlight: async () => { assert.fail("ambiguous resolution must not fetch flights"); },
+  };
+}
+
+test("ambiguous candidate details never appear outside development or with debug disabled", async () => {
+  for (const [debug, nodeEnv] of [
+    [false, "development"],
+    [true, "production"],
+    [false, "production"],
+    [true, undefined],
+  ] as const) {
+    const captured = await captureEstimateDiagnosticsWithNodeEnv(debug, nodeEnv, () =>
+      buildFlightPlanningEstimate(goal, ambiguousDependencies()));
+    assert.equal(captured.value, null);
+    // The ambiguous-candidate diagnostic never appears; the category-only
+    // diagnostic still appears when STRATEGY_DEBUG=1 (even outside development).
+    assert.equal(findAmbiguousDiagnostic(captured.logs), null);
+    if (debug) {
+      assert.ok(captured.logs.some((values) => values[0] === '[flight-planning-estimate] {"category":"destination_resolution_ambiguous_matches"}'));
+    } else {
+      assert.deepEqual(captured.logs, []);
+    }
+    assert.equal(JSON.stringify(captured.logs).includes("Copenhagen"), false);
+    assert.equal(JSON.stringify(captured.logs).includes("copenhagen"), false);
+  }
+});
+
+test("ambiguous diagnostics never change resolution results", async () => {
+  // A resolved destination emits no candidate diagnostic and the estimate is
+  // identical with and without the observation wired in.
+  const withDiagnostics = await captureEstimateDiagnosticsWithNodeEnv(true, "development", () =>
+    buildFlightPlanningEstimate(goal, resolvedDependencies));
+  assert.ok(withDiagnostics.value);
+  assert.equal(findAmbiguousDiagnostic(withDiagnostics.logs), null);
+  assert.deepEqual(withDiagnostics.value, await buildFlightPlanningEstimate(goal, resolvedDependencies));
+
+  // An ambiguous destination still returns null with the same category-only
+  // diagnostic sequence as before this feature existed.
+  const ambiguous = await captureEstimateDiagnosticsWithNodeEnv(true, "development", () =>
+    buildFlightPlanningEstimate(goal, ambiguousDependencies()));
+  assert.equal(ambiguous.value, null);
+  const categoryOnly = ambiguous.logs.filter((values) => !findAmbiguousDiagnostic([values]));
+  assert.deepEqual(categoryOnly, [
+    ['[flight-planning-estimate] {"category":"destination_resolution_ambiguous_matches"}'],
+    ['[flight-planning-estimate] {"category":"destination_resolution_unresolved"}'],
+  ]);
 });

@@ -463,10 +463,6 @@ test("rejects malformed, empty, and hostile Google Hotels responses safely", () 
     projectSerpApiHotelEstimate(serpApiInput({ properties: [{ type: "hotel", name: "X", extracted_hotel_class: "five" }] })),
     null,
   );
-  assert.equal(
-    projectSerpApiHotelEstimate(serpApiInput({ properties: [serpApiProperty({ link: "javascript:alert(1)" })] })),
-    null,
-  );
   // The old invented response shape must no longer project.
   assert.equal(
     projectSerpApiHotelEstimate(serpApiInput({ properties: [{ type: "google_hotels", name: "Legacy", rates: [{ per_night: { lowest: "$1,200" } }] }] })),
@@ -597,5 +593,66 @@ test("accepted estimate round-trips through the signed hotel-stage envelope", ()
   const serialized = JSON.stringify(envelope).toLowerCase();
   for (const forbidden of ["api_key", "apikey", "search_metadata", "raw-provider-search-id", "token", "signature"]) {
     assert.equal(serialized.includes(forbidden), false, `payload must not contain ${forbidden}`);
+  }
+});
+
+
+test("provider decimal nightly prices survive exactly without input mutation", () => {
+  for (const price of [99.50, 1234.50]) {
+    const input = serpApiInput(serpApiBody({ properties: [serpApiProperty({ rate_per_night: { lowest: price.toFixed(2) } })] }));
+    const snapshot = structuredClone(input);
+    const estimate = projectSerpApiHotelEstimate(input);
+    assert.ok(estimate);
+    assert.equal(estimate.options[0].nightlyPrice, price);
+    assert.deepEqual(input, snapshot);
+  }
+});
+
+test("provider unsafe optional URLs are omitted and a safe alternative thumbnail survives", () => {
+  for (const url of ["javascript:alert(1)", "https://example.com/hotel?source=listing", "http://example.com/image.jpg"]) {
+    for (const alternative of [false, true]) {
+      const images = [{ thumbnail: url }, ...(alternative ? [{ thumbnail: "https://example.com/safe.jpg" }] : [])];
+      const input = serpApiInput(serpApiBody({ properties: [serpApiProperty({ link: url, images })] }));
+      const snapshot = structuredClone(input);
+      const estimate = projectSerpApiHotelEstimate(input);
+      assert.ok(estimate);
+      assert.equal(estimate.options[0].propertyName, "Example Grand Hotel");
+      assert.equal(estimate.options[0].nightlyPrice, 1200);
+      assert.equal(estimate.options[0].totalPrice, 9600);
+      assert.equal(estimate.options[0].propertyUrl, null);
+      assert.equal(estimate.options[0].imageUrl, alternative ? "https://example.com/safe.jpg" : null);
+      assert.deepEqual(input, snapshot);
+      for (const field of ["propertyUrl", "imageUrl"]) {
+        assert.equal(projectHotelPlanningEstimate({ ...estimate, options: [{ ...estimate.options[0], [field]: url }] }), null);
+      }
+    }
+  }
+});
+
+test("provider collections are bounded in order after amenity deduplication without mutation", () => {
+  const unique = Array.from({ length: 13 }, (_, i) => `Amenity ${i + 1}`);
+  const properties = Array.from({ length: 11 }, (_, i) => serpApiProperty({ name: `Fictional Hotel ${i + 1}`, amenities: [unique[0], ...unique] }));
+  const input = serpApiInput(serpApiBody({ properties: [{ type: "vacation rental" }, ...properties] }));
+  const snapshot = structuredClone(input);
+  const estimate = projectSerpApiHotelEstimate(input);
+  assert.ok(estimate);
+  assert.deepEqual(estimate.options.map(option => option.propertyName), properties.slice(0, 10).map(property => property.name));
+  for (const option of estimate.options) assert.deepEqual(option.amenities, unique.slice(0, 12));
+  assert.deepEqual(input, snapshot);
+});
+
+test("provider output limits do not conceal malformed consumed money or metadata", () => {
+  for (const overrides of [
+    { rate_per_night: { lowest: "1,2,3" } },
+    { total_rate: { lowest: "12abc" } },
+    { name: "" }, { reviews: 0 }, { images: {} }, { amenities: {} },
+    { amenities: [...Array.from({ length: 13 }, (_, i) => `Amenity ${i}`), ""] },
+  ]) {
+    const input = serpApiInput(serpApiBody({ properties: [
+      ...Array.from({ length: 10 }, () => serpApiProperty()), serpApiProperty(overrides),
+    ] }));
+    const snapshot = structuredClone(input);
+    assert.equal(projectSerpApiHotelEstimate(input), null);
+    assert.deepEqual(input, snapshot);
   }
 });

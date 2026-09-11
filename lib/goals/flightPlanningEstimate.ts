@@ -1,3 +1,4 @@
+import type { FlightLocationFailureReason } from "./serpApiFlightLocationProjection";
 import type { Goal } from "./types";
 import { buildSerpApiFlightClient } from "./serpApiFlightClient";
 import { buildSerpApiFlightLocationClient } from "./serpApiFlightLocationClient";
@@ -7,6 +8,7 @@ import type { SerpApiFlightLocationClientResult } from "./serpApiFlightLocationC
 import type { SerpApiFlightClientErrorCategory, SerpApiFlightClientResult, SerpApiFlightRequest } from "./serpApiFlightClient";
 
 export type FlightPlanningEstimateDiagnosticCategory =
+  | `${"origin" | "destination"}_resolution_${FlightLocationFailureReason | "suggestions_truncated"}`
   | "success"
   | "invalid_saved_goal_shape"
   | "origin_resolution_unavailable"
@@ -24,6 +26,22 @@ export function logFlightPlanningEstimateDiagnostic(
 ): void {
   if (process.env.STRATEGY_DEBUG === "1") {
     console.error(`[flight-planning-estimate] ${JSON.stringify({ category })}`);
+  }
+}
+
+// Runtime allowlisting prevents malformed dependency data from reaching logs.
+function logLocationDiagnostic(side: "origin" | "destination", result: SerpApiFlightLocationClientResult): void {
+  const diagnostic = result.diagnostic ?? result.projection?.diagnostic;
+  switch (diagnostic?.reason) {
+    case "empty_suggestions":
+    case "no_matching_city":
+    case "matching_city_rejected":
+    case "ambiguous_matches":
+      logFlightPlanningEstimateDiagnostic(`${side}_resolution_${diagnostic.reason}`);
+      break;
+  }
+  if (diagnostic?.suggestionLimit === "suggestions_truncated") {
+    logFlightPlanningEstimateDiagnostic(`${side}_resolution_suggestions_truncated`);
   }
 }
 
@@ -177,6 +195,8 @@ export async function buildFlightPlanningEstimate(
       dependencies.resolveLocation(goal.origin[0]),
       dependencies.resolveLocation(goal.destinations[0]),
     ]);
+    logLocationDiagnostic("origin", originResult);
+    logLocationDiagnostic("destination", destinationResult);
     if (!originResult.projection) {
       logFlightPlanningEstimateDiagnostic("origin_resolution_unavailable");
       return null;
