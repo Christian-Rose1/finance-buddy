@@ -1,5 +1,84 @@
 # Finance Buddy Current Handoff
 
+## 2026-09-12 (late) Finalization deadline now cancels the card-research model call
+
+**Live evidence:** a 490s `POST /goals` whose 245s finalization deadline fired at 245s but
+whose `[strategy-research-provider-debug]` line printed ~4 more minutes later. Root cause:
+the `ResearchInterpreter`/`ResearchPlanner` interfaces had no signal parameter, so the
+optional card lane's OpenRouter/Ollama `interpret()` call floated past the deadline holding
+the HTTP request open. The **deadline fence was never broken** — `commitFinalization` still
+checks `signal.aborted` server-side, so a timed-out run cannot late-save (the displayed plan
+comes from the fast retry request, as designed).
+
+Fix: `options?: { signal?: AbortSignal }` added to `ResearchInterpreter.interpret` and
+`ResearchPlanner.generateResearchPlan`; OpenRouter/Ollama interpreters and the OpenRouter
+planner link the caller signal into their transport `AbortController` (add/remove listener,
+already-aborted honored). The planner's card lane adds deadline pre-checks before provider
+construction, after Tavily, and before each interpret. Interfaces only — no behavior,
+validation, or persistence change; retries skip the card lane entirely.
+
+Tests: planner 46/46 (new: aborted deadline → zero provider transports touched,
+`StrategyFinalizationDeadlineError`), Ollama 87/87 and OpenRouter 7/7 (new: aborted caller
+signal aborts the transport, rejects with the timed-out `ResearchInterpreterError`).
+tsc, build, diff-check clean.
+
+## 2026-09-12 Trip Reality Card (V1) + benchmark-catalog RLS root-cause fix (applied by customer pending)
+
+**V1 Trip Reality Card** — new deterministic module `lib/goals/tripRealityCard.ts` (+18 tests)
+assembled at planner step 7b from already-validated pipeline values: the searched flight
+party-total (cash side), the goal-scaled points requirement via the shared
+`calculateFlightPointsRequired` math (identical to allocation scenarios), the funding verdict
+via `findFundingAccount` reuse (verified + self-owned only, catalog-ID transfer matching,
+debit ceil-rounded), and the best attributed card for the trip's travel spend at verified
+catalog rates. Fail-closed per side; all copy is fixed server-owned strings; persisting rides
+`strategy_json` (no new allowlist). Presentation re-projects the persisted card through a
+strict allowlist validator (schemaVersion 1, key allowlists, enum statuses, fixed-warning
+allowlist, shared research-label sanitizer for program/card names); `cardId` never reaches
+the client. Panel renders the card above the plan overview. When options exist but every
+requirement calculation rejects (e.g. missing traveler coverage), the points side carries a
+FIXED allowlisted reason string (`pointsUnavailableNoCoverage`) instead of a bare "not
+confirmed"; hostile reason strings reject the whole card at presentation.
+
+**Root cause of "no points values anywhere" (diagnosed live 2026-09-12):**
+`20260909120000_create_award_benchmarks.sql` recreated the defective RLS idiom that
+`20260816120000_fix_catalog_rls_restrictive_policies.sql` had already fixed for the
+card-product catalog: a restrictive `FOR ALL ... USING (false)` no-write policy ALSO applies
+to SELECT (Postgres ANDs restrictive with permissive policies), so authenticated reads of
+`airport_region_map`, `transfer_partners`, and `award_price_benchmarks` returned zero rows —
+silently, with no query error. Seeded data was present but invisible to the app.
+New forward-only migration `20260912120000_fix_award_benchmark_catalog_rls.sql` drops the
+three restrictive no-write policies and recreates write protection as command-specific
+restrictive INSERT/UPDATE/DELETE policies for authenticated only (SELECT uncovered;
+permissive SELECT policies from the original migration untouched; anon default-deny;
+RLS stays enabled). Static migration test `lib/rewards/awardBenchmarkCatalogRlsMigration.test.ts`
+(4/4) pins the structure. **Customer must run `supabase db push`, then regenerate a plan.**
+
+**New STRATEGY_DEBUG diagnostics (category-only, allowlisted)** in
+`automatedStrategyPlanner.ts`: `[award-benchmarks] {"category":"catalog_unavailable"}`
+(empty context arrays — what the live run showed), `unmapped_origin_airport`,
+`unmapped_destination_airport`, `selection_empty`, `projection_empty`,
+`requirement_calculation_rejected`. These made the silent fail-closed gates observable.
+
+Note: `deterministicNarrativeCopy`'s "Planning benchmarks found" headline is the default
+copy variant and appears even with ZERO options — it is not evidence that benchmark rows
+were found. Verification: tripRealityCard 18/18, presentation 60/60, planner 45/45,
+RLS-migration test 4/4; tsc, build, diff-check clean. NOT verified: live browser run
+after `supabase db push` (customer), full `npm test` this session.
+
+**Live post-RLS-fix result (2026-09-12): points figures now render.** The Trip Reality
+card showed "~120,000 points · Virgin Atlantic Flying Club · Round trip" (30K one-way
+economy × 2 directions × 2 travelers — correct shared-math scaling). Remaining gap found
+live: the funding verdict said "No confirmed funding path" because the transfer-partners
+catalog never included Virgin Atlantic (only Aeroplan/United/Flying Blue were seeded).
+New idempotent seed migration
+`20260912130000_seed_virgin_atlantic_transfer_partner.sql` adds the verified
+Chase → Virgin Atlantic 1:1 row (verified 2026-09-12 against Virgin Atlantic's official
+Chase transfer page and Virgin's group page "full 1:1 ratio"; base ratio only —
+promotional bonuses are never encoded; source URL recorded on the row).
+Static migration test `lib/rewards/virginTransferPartnerSeedMigration.test.ts` (2/2).
+Customer must run `supabase db push`, then regenerate: expected "Your confirmed balances
+could cover this" when the verified Chase balance covers the ceil-divided debit.
+
 ## 2026-09-09 R2 Award Benchmarks, Route A (implemented, full suite verified; migration NOT yet pushed)
 
 First slice of real reward-travel redemptions in saved plans (the R2
