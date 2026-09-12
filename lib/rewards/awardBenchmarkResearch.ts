@@ -104,6 +104,24 @@ export interface BenchmarkResearchRoute {
   destinationRegion: AwardBenchmarkRegion;
 }
 
+/**
+ * Default deterministic route plan for the weekly benchmark runner.
+ * Extend deliberately, one reviewed pair at a time: every pair must use
+ * valid, distinct regions from AWARD_BENCHMARK_REGIONS, and every emitted
+ * row still requires human quote review before it enters the catalog.
+ * Transatlantic Europe leads because it was the first human-verified pair.
+ */
+export const DEFAULT_BENCHMARK_RESEARCH_ROUTES: readonly BenchmarkResearchRoute[] =
+  Object.freeze([
+    { originRegion: "us_domestic", destinationRegion: "transatlantic_europe" },
+    { originRegion: "us_domestic", destinationRegion: "hawaii_pacific" },
+    { originRegion: "us_domestic", destinationRegion: "caribbean_central_america" },
+    { originRegion: "us_domestic", destinationRegion: "mexico" },
+    { originRegion: "us_domestic", destinationRegion: "east_asia" },
+    { originRegion: "us_domestic", destinationRegion: "south_america" },
+    { originRegion: "us_domestic", destinationRegion: "canada" },
+  ]);
+
 interface ExtractedNumbers {
   pointsRequired: number;
   cashFees: number | null;
@@ -339,6 +357,7 @@ function isValidCandidateShape(value: unknown): value is AwardBenchmarkCandidate
     programName === value.programName &&
     !hasExplicitPartyScope(quote) &&
     !isPageFurniture(quote) &&
+    !isPastTensePriceSentence(quote) &&
     // The quote is embedded in a SQL line comment by the emitter; any control
     // character (including a newline) could terminate the comment and inject
     // SQL. Fail closed regardless of where the candidate originated.
@@ -391,6 +410,63 @@ function isStrictIsoUtcInstant(value: string): boolean {
 }
 
 /**
+ * Maximum accepted age for a source article's publication date. Award prices
+ * change frequently (devaluations, dynamic pricing), and a benchmark sourced
+ * from a years-old article presents a dead price as current — observed in
+ * practice with 2023-era fixed-chart quotes that dynamic pricing superseded.
+ * 18 months balances freshness against the slow churn of published chart
+ * references.
+ */
+const MAX_SOURCE_AGE_DAYS = 548;
+
+/** Clock/timezone skew allowance before a publication date is "in the future". */
+const PUBLISHED_DATE_SKEW_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Past-tense and nostalgia markers mark a HISTORICAL price, never a current
+ * one ("was 70,000 miles one way", "used to price", "previously priced at",
+ * "no longer charges", "charged 80,000"). A benchmark sourced from such a
+ * sentence presents a dead price as current, so the sentence fails closed
+ * regardless of whether the provider supplied a publication date.
+ * Deliberately NOT markers: bare "cost" (plural present-tense subjects like
+ * "flights to Europe cost 45,000 miles" are legitimate) and "priced at"
+ * ("seats are priced at 60,000 miles" is a current listing). Only
+ * unambiguous historical markers belong here — each removed candidate is
+ * real yield, so ambiguity fails toward keeping the sentence.
+ */
+const PAST_TENSE_PRICE_PATTERN =
+  /\b(?:was|were|used to|previously|no longer|before the|charged)\b/i;
+
+/**
+ * True when the sentence marks its price as historical. Present-tense
+ * verification beyond this (a required cost-verb allowlist) was considered
+ * and deliberately omitted: common legitimate phrasings like "book ANA first
+ * class for 110,000 points one-way" carry no cost verb, and a hard allowlist
+ * would silently discard real yield.
+ */
+function isPastTensePriceSentence(sentence: string): boolean {
+  return PAST_TENSE_PRICE_PATTERN.test(sentence);
+}
+
+/**
+ * Recency gate for a research result's publication date.
+ * - Absent date (null/empty): eligible. Tavily commonly omits it; human quote
+ *   review remains the backstop for those rows.
+ * - Present but unparseable, or implausibly far in the future: rejected.
+ *   Present-but-malformed never degrades to absent.
+ * - Present and parseable: must be no older than MAX_SOURCE_AGE_DAYS.
+ */
+function isResultWithinRecencyCutoff(publishedDate: unknown, extractedAt: string): boolean {
+  if (typeof publishedDate !== "string" || publishedDate.trim() === "") return true;
+  const publishedMs = Date.parse(publishedDate);
+  if (Number.isNaN(publishedMs)) return false;
+  const extractedMs = Date.parse(extractedAt);
+  if (Number.isNaN(extractedMs)) return false;
+  if (publishedMs > extractedMs + PUBLISHED_DATE_SKEW_MS) return false;
+  return publishedMs >= extractedMs - MAX_SOURCE_AGE_DAYS * 24 * 60 * 60 * 1000;
+}
+
+/**
  * Extracts benchmark candidates from research results for one declared route
  * pair. Only sentences from allowed HTTPS domains are considered; every other
  * sentence, cabin ambiguity, missing pricing basis, or unknown program fails
@@ -413,10 +489,15 @@ export function extractBenchmarkCandidates(
     if (!isPlainObject(result)) continue;
     const domain = hostnameOf(String(result.url ?? ""));
     if (!domain || !isAllowedDomain(domain)) continue;
+    // Stale sources never yield candidates: a 2023 fixed-chart quote is not
+    // a current price, no matter how exactly it is worded.
+    if (!isResultWithinRecencyCutoff(result.publishedDate, extractedAt)) continue;
     const content = typeof result.content === "string" ? result.content : "";
     for (const sentence of sentencesOf(content)) {
       // Page furniture (link boxes, headings) is not authored provenance.
       if (isPageFurniture(sentence)) continue;
+      // A past-tense price is a historical price, whatever the tense context.
+      if (isPastTensePriceSentence(sentence)) continue;
       // Party-scope sentences state a party total, never a per-person price.
       if (hasExplicitPartyScope(sentence)) continue;
       const numbers = extractNumbers(sentence);

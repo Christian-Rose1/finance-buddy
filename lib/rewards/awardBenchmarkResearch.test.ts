@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  DEFAULT_BENCHMARK_RESEARCH_ROUTES,
   BENCHMARK_PROGRAM_NAMES,
   BENCHMARK_SOURCE_DOMAINS,
   buildBenchmarkResearchQueries,
@@ -471,4 +472,96 @@ test("prices belonging to non-catalog programs are never mis-attributed to a cat
   assert.equal(operator.length, 1);
   assert.equal(operator[0].programName, "Virgin Atlantic Flying Club");
   assert.equal(operator[0].pointsRequired, 30000);
+});
+
+test("default route plan leads with the human-verified transatlantic pair and stays valid", () => {
+  // Transatlantic Europe must remain first: it is the pair whose emitted rows
+  // were individually human-verified and seeded.
+  assert.equal(DEFAULT_BENCHMARK_RESEARCH_ROUTES[0].originRegion, "us_domestic");
+  assert.equal(DEFAULT_BENCHMARK_RESEARCH_ROUTES[0].destinationRegion, "transatlantic_europe");
+  for (const route of DEFAULT_BENCHMARK_RESEARCH_ROUTES) {
+    assert.notEqual(route.originRegion, route.destinationRegion, JSON.stringify(route));
+  }
+  const seen = new Set(
+    DEFAULT_BENCHMARK_RESEARCH_ROUTES.map((r) => `${r.originRegion}->${r.destinationRegion}`),
+  );
+  assert.equal(seen.size, DEFAULT_BENCHMARK_RESEARCH_ROUTES.length);
+});
+
+test("query builder emits deterministic queries for every default route", () => {
+  const all: string[] = [];
+  for (const route of DEFAULT_BENCHMARK_RESEARCH_ROUTES) {
+    const queries = buildBenchmarkResearchQueries(route);
+    assert.equal(queries.length, BENCHMARK_PROGRAM_NAMES.length * 2, JSON.stringify(route));
+    assert.ok(queries.length > 0);
+    for (const query of queries) {
+      assert.equal(query.query, query.query.trim());
+      assert.ok(query.query.length > 0);
+      all.push(query.query);
+    }
+  }
+  // Determinism: re-running the plan reproduces the exact same query list.
+  const rerun: string[] = [];
+  for (const route of DEFAULT_BENCHMARK_RESEARCH_ROUTES) {
+    for (const query of buildBenchmarkResearchQueries(route)) rerun.push(query.query);
+  }
+  assert.deepEqual(rerun, all);
+});
+
+test("recency gate rejects stale, malformed, and future publication dates", () => {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const fresh = new Date(Date.parse(NOW) - 30 * dayMs).toISOString();
+  const insideCutoff = new Date(Date.parse(NOW) - 540 * dayMs).toISOString();
+  const pastCutoff = new Date(Date.parse(NOW) - 549 * dayMs).toISOString();
+  const stale = new Date(Date.parse(NOW) - 600 * dayMs).toISOString();
+  const future = new Date(Date.parse(NOW) + 30 * dayMs).toISOString();
+
+  const extract = (publishedDate: string | null) =>
+    extractBenchmarkCandidates([result({ publishedDate })], ROUTE, NOW);
+
+  // Fresh and within-cutoff articles extract exactly as before the gate.
+  assert.equal(extract(fresh).length > 0, true, "fresh article must stay eligible");
+  assert.equal(extract(insideCutoff).length > 0, true, "~18-month-old article must stay eligible");
+
+  // One day past the cutoff, and a 600-day-old article (the observed
+  // 2023-United case): rejected — no candidates survive.
+  assert.deepEqual(extract(pastCutoff), [], "just-past-cutoff article must reject");
+  assert.deepEqual(extract(stale), [], "stale article must reject");
+
+  // Absent stays eligible (null and empty): human quote review is the backstop.
+  assert.equal(extract(null).length > 0, true, "absent date must stay eligible");
+  assert.equal(extract("").length > 0, true, "empty date is absent, not malformed");
+
+  // Present-but-malformed never degrades to absent, and an implausibly
+  // future publication date rejects rather than passing through.
+  assert.deepEqual(extract("not-a-date"), [], "malformed date must reject");
+  assert.deepEqual(extract(future), [], "future-dated article must reject");
+});
+
+test("past-tense price sentences fail closed at extraction and validation", () => {
+  const extract = (content: string) =>
+    extractBenchmarkCandidates([result({ content })], ROUTE, NOW);
+
+  // Historical-price phrasings (the observed "was 70000" East Asia row and
+  // its siblings) are rejected even when every other gate would pass.
+  for (const sentence of [
+    "United MileagePlus partner redemption in business class from the US to East Asia was 70,000 miles one way.",
+    "United MileagePlus used to price Europe business class at 70,000 miles one-way.",
+    "United MileagePlus previously charged 70,000 miles for Europe business class one-way.",
+    "United MileagePlus no longer charges 70,000 miles for Europe business class one-way.",
+  ]) {
+    assert.deepEqual(extract(sentence), [], sentence);
+  }
+
+  // Legitimate current-price phrasings must survive the gate — yield is
+  // real cost, so only unambiguous historical markers reject.
+  const present = extract(
+    "United MileagePlus charges 80,000 miles for a one-way flight to Europe in business class.",
+  );
+  assert.equal(present.length, 1);
+  assert.equal(present[0].pointsRequired, 80000);
+
+  // The emitter-side validator independently enforces the same gate, so a
+  // candidate whose quote is swapped for a past-tense sentence cannot pass.
+  assert.equal(isValidBenchmarkCandidate({ ...present[0], sourceQuote: "United MileagePlus partner redemption in business class from the US to East Asia was 70,000 miles one way." }), false);
 });

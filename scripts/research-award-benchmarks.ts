@@ -21,6 +21,7 @@
 import { loadEnvFileIntoProcess } from "@/lib/envFile";
 import { TavilyResearchProvider } from "@/lib/goals/tavilyResearchProvider";
 import {
+  DEFAULT_BENCHMARK_RESEARCH_ROUTES,
   dedupeBenchmarkCandidates,
   emitBenchmarkSeedSql,
   runBenchmarkResearch,
@@ -28,13 +29,8 @@ import {
 } from "@/lib/rewards/awardBenchmarkResearch";
 import { isAwardBenchmarkRegion, AWARD_BENCHMARK_REGIONS } from "@/lib/rewards/awardBenchmarks";
 
-/** Default deterministic route plan. Extend deliberately, one reviewed pair at a time. */
-const DEFAULT_ROUTES: readonly BenchmarkResearchRoute[] = Object.freeze([
-  { originRegion: "us_domestic", destinationRegion: "transatlantic_europe" },
-]);
-
 function parseRoutes(argv: readonly string[]): BenchmarkResearchRoute[] | null {
-  if (argv.length === 0) return [...DEFAULT_ROUTES];
+  if (argv.length === 0) return [...DEFAULT_BENCHMARK_RESEARCH_ROUTES];
   const routes: BenchmarkResearchRoute[] = [];
   for (const arg of argv) {
     const [originRaw, destinationRaw] = arg.split("->");
