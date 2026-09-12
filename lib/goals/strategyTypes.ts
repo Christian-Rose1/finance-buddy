@@ -9,6 +9,7 @@ import type {
   TripRealityFunding,
   TripRealityBestCard,
 } from "./tripRealityCard";
+import type { GoalFundingTimeline } from "./goalFundingTimeline";
 
 export type StrategyDataStatus =
   | "live"
@@ -294,6 +295,13 @@ export interface PersonalizedStrategy {
    * model-authored.
    */
   tripRealityCard?: TripRealityCard | null;
+  /**
+   * Deterministic goal funding timeline (V2): months-to-goal projection for
+   * the verified funding path, from the funding source program's verified
+   * card-attributed earn rates. Assembled only from already-validated
+   * pipeline values; null when no flight options exist. Never model-authored.
+   */
+  goalFundingTimeline?: GoalFundingTimeline | null;
 }
 
 // ---------------------------------------------------------------------------

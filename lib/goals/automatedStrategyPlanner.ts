@@ -8,6 +8,7 @@ import { buildPointsInventory } from "./pointsInventoryBuilder";
 import { buildStrategyAllocationScenarios } from "./strategyAllocationBuilder";
 import { buildEarnPlan } from "./earnPlan";
 import { buildTripRealityCard } from "./tripRealityCard";
+import { buildGoalFundingTimeline } from "./goalFundingTimeline";
 import { calculateFlightPointsRequired } from "./strategyOptionCalculator";
 import {
   buildAirportRegionMap,
@@ -715,5 +716,9 @@ export async function generateAutomatedStrategyFromResearchStages(
       allocationScenarios,
       pointsInventory,
     }, interpreted.flightPlanningEstimate ?? null),
+    goalFundingTimeline: buildGoalFundingTimeline(context, {
+      flightOptions: strategy.flightOptions,
+      pointsInventory,
+    }),
   };
 }

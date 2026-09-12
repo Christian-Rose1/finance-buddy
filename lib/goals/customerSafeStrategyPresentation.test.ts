@@ -1154,6 +1154,7 @@ test("a plan with an unverified balance keeps its fixed warning and provisional 
  * behind generic times.
  */
 import { projectFlightPlanningEstimate } from "./flightPlanningEstimate";
+import { GOAL_FUNDING_TIMELINE_DISCLOSURE } from "./goalFundingTimeline";
 
 function rawFlightEstimateFixture() {
   return {
@@ -1509,4 +1510,120 @@ test("trip reality card renders the fixed unavailable reason and rejects hostile
     },
   });
   assert.equal(hostile.tripRealityCard, null);
+});
+
+// ---------------------------------------------------------------------------
+// Goal funding timeline (V2) presentation boundary
+// ---------------------------------------------------------------------------
+
+const fundingTimelineFixture: NonNullable<PersonalizedStrategy["goalFundingTimeline"]> = {
+  schemaVersion: 1,
+  label: "Points timeline",
+  status: "on_track",
+  monthlyEarn: 1300,
+  currencyLabel: "points",
+  sourceProgramName: "Chase Ultimate Rewards",
+  monthsToGoal: 27,
+  warnings: [],
+  disclosure: GOAL_FUNDING_TIMELINE_DISCLOSURE,
+};
+
+test("funding timeline renders composed fixed sentences from validated numbers", () => {
+  const view = build({ ...baseStrategy(), goalFundingTimeline: fundingTimelineFixture });
+  const timeline = view.goalFundingTimeline;
+  assert.ok(timeline);
+  assert.equal(timeline.label, "Points timeline");
+  assert.equal(timeline.statusLabel, "Your confirmed balances are on track to cover this");
+  assert.equal(timeline.earnLabel, "Earning about 1,300 points/month from your cards' verified rates");
+  assert.equal(timeline.timelineLabel, "27 months of earning at this rate covers the remaining gap");
+  assert.equal(timeline.sourceProgramName, "Chase Ultimate Rewards");
+  assert.equal(timeline.disclosure, GOAL_FUNDING_TIMELINE_DISCLOSURE);
+  assert.deepEqual(timeline.warnings, []);
+});
+
+test("funding timeline absent on strategies without one", () => {
+  const view = build(baseStrategy());
+  assert.equal(view.goalFundingTimeline, null);
+});
+
+test("funding timeline covered status renders no timeline sentence", () => {
+  const view = build({
+    ...baseStrategy(),
+    goalFundingTimeline: {
+      ...fundingTimelineFixture,
+      status: "covered",
+      monthsToGoal: null,
+    },
+  });
+  const timeline = view.goalFundingTimeline;
+  assert.ok(timeline);
+  assert.equal(timeline.statusLabel, "Your confirmed balances could cover this today");
+  assert.equal(timeline.timelineLabel, null);
+  assert.ok(timeline.earnLabel);
+});
+
+test("funding timeline no-path status renders the honest fixed copy", () => {
+  const view = build({
+    ...baseStrategy(),
+    goalFundingTimeline: {
+      ...fundingTimelineFixture,
+      status: "no_path",
+      monthsToGoal: null,
+      monthlyEarn: null,
+      currencyLabel: null,
+      sourceProgramName: null,
+      warnings: ["No verified card earn rates apply to your recorded spending for this program, so no monthly earn can be projected."],
+    },
+  });
+  const timeline = view.goalFundingTimeline;
+  assert.ok(timeline);
+  assert.equal(timeline.statusLabel, "No confirmed funding path to project yet");
+  assert.equal(timeline.earnLabel, null);
+  assert.equal(timeline.timelineLabel, null);
+  assert.deepEqual(timeline.warnings, [
+    "No verified card earn rates apply to your recorded spending for this program, so no monthly earn can be projected.",
+  ]);
+});
+
+test("funding timeline rejects malformed persisted shapes entirely", () => {
+  const hostile: Array<Record<string, unknown>> = [
+    { ...fundingTimelineFixture, schemaVersion: 2 },
+    { ...fundingTimelineFixture, hostile: "x" },
+    { ...fundingTimelineFixture, status: "fabricated" },
+    { ...fundingTimelineFixture, monthsToGoal: 0 },
+    { ...fundingTimelineFixture, monthlyEarn: -5 },
+    { ...fundingTimelineFixture, sourceProgramName: "https://spam.example" },
+    { ...fundingTimelineFixture, warnings: ["Call us to claim your points"] },
+    null as unknown as Record<string, unknown>,
+  ];
+  for (const candidate of hostile) {
+    const view = build({
+      ...baseStrategy(),
+      goalFundingTimeline: candidate as unknown as PersonalizedStrategy["goalFundingTimeline"],
+    });
+    assert.equal(view.goalFundingTimeline, null, `expected rejection for ${JSON.stringify(candidate).slice(0, 60)}`);
+  }
+});
+
+test("funding timeline miles currency renders mile units", () => {
+  const view = build({
+    ...baseStrategy(),
+    goalFundingTimeline: {
+      ...fundingTimelineFixture,
+      currencyLabel: "miles",
+      monthlyEarn: 750,
+    },
+  });
+  assert.ok(view.goalFundingTimeline?.earnLabel?.includes("miles/month"));
+});
+
+test("funding timeline singular month renders singular copy", () => {
+  const view = build({
+    ...baseStrategy(),
+    goalFundingTimeline: {
+      ...fundingTimelineFixture,
+      monthsToGoal: 1,
+    },
+  });
+  assert.equal(view.goalFundingTimeline?.timelineLabel, "1 month of earning at this rate covers the remaining gap");
 });

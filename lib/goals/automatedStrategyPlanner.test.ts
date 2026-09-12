@@ -1564,3 +1564,118 @@ test("an aborted finalization deadline prevents every card-lane provider call", 
     else process.env.OLLAMA_STRATEGY_MODEL = priorModel;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Goal Funding Timeline (V2) assembly
+// ---------------------------------------------------------------------------
+
+test("finalization assembles the funding timeline from the same funding selection as the trip reality card", async () => {
+  // Context with a wallet card carrying a verified rate and attributed spend,
+  // linked to the Chase program that funds via the verified 1:1 transfer.
+  const timelineContext: PersonalizedStrategyContext = {
+    ...context(),
+    walletCards: [
+      { id: "card-csp", name: "Sapphire Preferred", issuer: "Chase", rewardCurrency: "points", cardProductId: "product-csp" },
+    ],
+    earningRules: [{
+      id: "rule-csp-travel",
+      cardProductId: "product-csp",
+      type: "earning_rate" as const,
+      eligibleCategory: "travel" as const,
+      eligibleMerchant: null,
+      excludedMerchants: [],
+      rewardCurrency: "points" as const,
+      rewardValue: 2,
+      percentage: null,
+      fixedValue: null,
+      explanation: "2x on travel",
+      source: "development_fixture",
+      lastVerifiedAt: "2026-09-01T00:00:00.000Z",
+      active: true,
+      metadata: null,
+    }],
+    walletCardProgramIds: { "card-csp": "program-db-id" },
+    monthlySpendingByCategoryCard: [
+      { cardId: "card-csp", category: "travel", monthlyAverage: 1500 },
+    ],
+    verifiedTransferPartners: [{
+      id: "partner-1",
+      fromProgramId: "program-db-id",
+      toProgramId: "program-aeroplan",
+      destinationPointsPerSourcePoint: 1,
+      source: "https://issuer.example/partners",
+      lastVerifiedAt: "2026-09-01T00:00:00.000Z",
+    }],
+  };
+  // Flight option priced in Aeroplan; the verified transfer funds it from Chase.
+  const coveredStage = {
+    ...emptyStage,
+    awardOptions: [{
+      ...flightAwardOption(),
+      programName: "Air Canada Aeroplan",
+      catalogRewardProgramId: "program-aeroplan",
+      travelerCountCovered: 1,
+      evidenceLevel: "planning_benchmark" as const,
+    }],
+    sources: [{ id: "source-flight", label: "https://example.com/flight", status: "catalog" as const, observedAt: null }],
+    flightPlanningEstimate: flightEstimateFixture,
+  };
+  const strategy = await finalizeWithStages(
+    { flight: coveredStage, hotel: null },
+    "retry",
+    timelineContext,
+  );
+
+  const timeline = strategy.goalFundingTimeline;
+  assert.ok(timeline, "a fundable flight option must produce the timeline");
+  assert.equal(timeline.schemaVersion, 1);
+  assert.equal(timeline.label, "Points timeline");
+  // 120,000 requirement ÷ 1.0 = 120,000 debit; the context balance is 80,000
+  // → gap 40,000. Attributed travel spend 1,500 × 2 = 3,000/month.
+  assert.equal(timeline.status, "on_track");
+  assert.equal(timeline.monthlyEarn, 3000);
+  assert.equal(timeline.currencyLabel, "points");
+  // ceil(40,000 / 3,000) = 14 months — inside the 36-month horizon cap.
+  assert.equal(timeline.monthsToGoal, 14);
+  assert.equal(timeline.sourceProgramName, "Chase Ultimate Rewards");
+  assert.deepEqual(timeline.warnings, []);
+  // The trip reality card's funding verdict agrees (same selection, same math).
+  assert.ok(strategy.tripRealityCard?.funding);
+  assert.equal(strategy.tripRealityCard.funding.status, "gap");
+  assert.equal(strategy.tripRealityCard.funding.verifiedSurplus, -40_000);
+});
+
+test("finalization timeline stays null when no funding path exists", async () => {
+  // The default context has no verified transfer partners and its inventory
+  // account is a Chase program, while this option is priced in Aeroplan — so
+  // no direct or transfer funding account exists. The timeline is still
+  // present (options exist) but honestly declines to project.
+  const aeroplanStage = {
+    ...emptyStage,
+    awardOptions: [{
+      ...flightAwardOption(),
+      programName: "Air Canada Aeroplan",
+      catalogRewardProgramId: "program-aeroplan",
+      travelerCountCovered: 1,
+      evidenceLevel: "planning_benchmark" as const,
+    }],
+    sources: [{ id: "source-flight", label: "https://example.com/flight", status: "catalog" as const, observedAt: null }],
+    flightPlanningEstimate: flightEstimateFixture,
+  };
+  const strategy = await finalizeWithStages(
+    { flight: aeroplanStage, hotel: null },
+    "retry",
+  );
+  assert.ok(strategy.goalFundingTimeline);
+  assert.equal(strategy.goalFundingTimeline.status, "no_path");
+  assert.deepEqual(strategy.goalFundingTimeline.warnings, [
+    "No confirmed funding path from your verified balances matches this requirement, so a timeline is not shown.",
+  ]);
+});
+
+test("finalization omits the timeline when no flight options exist", async () => {
+  const hotelOnly = await finalizeWithStages({ flight: null, hotel: hotelStage() }, "retry");
+  assert.equal(hotelOnly.goalFundingTimeline, null);
+  const neither = await finalizeWithStages({ flight: null, hotel: null }, "retry");
+  assert.equal(neither.goalFundingTimeline, null);
+});

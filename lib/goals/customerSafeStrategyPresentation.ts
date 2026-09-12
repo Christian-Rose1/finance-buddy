@@ -7,6 +7,14 @@ import {
   TRIP_REALITY_COPY,
 } from "./tripRealityCard";
 import {
+  GOAL_FUNDING_TIMELINE_LABEL,
+  GOAL_FUNDING_TIMELINE_WARNING_HORIZON_CAPPED,
+  GOAL_FUNDING_TIMELINE_WARNING_MIXED_CURRENCY,
+  GOAL_FUNDING_TIMELINE_WARNING_NO_EARN,
+  GOAL_FUNDING_TIMELINE_WARNING_NO_FUNDING,
+  projectGoalFundingTimeline,
+} from "./goalFundingTimeline";
+import {
   HOTEL_PLANNING_ESTIMATE_AVAILABILITY_LABEL,
   HOTEL_PLANNING_ESTIMATE_LABEL,
   projectHotelPlanningEstimate,
@@ -37,7 +45,21 @@ export interface CustomerSafeTripRealityPoints { status: "available" | "unavaila
 export interface CustomerSafeTripRealityFunding { status: "covered" | "gap" | "unknown"; statusLabel: string; bestPointsLabel: string | null; surplusLabel: string | null; programName: string | null; }
 export interface CustomerSafeTripRealityBestCard { status: "available"; cardName: string; monthlyLabel: string | null; comparisonLabel: string | null; }
 export interface CustomerSafeTripRealityCard { schemaVersion: 1; label: typeof TRIP_REALITY_CARD_LABEL; disclosure: string; cash: CustomerSafeTripRealityCash; points: CustomerSafeTripRealityPoints; funding: CustomerSafeTripRealityFunding | null; bestCard: CustomerSafeTripRealityBestCard | null; bestCardHint: string | null; warnings: string[]; }
-export interface CustomerSafeStrategyPresentation { goal: CustomerSafeGoalSummary; strategy: { headline: string; summary: string; actions: CustomerSafeAction[] }; rewards: { confirmedCount: number; needsConfirmationCount: number; pathCount: number; summary: string; verified: CustomerSafeRewardAccount[]; unverified: CustomerSafeRewardAccount[]; scenarios: CustomerSafeScenario[] }; flightEstimates: CustomerSafeEstimate[]; flightPlanningEstimate: CustomerSafeFlightPlanningEstimate | null; hotelPlanningEstimate: CustomerSafeHotelPlanningEstimate | null; hotelEstimates: CustomerSafeEstimate[]; currentCash: CustomerSafeExactCashOption[]; customerVerified: CustomerSafeVerifiedOption[]; alternatives: CustomerSafeAlternative[]; details: { assumptions: string[]; warnings: string[]; unknowns: string[]; evidenceLabels: string[] };  refinementTopics: string[]; lastResearched: string | null; lastResearchedLabel: string | null; earnPlan: CustomerSafeEarnPlan | null; tripRealityCard: CustomerSafeTripRealityCard | null; }
+
+export interface CustomerSafeGoalFundingTimeline {
+  label: typeof GOAL_FUNDING_TIMELINE_LABEL;
+  /** Fixed status copy; composed here from the validated status enum. */
+  statusLabel: string;
+  /** Fixed earn-rate sentence, when a verified monthly earn exists. */
+  earnLabel: string | null;
+  /** Fixed timeline sentence, when an on-track months-to-goal exists. */
+  timelineLabel: string | null;
+  /** The funding source program's display name, when a funding path exists. */
+  sourceProgramName: string | null;
+  disclosure: string;
+  warnings: string[];
+}
+export interface CustomerSafeStrategyPresentation { goal: CustomerSafeGoalSummary; strategy: { headline: string; summary: string; actions: CustomerSafeAction[] }; rewards: { confirmedCount: number; needsConfirmationCount: number; pathCount: number; summary: string; verified: CustomerSafeRewardAccount[]; unverified: CustomerSafeRewardAccount[]; scenarios: CustomerSafeScenario[] }; flightEstimates: CustomerSafeEstimate[]; flightPlanningEstimate: CustomerSafeFlightPlanningEstimate | null; hotelPlanningEstimate: CustomerSafeHotelPlanningEstimate | null; hotelEstimates: CustomerSafeEstimate[]; currentCash: CustomerSafeExactCashOption[]; customerVerified: CustomerSafeVerifiedOption[]; alternatives: CustomerSafeAlternative[]; details: { assumptions: string[]; warnings: string[]; unknowns: string[]; evidenceLabels: string[] };  refinementTopics: string[]; lastResearched: string | null; lastResearchedLabel: string | null; earnPlan: CustomerSafeEarnPlan | null; tripRealityCard: CustomerSafeTripRealityCard | null; goalFundingTimeline: CustomerSafeGoalFundingTimeline | null; }
 export const CUSTOMER_SAFE_MAX_ESTIMATES = 3;
 export const CUSTOMER_SAFE_MAX_ALTERNATIVES = 2;
 
@@ -453,6 +475,46 @@ function buildCustomerSafeTripRealityCard(raw: unknown): CustomerSafeTripReality
   };
 }
 
+/**
+ * Customer-safe funding timeline view. The persisted timeline is re-validated
+ * through its strict projector; every sentence is composed here from fixed
+ * templates and the validated numbers, never from persisted free text. The
+ * source program name is sanitized through the shared research-label
+ * sanitizer like every other program name.
+ */
+const buildCustomerSafeGoalFundingTimeline = (raw: unknown): CustomerSafeGoalFundingTimeline | null => {
+  const timeline = projectGoalFundingTimeline(raw);
+  if (!timeline) return null;
+  const statusLabels: Record<string, string> = {
+    covered: "Your confirmed balances could cover this today",
+    no_path: "No confirmed funding path to project yet",
+    on_track: "Your confirmed balances are on track to cover this",
+  };
+  const statusLabel = statusLabels[timeline.status] ?? "Funding timeline not confirmed";
+  const unit = timeline.currencyLabel === "miles" ? "miles" : "points";
+  const earnLabel =
+    timeline.monthlyEarn !== null && timeline.monthlyEarn > 0
+      ? `Earning about ${Math.round(timeline.monthlyEarn).toLocaleString("en-US")} ${unit}/month from your cards' verified rates`
+      : null;
+  const timelineLabel =
+    timeline.monthsToGoal !== null && timeline.monthlyEarn !== null
+      ? `${timeline.monthsToGoal} ${timeline.monthsToGoal === 1 ? "month" : "months"} of earning at this rate covers the remaining gap`
+      : null;
+  const programName =
+    timeline.sourceProgramName === null
+      ? null
+      : toCustomerSafeResearchLabel(timeline.sourceProgramName, "Reward program");
+  return {
+    label: GOAL_FUNDING_TIMELINE_LABEL,
+    statusLabel,
+    earnLabel,
+    timelineLabel,
+    sourceProgramName: programName,
+    disclosure: timeline.disclosure,
+    warnings: [...timeline.warnings],
+  };
+};
+
 export function buildCustomerSafeStrategyPresentation(goal: Goal, strategy: PersonalizedStrategy, generatedAt: string | null = null): CustomerSafeStrategyPresentation {
   const flights = strategy.flightOptions ?? []; const hotels = strategy.hotelOptions ?? []; const inventory = strategy.pointsInventory ?? [];
   const safeAccount = (item: StrategyPointsInventoryItem, index: number): CustomerSafeRewardAccount => ({ key: `account-${index + 1}`, programName: toCustomerSafeResearchLabel(item.programName, "Reward program"), ownerType: item.ownerType, ownerLabel: safeGoalLabel(item.ownerLabel, item.ownerType === "self" ? "You" : "Companion"), balance: nonNegative(item.balance), verificationLabel: item.verificationStatus === "verified" ? "Confirmed rewards balance" : "Balance needs confirmation", originLabel: item.origin === "connected" ? "Connected account" : item.origin === "manual" ? "Manually entered" : "Evidence-backed", balanceAsOf: safeGoalLabel(item.balanceAsOf) });
@@ -489,6 +551,11 @@ export function buildCustomerSafeStrategyPresentation(goal: Goal, strategy: Pers
   // untrusted or malformed persisted card becomes null, never a customer
   // figure.
   const tripRealityCard = buildCustomerSafeTripRealityCard(strategy.tripRealityCard);
-  const presentation: CustomerSafeStrategyPresentation = { goal: goalSummary, strategy: { headline: narrativeCopy.headline, summary: narrativeCopy.summary, actions: [] }, rewards: { confirmedCount: confirmed.length, needsConfirmationCount: needs.length, pathCount: scenarios.length, summary: `${confirmed.length} confirmed rewards account${confirmed.length === 1 ? "" : "s"}, ${needs.length} balance${needs.length === 1 ? "" : "s"} needing confirmation, and ${scenarios.length} planning path${scenarios.length === 1 ? "" : "s"}. Accounts and programs remain separate.`, verified: confirmed, unverified: needs, scenarios }, flightEstimates: flights.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `flight-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), flightPlanningEstimate, hotelPlanningEstimate, hotelEstimates: hotels.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `hotel-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), currentCash, customerVerified, alternatives: [], details: { assumptions, warnings, unknowns: [], evidenceLabels: [...flights, ...hotels].some((item) => (item.evidenceLevel ?? "planning_benchmark") === "planning_benchmark") ? ["Planning estimate"] : [] }, refinementTopics: safeList(strategy.followUpQuestions), lastResearched: timestamp(generatedAt), lastResearchedLabel: formatPersistedStrategyTimestamp(generatedAt)?.label ?? null, earnPlan, tripRealityCard };
+  // The deterministic funding timeline is re-projected through its strict
+  // validator at the presentation boundary (earn-plan convention): an
+  // untrusted or malformed persisted timeline becomes null, never a customer
+  // figure.
+  const goalFundingTimeline = buildCustomerSafeGoalFundingTimeline(strategy.goalFundingTimeline);
+  const presentation: CustomerSafeStrategyPresentation = { goal: goalSummary, strategy: { headline: narrativeCopy.headline, summary: narrativeCopy.summary, actions: [] }, rewards: { confirmedCount: confirmed.length, needsConfirmationCount: needs.length, pathCount: scenarios.length, summary: `${confirmed.length} confirmed rewards account${confirmed.length === 1 ? "" : "s"}, ${needs.length} balance${needs.length === 1 ? "" : "s"} needing confirmation, and ${scenarios.length} planning path${scenarios.length === 1 ? "" : "s"}. Accounts and programs remain separate.`, verified: confirmed, unverified: needs, scenarios }, flightEstimates: flights.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `flight-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), flightPlanningEstimate, hotelPlanningEstimate, hotelEstimates: hotels.slice(0, CUSTOMER_SAFE_MAX_ESTIMATES).map((item, index) => estimate(item, `hotel-estimate-${index + 1}`)).filter((item): item is CustomerSafeEstimate => item !== null), currentCash, customerVerified, alternatives: [], details: { assumptions, warnings, unknowns: [], evidenceLabels: [...flights, ...hotels].some((item) => (item.evidenceLevel ?? "planning_benchmark") === "planning_benchmark") ? ["Planning estimate"] : [] }, refinementTopics: safeList(strategy.followUpQuestions), lastResearched: timestamp(generatedAt), lastResearchedLabel: formatPersistedStrategyTimestamp(generatedAt)?.label ?? null, earnPlan, tripRealityCard, goalFundingTimeline };
   return presentation;
 }

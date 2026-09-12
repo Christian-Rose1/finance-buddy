@@ -5,7 +5,7 @@ import { Loader2, Sparkles, Trash2 } from "lucide-react";
 import { deleteGoalStrategyAction, generateGoalFlightStageAction, generateGoalHotelStageAction, finalizeGoalStrategyRunAction } from "@/lib/goals/strategyActions";
 import type { PersonalizedStrategy, StrategyAwardOption } from "@/lib/goals/strategyTypes";
 import type { Goal } from "@/lib/goals/types";
-import { buildCustomerSafeStrategyPresentation, type CustomerSafeStrategyPresentation, type CustomerSafeEstimate, type CustomerSafeHotelPlanningEstimateOption, type CustomerSafeTripRealityCard } from "@/lib/goals/customerSafeStrategyPresentation";
+import { buildCustomerSafeStrategyPresentation, type CustomerSafeStrategyPresentation, type CustomerSafeEstimate, type CustomerSafeHotelPlanningEstimateOption, type CustomerSafeTripRealityCard, type CustomerSafeGoalFundingTimeline } from "@/lib/goals/customerSafeStrategyPresentation";
 import { normalizePersistedStrategyTimestamp, transitionStrategyTimestamp } from "@/lib/goals/customerSafeStrategyTimestamp";
 import { buildCustomerSafeGoalSummary, buildCustomerSafePlanningPreview, type CustomerSafePlanningPreview } from "@/lib/goals/customerSafeGoalSummary";
 import {
@@ -131,6 +131,16 @@ function TripRealitySection({ card }: { card: CustomerSafeTripRealityCard }) {
   </section>;
 }
 
+function GoalFundingTimelineSection({ timeline }: { timeline: CustomerSafeGoalFundingTimeline }) {
+  return <section className="rounded-2xl border border-emerald-400/30 bg-emerald-400/5 p-5" aria-label="Points timeline">
+    <h3 className="text-lg font-semibold text-white">Points timeline</h3>
+    <p className="mt-1 text-sm font-medium text-emerald-100">{timeline.statusLabel}{timeline.sourceProgramName ? ` (${timeline.sourceProgramName})` : ""}</p>
+    {timeline.earnLabel ? <p className="mt-1 text-sm leading-relaxed text-slate-200">{timeline.earnLabel}{timeline.timelineLabel ? ` — ${timeline.timelineLabel}.` : "."}</p> : null}
+    {timeline.warnings.length > 0 ? <ul className="list-disc space-y-1 pl-5 text-sm text-amber-200">{timeline.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : null}
+    <p className="text-xs text-slate-400">{timeline.disclosure}</p>
+  </section>;
+}
+
 function savedResultStatus(presentation: CustomerSafeStrategyPresentation | null): string {
   if (!presentation) return "No saved plan yet.";
   const hasFlight = presentation.flightPlanningEstimate !== null || presentation.currentCash.some((quote) => quote.kind === "flight") || presentation.customerVerified.some((option) => option.kind === "flight");
@@ -158,6 +168,7 @@ function PlanResults({ presentation, isPrevious }: { presentation: CustomerSafeS
   return <div className="mt-6 space-y-8">
     {isPrevious ? <p className="rounded-xl border border-amber-300/40 bg-amber-300/10 p-4 font-medium text-amber-100">Previous plan · These results stay here until an updated plan is saved successfully.</p> : null}
     {presentation.tripRealityCard ? <TripRealitySection card={presentation.tripRealityCard} /> : null}
+    {presentation.goalFundingTimeline ? <GoalFundingTimelineSection timeline={presentation.goalFundingTimeline} /> : null}
     <section className="space-y-4" aria-label="Plan overview">
       <h3 className="text-xl font-semibold text-white">Plan overview</h3>
       <div className="grid gap-4 md:grid-cols-2">
