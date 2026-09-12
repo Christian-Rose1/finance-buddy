@@ -42,7 +42,10 @@ export class OpenRouterResearchInterpreter implements ResearchInterpreter {
       process.env.OPENROUTER_RESEARCH_MODEL?.trim() || DEFAULT_MODEL;
   }
 
-  async interpret(input: InterpretResearchInput): Promise<InterpretedResearch> {
+  async interpret(
+    input: InterpretResearchInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<InterpretedResearch> {
     const requestedModel = this.model;
 
     const controller = new AbortController();
@@ -50,6 +53,14 @@ export class OpenRouterResearchInterpreter implements ResearchInterpreter {
       () => controller.abort(),
       DEFAULT_TIMEOUT_MS
     );
+    // A caller deadline (e.g. the finalization fence) must be able to cancel
+    // this request; without this link the model call floats past the caller's
+    // deadline and keeps the HTTP request alive in the background.
+    const onCallerAbort = () => controller.abort();
+    if (options?.signal) {
+      if (options.signal.aborted) onCallerAbort();
+      else options.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
 
     let response: Response;
     try {
@@ -101,6 +112,9 @@ export class OpenRouterResearchInterpreter implements ResearchInterpreter {
       );
     } finally {
       clearTimeout(timeoutId);
+      if (options?.signal) {
+        options.signal.removeEventListener("abort", onCallerAbort);
+      }
     }
 
     if (!response.ok) {

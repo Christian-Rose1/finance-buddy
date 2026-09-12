@@ -52,7 +52,16 @@ export class ResearchInterpreterError extends Error {
 }
 
 export interface ResearchInterpreter {
-  interpret(input: InterpretResearchInput): Promise<InterpretedResearch>;
+  /**
+   * `options.signal` lets a caller (e.g. the finalization deadline) abort an
+   * in-flight model request instead of leaving it running to completion in
+   * the background after the caller has already given up. Implementations
+   * must honor it in addition to their own internal timeout.
+   */
+  interpret(
+    input: InterpretResearchInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<InterpretedResearch>;
 }
 
 export const RESEARCH_OUTPUT_JSON_SCHEMA = {

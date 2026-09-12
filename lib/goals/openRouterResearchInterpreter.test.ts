@@ -392,3 +392,45 @@ test("shared validation errors remain ResearchInterpreterError instances", async
     }
   );
 });
+
+test("an aborted caller signal cancels the request instead of leaving it floating", async () => {
+  restoreEnv();
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_RESEARCH_MODEL = "test/research-model";
+
+  const input = makeInput();
+  let fetchCalls = 0;
+  let capturedSignal: AbortSignal | null = null;
+  stubFetch((_url, init) => {
+    fetchCalls += 1;
+    capturedSignal = init.signal instanceof AbortSignal ? init.signal : null;
+    // Simulate the caller's deadline firing while the request is in flight:
+    // the linked controller must abort the transport.
+    if (capturedSignal) {
+      const host = capturedSignal as AbortSignal;
+      if (host.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      host.addEventListener("abort", () => {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }, { once: true });
+    }
+    return new Promise<Response>(() => undefined);
+  });
+
+  const interpreter = new OpenRouterResearchInterpreter();
+  const caller = new AbortController();
+  caller.abort();
+
+  await assert.rejects(
+    () => interpreter.interpret(input, { signal: caller.signal }),
+    (error: unknown) => {
+      assert.ok(error instanceof ResearchInterpreterError);
+      assert.match((error as Error).message, /timed out/);
+      return true;
+    }
+  );
+  assert.equal(fetchCalls, 1);
+  assert.ok(capturedSignal, "the caller signal must be linked into the transport");
+  assert.equal((capturedSignal as AbortSignal | null)!.aborted, true);
+});

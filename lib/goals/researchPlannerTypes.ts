@@ -142,5 +142,12 @@ export interface ResearchPlannerInput {
  * Interface for research planner implementations.
  */
 export interface ResearchPlanner {
-  generateResearchPlan(input: ResearchPlannerInput): Promise<ResearchPlan>;
+  /**
+   * `options.signal` lets a caller abort an in-flight planner request instead
+   * of leaving it running in the background after the caller has given up.
+   */
+  generateResearchPlan(
+    input: ResearchPlannerInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<ResearchPlan>;
 }

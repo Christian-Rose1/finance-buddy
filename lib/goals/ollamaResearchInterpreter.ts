@@ -1576,7 +1576,10 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
     }
   }
 
-  async interpret(input: InterpretResearchInput): Promise<InterpretedResearch> {
+  async interpret(
+    input: InterpretResearchInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<InterpretedResearch> {
     const publicPayload = buildPublicResearchPayload(input);
 
     if (process.env.STRATEGY_DEBUG === "1") {
@@ -1600,7 +1603,7 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
       );
     }
 
-    const raw = await this.callOllama(publicPayload, input.focus);
+    const raw = await this.callOllama(publicPayload, input.focus, options?.signal);
 
     if (process.env.STRATEGY_DEBUG === "1") {
       console.info(
@@ -1612,12 +1615,23 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
     return validateResearchModelContent(raw, input, this.model);
   }
 
-  private async callOllama(publicPayload: string, focus: ResearchFocus): Promise<string> {
+  private async callOllama(
+    publicPayload: string,
+    focus: ResearchFocus,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const controller = new AbortController();
     const timeoutId = setTimeout(
       () => controller.abort(),
       DEFAULT_TIMEOUT_MS
     );
+    // Link the caller's deadline to this request so an aborted caller cannot
+    // leave this transport running in the background.
+    const onCallerAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) onCallerAbort();
+      else signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
 
     let response: Response;
     try {
@@ -1658,6 +1672,7 @@ export class OllamaResearchInterpreter implements ResearchInterpreter {
       );
     } finally {
       clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", onCallerAbort);
     }
 
     if (!response.ok) {

@@ -4995,3 +4995,39 @@ test("legacy award_options still accepts both flight and hotel fixtures", async 
   assert.equal(hotelResult.awardOptions.length, 1);
   assert.equal(hotelResult.awardOptions[0].redemptionType, "hotel");
 });
+
+test("an aborted caller signal cancels the Ollama request instead of leaving it floating", async () => {
+  let fetchCalls = 0;
+  let capturedSignal: AbortSignal | null = null;
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    fetchCalls += 1;
+    capturedSignal = init?.signal instanceof AbortSignal ? init.signal : null;
+    if (capturedSignal && (capturedSignal as AbortSignal).aborted) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+    return new Promise<Response>(() => undefined);
+  }) as unknown as typeof fetch;
+  try {
+    const interpreter = new OllamaResearchInterpreter(
+      "http://localhost:11434",
+      "test-model"
+    );
+    const caller = new AbortController();
+    caller.abort();
+
+    await assert.rejects(
+      () => interpreter.interpret(makeInput(), { signal: caller.signal }),
+      (error: unknown) => {
+        assert.ok(error instanceof ResearchInterpreterError);
+        assert.match((error as Error).message, /timed out/);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = priorFetch;
+  }
+  assert.equal(fetchCalls, 1);
+  assert.ok(capturedSignal, "the caller signal must be linked into the transport");
+  assert.equal((capturedSignal as AbortSignal | null)!.aborted, true);
+});

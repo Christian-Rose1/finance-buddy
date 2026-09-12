@@ -39,7 +39,8 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  */
 export class FallbackResearchPlanner implements ResearchPlanner {
   async generateResearchPlan(
-    input: ResearchPlannerInput
+    input: ResearchPlannerInput,
+    _options?: { signal?: AbortSignal },
   ): Promise<ResearchPlan> {
     return buildFallbackResearchPlan(input);
   }
@@ -73,13 +74,21 @@ export class OpenRouterResearchPlanner implements ResearchPlanner {
   }
 
   async generateResearchPlan(
-    input: ResearchPlannerInput
+    input: ResearchPlannerInput,
+    options?: { signal?: AbortSignal },
   ): Promise<ResearchPlan> {
     const controller = new AbortController();
     const timeoutId = setTimeout(
       () => controller.abort(),
       DEFAULT_TIMEOUT_MS
     );
+    // Link the caller's deadline so an aborted caller cannot leave this
+    // request running in the background past its own deadline.
+    const onCallerAbort = () => controller.abort();
+    if (options?.signal) {
+      if (options.signal.aborted) onCallerAbort();
+      else options.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
 
     let response: Response;
     try {
@@ -125,6 +134,7 @@ export class OpenRouterResearchPlanner implements ResearchPlanner {
       );
     } finally {
       clearTimeout(timeoutId);
+      options?.signal?.removeEventListener("abort", onCallerAbort);
     }
 
     if (!response.ok) {
