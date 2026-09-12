@@ -31,6 +31,7 @@ import type { PersonalizedStrategyContext, StrategyAwardOption, StrategySource }
 import { createProviderExecutionGateway, type VerifiedStageQueryExecutor } from "./providerExecutionGateway";
 import { startGoalStrategyRunStage, type StrategyResearchStage } from "./strategyRunRepository";
 import { signStrategyRunPayload } from "./strategyRunSigning";
+import { StrategyFinalizationDeadlineError } from "./strategyFinalizationDeadline";
 import type { StrategyStageFenceRpcExecutor } from "./strategyStageFenceRpcExecutor";
 
 const CATALOG = [{ id: "program-db-id", name: "Chase Ultimate Rewards" }];
@@ -1408,4 +1409,158 @@ test("the finalization deadline signal reaches the observed-price transport", as
       installSeatsAeroResponder(null);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Trip Reality Card assembly (V1)
+// ---------------------------------------------------------------------------
+
+test("finalization assembles the trip reality card from validated pipeline values", async () => {
+  // A fully covered option (travelerCountCovered present) so the shared
+  // requirement math can produce a party requirement.
+  const coveredStage = {
+    ...emptyStage,
+    awardOptions: [{ ...flightAwardOption(), travelerCountCovered: 1, evidenceLevel: "planning_benchmark" as const }],
+    sources: [{ id: "source-flight", label: "https://example.com/flight", status: "catalog" as const, observedAt: null }],
+    flightPlanningEstimate: flightEstimateFixture,
+  };
+  const strategy = await finalizeWithStages({ flight: coveredStage, hotel: null }, "retry");
+
+  const card = strategy.tripRealityCard;
+  assert.ok(card, "a flight stage with an estimate must produce the card");
+  assert.equal(card.schemaVersion, 1);
+  assert.equal(card.label, "Trip reality");
+  // Cash side: the searched party-total carried through unchanged.
+  assert.ok(card.cash);
+  assert.equal(card.cash!.amount, 1800);
+  assert.equal(card.cash!.currency, "USD");
+  assert.equal(card.cash!.travelers, 2);
+  // Points side: 60,000 round-trip × 2 traveler groups = 120,000, cheapest
+  // program wins.
+  assert.ok(card.points);
+  assert.equal(card.points!.pointsRequired, 120_000);
+  assert.equal(card.points!.programName, "Chase Ultimate Rewards");
+  assert.equal(card.points!.pricingBasis, "round_trip");
+  assert.equal(card.points!.programCount, 1);
+  // Funding: the verified 80,000-point account is matched through
+  // findFundingAccount (direct program) → gap of 40,000.
+  assert.ok(card.funding);
+  assert.equal(card.funding!.status, "gap");
+  assert.equal(card.funding!.verifiedSurplus, -40_000);
+  // No card-attributed spending in this fixture → null with the hint copy.
+  assert.equal(card.bestCard, null);
+});
+
+test("trip reality card points side fails closed on options without traveler coverage", async () => {
+  // The shared fixture option carries no travelerCountCovered, so the shared
+  // requirement math correctly refuses to scale it; the card keeps cash and
+  // funding context, never invents a points figure, and explains exactly why
+  // the requirement is unavailable (fixed server-owned copy).
+  const strategy = await finalizeWithStages(
+    { flight: flightStage(), hotel: null },
+    "retry",
+  );
+  assert.ok(strategy.tripRealityCard);
+  assert.ok(strategy.tripRealityCard.points);
+  assert.equal(strategy.tripRealityCard.points.status, "unavailable");
+  assert.equal(
+    strategy.tripRealityCard.points.unavailableReason,
+    "The found benchmarks don't state how many travelers each price covers, so a trip total can't be calculated",
+  );
+  assert.ok(strategy.tripRealityCard.cash);
+});
+
+test("finalization omits the trip reality card when no flight evidence exists", async () => {
+  const hotelOnly = await finalizeWithStages(
+    { flight: null, hotel: hotelStage() },
+    "retry",
+  );
+  assert.equal(hotelOnly.tripRealityCard, null);
+
+  const neither = await finalizeWithStages(
+    { flight: null, hotel: null },
+    "retry",
+  );
+  assert.equal(neither.tripRealityCard, null);
+});
+
+test("trip reality card funding never claims coverage from unverified balances", async () => {
+  const unverifiedContext: PersonalizedStrategyContext = {
+    ...context(),
+    rewardAccounts: [{
+      ...context().rewardAccounts[0]!,
+      verificationStatus: "unverified",
+    }],
+  };
+  const strategy = await finalizeWithStages(
+    { flight: flightStage(), hotel: null },
+    "retry",
+    unverifiedContext,
+  );
+  assert.ok(strategy.tripRealityCard?.funding);
+  assert.equal(strategy.tripRealityCard.funding.status, "unknown");
+  assert.equal(strategy.tripRealityCard.funding.verifiedSurplus, null);
+});
+
+// ---------------------------------------------------------------------------
+// Finalization deadline must cancel the optional card lane (no floating work)
+// ---------------------------------------------------------------------------
+
+test("an aborted finalization deadline prevents every card-lane provider call", async () => {
+  // allowNewCards:true routes the card lane through its single Tavily query
+  // and the model interpreter; with the deadline already spent, neither may
+  // run — previously the un-abortable interpreter call floated for minutes
+  // after the caller had given up, holding the HTTP request open.
+  const cardContext: PersonalizedStrategyContext = {
+    ...context(),
+    goal: { ...context().goal, allowNewCards: true },
+  };
+  const priorFetch = globalThis.fetch;
+  const priorOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const priorTavilyKey = process.env.TAVILY_API_KEY;
+  const priorBaseUrl = process.env.OLLAMA_BASE_URL;
+  const priorModel = process.env.OLLAMA_STRATEGY_MODEL;
+  delete process.env.OPENROUTER_API_KEY;
+  // A syntactically valid dummy key (never a real secret) lets the Tavily
+  // provider construct; its request must then fail closed via the aborted
+  // signal before any model interpreter can be reached.
+  process.env.TAVILY_API_KEY = "planner-test-tavily-key";
+  const priorSeatsAero = seatsAeroResponder;
+  seatsAeroResponder = null;
+  const providerTargets: string[] = [];
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const target = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+    providerTargets.push(target);
+    throw new Error("no provider transport may complete after the finalization deadline");
+  }) as unknown as typeof fetch;
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await assert.rejects(
+      () =>
+        generateAutomatedStrategyFromResearchStages(
+          cardContext,
+          [],
+          CATALOG,
+          { flight: null, hotel: null },
+          "initial",
+          controller.signal,
+        ),
+      (error: unknown) => error instanceof StrategyFinalizationDeadlineError,
+    );
+    assert.equal(providerTargets.some((t) => t.includes("openrouter.ai")), false);
+    assert.equal(providerTargets.some((t) => t.includes("localhost:11434")), false);
+    assert.equal(providerTargets.some((t) => t.startsWith("https://seats.aero/")), false);
+  } finally {
+    globalThis.fetch = priorFetch;
+    seatsAeroResponder = priorSeatsAero;
+    if (priorOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = priorOpenRouterKey;
+    if (priorTavilyKey === undefined) delete process.env.TAVILY_API_KEY;
+    else process.env.TAVILY_API_KEY = priorTavilyKey;
+    if (priorBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = priorBaseUrl;
+    if (priorModel === undefined) delete process.env.OLLAMA_STRATEGY_MODEL;
+    else process.env.OLLAMA_STRATEGY_MODEL = priorModel;
+  }
 });

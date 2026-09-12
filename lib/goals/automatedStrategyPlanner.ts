@@ -7,6 +7,8 @@ import type {
 import { buildPointsInventory } from "./pointsInventoryBuilder";
 import { buildStrategyAllocationScenarios } from "./strategyAllocationBuilder";
 import { buildEarnPlan } from "./earnPlan";
+import { buildTripRealityCard } from "./tripRealityCard";
+import { calculateFlightPointsRequired } from "./strategyOptionCalculator";
 import {
   buildAirportRegionMap,
   selectFlightAwardBenchmarks,
@@ -276,6 +278,10 @@ export async function generateAutomatedStrategyFromResearchStages(
   // uses only the verified signed flight/hotel stages and regenerates the
   // narrative; it must not repeat planning, searches, or interpretation.
   if (shouldRunOptionalCardResearch(mode)) {
+    // A spent deadline must not start — or continue — optional card research.
+    // Without these gates the model interpreter call floated past the caller's
+    // deadline and held the HTTP request open for minutes.
+    if (signal?.aborted) throw new StrategyFinalizationDeadlineError();
     try {
       const plan = await resolveResearchPlan(
         context,
@@ -293,6 +299,7 @@ export async function generateAutomatedStrategyFromResearchStages(
         tavilyForCardFallback,
         signal,
       );
+      if (signal?.aborted) throw new StrategyFinalizationDeadlineError();
 
       const interpreter = createResearchInterpreter();
       try {
@@ -301,7 +308,7 @@ export async function generateAutomatedStrategyFromResearchStages(
           rewardPrograms: catalogRewardPrograms,
           research: cardResearchResponses,
           focus: "card_offers",
-        });
+        }, { signal });
       } catch (err) {
         if (err instanceof ResearchInterpreterError) {
           cardRejected = true;
@@ -316,6 +323,7 @@ export async function generateAutomatedStrategyFromResearchStages(
         customerRewardPrograms
       );
       if (cardQueries.length > 0) {
+        if (signal?.aborted) throw new StrategyFinalizationDeadlineError();
         const cardResearchResponses = await Promise.all(
           cardQueries.map((q) =>
             tavilyForCardFallback.search({
@@ -324,6 +332,7 @@ export async function generateAutomatedStrategyFromResearchStages(
             }, { signal })
           )
         );
+        if (signal?.aborted) throw new StrategyFinalizationDeadlineError();
 
         const interpreter = createResearchInterpreter();
         try {
@@ -481,6 +490,29 @@ export async function generateAutomatedStrategyFromResearchStages(
     benchmarkSelection,
     catalogProgramNames,
   );
+  // Development+debug diagnostics for the fail-closed benchmark-selection
+  // gates (category-only allowlisted records; no identifiers, locations,
+  // dates, balances, or provider data). These made an invisible product
+  // failure observable: every gate below skips rows silently by design, so a
+  // misconfigured catalog previously looked identical to an honest "no
+  // benchmarks matched". Categories: unmapped_origin_airport /
+  // unmapped_destination_airport (region map gaps), selection_empty (region
+  // or cabin mismatch), catalog_unavailable (catalog load failure),
+  // projection_empty (selection survived but the strict projector rejected
+  // every row).
+  if (process.env.STRATEGY_DEBUG === "1") {
+    if (!(context.awardPriceBenchmarks ?? []).length) {
+      console.error(`[award-benchmarks] ${JSON.stringify({ category: "catalog_unavailable" })}`);
+    } else if (benchmarkOriginIata === null) {
+      console.error(`[award-benchmarks] ${JSON.stringify({ category: "unmapped_origin_airport" })}`);
+    } else if (benchmarkDestinationIata === null) {
+      console.error(`[award-benchmarks] ${JSON.stringify({ category: "unmapped_destination_airport" })}`);
+    } else if (benchmarkSelection.length === 0) {
+      console.error(`[award-benchmarks] ${JSON.stringify({ category: "selection_empty" })}`);
+    } else if (benchmarkProjection.awardOptions.length === 0) {
+      console.error(`[award-benchmarks] ${JSON.stringify({ category: "projection_empty" })}`);
+    }
+  }
   if (benchmarkProjection.awardOptions.length > 0) {
     strategy.flightOptions = deduplicateByOptionId([
       ...strategy.flightOptions,
@@ -628,6 +660,20 @@ export async function generateAutomatedStrategyFromResearchStages(
     pointsInventory,
     context.verifiedTransferPartners ?? null
   );
+  // A benchmark option that was projected but whose requirement math failed
+  // (e.g. the source row never states traveler coverage) is invisible today:
+  // every scenario reports only "can't work out the full points requirement".
+  // Surface the deterministic reason so the failure is explainable at the
+  // presentation boundary instead of looking like a broken search.
+  if (
+    process.env.STRATEGY_DEBUG === "1" &&
+    strategy.flightOptions.length > 0 &&
+    strategy.flightOptions.every(
+      (option) => calculateFlightPointsRequired(option, context.goal).status !== "calculated",
+    )
+  ) {
+    console.error(`[award-benchmarks] ${JSON.stringify({ category: "requirement_calculation_rejected" })}`);
+  }
 
   // 7. Deterministic earnings plan (R1): projects the customer's own balances
   // forward using only verified catalog earn rates, their recorded spending,
@@ -640,6 +686,13 @@ export async function generateAutomatedStrategyFromResearchStages(
     catalogProgramNames,
     interpreted.flightPlanningEstimate ?? null,
   );
+
+  // 7b. Trip Reality Card (V1): deterministic assembly of the cash/points/
+  // funding/best-card reality of this trip from values the pipeline already
+  // validated — the searched party-total, the shared goal-scaled requirement
+  // math, findFundingAccount (incl. verified transfers), and the customer's
+  // card-attributed spending at verified rates. Null when no flight evidence
+  // exists; missing sides stay explicitly unavailable, never guessed.
 
   // 8. Return the complete PersonalizedStrategy.
   return {
@@ -657,5 +710,10 @@ export async function generateAutomatedStrategyFromResearchStages(
     flightPlanningEstimate: interpreted.flightPlanningEstimate ?? null,
     hotelPlanningEstimate: interpreted.hotelPlanningEstimate ?? null,
     earnPlan,
+    tripRealityCard: buildTripRealityCard(context, {
+      flightOptions: strategy.flightOptions,
+      allocationScenarios,
+      pointsInventory,
+    }, interpreted.flightPlanningEstimate ?? null),
   };
 }

@@ -2,6 +2,13 @@ import type { Goal, RewardAccount } from "./types";
 import type { FlightPlanningEstimate } from "./flightPlanningEstimate";
 import type { HotelPlanningEstimate } from "./hotelPlanningEstimate";
 import type { EarningRule } from "@/lib/rewards/catalogTypes";
+import type {
+  TripRealityCard,
+  TripRealityCash,
+  TripRealityPoints,
+  TripRealityFunding,
+  TripRealityBestCard,
+} from "./tripRealityCard";
 
 export type StrategyDataStatus =
   | "live"
@@ -279,11 +286,33 @@ export interface PersonalizedStrategy {
    * points/miles rules exist. Never model-authored.
    */
   earnPlan?: EarnPlan | null;
+  /**
+   * Deterministic trip-cost reality card (V1): searched cash party-total,
+   * goal-scaled points requirement, funding verdict, and the best attributed
+   * card for the trip spend. Assembled only from already-validated pipeline
+   * values; null when the strategy carries no flight evidence. Never
+   * model-authored.
+   */
+  tripRealityCard?: TripRealityCard | null;
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic earnings plan (verified-catalog projections only)
+// Trip Reality Card (V1) — deterministic trip-cost assembly
+// (shapes are declared in ./tripRealityCard and re-exported here for the
+// persisted strategy contract; the local names above type the strategy field)
 // ---------------------------------------------------------------------------
+
+export type {
+  TripRealityCard,
+  TripRealityCash,
+  TripRealityPoints,
+  TripRealityFunding,
+  TripRealityBestCard,
+} from "./tripRealityCard";
+
+/** --------------------------------------------------------------------------
+ * Deterministic earnings plan (verified-catalog projections only)
+ * -------------------------------------------------------------------------- */
 
 /** Per-owner-and-program earnings projection. Currencies are never combined. */
 export interface EarnPlanAccountProjection {

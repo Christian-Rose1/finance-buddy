@@ -1281,3 +1281,232 @@ test("benchmark options keep the established labels alongside observed options",
     view.flightEstimates[1]?.evidenceLabel,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Trip Reality Card presentation (V1)
+// ---------------------------------------------------------------------------
+
+const tripRealityFixture: NonNullable<PersonalizedStrategy["tripRealityCard"]> = {
+  schemaVersion: 1,
+  label: "Trip reality",
+  disclosure: "Fixed disclosure copy.",
+  cash: { status: "available", amount: 1240, currency: "USD", travelers: 2 },
+  points: {
+    status: "available",
+    pointsRequired: 120_000,
+    programName: "Air Canada Aeroplan",
+    pricingBasis: "round_trip",
+    fees: null,
+    programCount: 2,
+    unavailableReason: null,
+  },
+  funding: {
+    status: "gap",
+    bestPointsRequired: 120_000,
+    verifiedSurplus: -35_000,
+    programName: "Chase Ultimate Rewards",
+  },
+  bestCard: {
+    status: "available",
+    cardId: "card-csp",
+    cardName: "Sapphire Preferred",
+    rate: 2,
+    monthlyPoints: 620,
+    nextBestMonthlyPoints: 310,
+    category: "travel",
+    currencyLabel: "points",
+  },
+  warnings: [],
+};
+
+test("trip reality card renders cash, points, funding, and best-card views", () => {
+  const view = build({ ...baseStrategy(), tripRealityCard: tripRealityFixture });
+  const card = view.tripRealityCard;
+  assert.ok(card);
+  assert.equal(card.label, "Trip reality");
+  assert.equal(card.cash.status, "available");
+  assert.equal(card.cash.amountLabel, "USD 1,240 total");
+  assert.equal(card.cash.travelersLabel, "2 travelers · searched-party total");
+  assert.equal(card.points.pointsLabel, "~120,000 points");
+  assert.equal(card.points.programName, "Air Canada Aeroplan");
+  assert.equal(card.points.pricingLabel, "Round trip");
+  assert.equal(card.funding?.statusLabel, "Your confirmed balances don't cover this yet");
+  assert.equal(card.funding?.surplusLabel, "35,000 more points needed");
+  assert.equal(card.funding?.programName, "Chase Ultimate Rewards");
+  assert.equal(card.bestCard?.cardName, "Sapphire Preferred");
+  assert.equal(card.bestCard?.monthlyLabel, "~620 points/month on this trip's travel spend");
+  assert.equal(
+    card.bestCard?.comparisonLabel,
+    "~310 more points/month than your next best card",
+  );
+  assert.equal(card.warnings.length, 0);
+});
+
+test("trip reality card absent on strategies without one", () => {
+  const view = build(baseStrategy());
+  assert.equal(view.tripRealityCard, null);
+});
+
+test("trip reality card unavailable sides render fixed unknown copy, never figures", () => {
+  const view = build({
+    ...baseStrategy(),
+    tripRealityCard: {
+      ...tripRealityFixture,
+      cash: null,
+      points: null,
+      funding: null,
+      bestCard: null,
+    },
+  });
+  const card = view.tripRealityCard;
+  assert.ok(card);
+  assert.equal(card.cash.status, "unavailable");
+  assert.equal(card.cash.amountLabel, null);
+  assert.equal(card.points.status, "unavailable");
+  assert.equal(card.points.pointsLabel, null);
+  assert.equal(card.funding, null);
+  assert.equal(card.bestCard, null);
+  assert.equal(card.bestCardHint, "Add your cards to purchases to see which card should pay for this trip");
+});
+
+test("trip reality card rejects unknown schema version and unknown keys", () => {
+  const rejected: Array<Record<string, unknown>> = [
+    { ...tripRealityFixture, schemaVersion: 2 },
+    { ...tripRealityFixture, hostile: "value" },
+    { ...tripRealityFixture, points: { ...tripRealityFixture.points, extra: true } },
+    "a string" as unknown as Record<string, unknown>,
+    null as unknown as Record<string, unknown>,
+    42 as unknown as Record<string, unknown>,
+  ];
+  for (const candidate of rejected) {
+    const view = build({
+      ...baseStrategy(),
+      // Intentional hostile-shape injection for the validator probe.
+      tripRealityCard: candidate as unknown as PersonalizedStrategy["tripRealityCard"],
+    });
+    assert.equal(view.tripRealityCard, null, `expected rejection for ${JSON.stringify(candidate).slice(0, 60)}`);
+  }
+});
+
+test("trip reality card rejects fabricated figures and hostile strings", () => {
+  const base = tripRealityFixture;
+  // Convention matched to the hotel/flight projectors: a malformed present
+  // value rejects the ENTIRE projection, never degrades to a partial card.
+  const hostile: Array<NonNullable<PersonalizedStrategy["tripRealityCard"]>> = [
+    { ...base, points: { ...base.points!, pointsRequired: -5 } },
+    { ...base, bestCard: { ...base.bestCard!, rate: 5000 } },
+    { ...base, warnings: ["Book now! Limited time offer from the provider"] },
+    { ...base, cash: { ...base.cash!, amount: 0 } },
+    { ...base, funding: { ...base.funding!, status: "fabricated" } as never },
+  ];
+  for (const candidate of hostile) {
+    const view = build({ ...baseStrategy(), tripRealityCard: candidate });
+    assert.equal(view.tripRealityCard, null);
+  }
+});
+
+test("trip reality card covered funding renders its fixed copy", () => {
+  const view = build({
+    ...baseStrategy(),
+    tripRealityCard: {
+      ...tripRealityFixture,
+      funding: {
+        status: "covered",
+        bestPointsRequired: 120_000,
+        verifiedSurplus: 15_000,
+        programName: null,
+      },
+    },
+  });
+  const card = view.tripRealityCard;
+  assert.ok(card);
+  assert.equal(card.funding?.statusLabel, "Your confirmed balances could cover this");
+  assert.equal(card.funding?.surplusLabel, "15,000 points to spare after booking");
+});
+
+test("trip reality card sanitizes hostile text and never leaks card identity", () => {
+  const base = tripRealityFixture;
+  // Hostile structural text in a program name falls back to fixed copy;
+  // the URL never reaches the customer view.
+  const hostile = build({
+    ...baseStrategy(),
+    tripRealityCard: {
+      ...base,
+      funding: {
+        status: "gap",
+        bestPointsRequired: 120_000,
+        verifiedSurplus: -1,
+        programName: "evils program https://evil.com/steal",
+      },
+    },
+  });
+  assert.ok(hostile.tripRealityCard);
+  assert.equal(hostile.tripRealityCard.funding?.programName, "Reward program");
+  assert.equal(JSON.stringify(hostile).includes("evil"), false);
+
+  // The wallet-card identity stays server-side; only the display name renders.
+  const withCard = build({
+    ...baseStrategy(),
+    tripRealityCard: {
+      ...base,
+      funding: null,
+      bestCard: {
+        status: "available",
+        cardId: "card-private-uuid",
+        cardName: "Sapphire Preferred",
+        rate: 2,
+        monthlyPoints: 500,
+        nextBestMonthlyPoints: null,
+        category: "travel",
+        currencyLabel: "points",
+      },
+    },
+  });
+  assert.equal(JSON.stringify(withCard).includes("card-private-uuid"), false);
+  assert.equal(withCard.tripRealityCard?.bestCard?.cardName, "Sapphire Preferred");
+});
+
+test("trip reality card renders the fixed unavailable reason and rejects hostile reasons", () => {
+  // The builder's fixed reason survives the round-trip.
+  const explained = build({
+    ...baseStrategy(),
+    tripRealityCard: {
+      ...tripRealityFixture,
+      points: {
+        status: "unavailable",
+        pointsRequired: 0,
+        programName: "",
+        pricingBasis: "one_way",
+        fees: null,
+        programCount: 0,
+        unavailableReason:
+          "The found benchmarks don't state how many travelers each price covers, so a trip total can't be calculated",
+      },
+    },
+  });
+  assert.ok(explained.tripRealityCard);
+  assert.equal(
+    explained.tripRealityCard.points.unavailableReason,
+    "The found benchmarks don't state how many travelers each price covers, so a trip total can't be calculated",
+  );
+  assert.equal(explained.tripRealityCard.points.pointsLabel, null);
+
+  // A non-allowlisted reason string (model/provider-authored) rejects the
+  // whole card — reasons are fixed copy only.
+  const hostile = build({
+    ...baseStrategy(),
+    tripRealityCard: {
+      ...tripRealityFixture,
+      points: {
+        status: "unavailable",
+        pointsRequired: 0,
+        programName: "",
+        pricingBasis: "one_way",
+        fees: null,
+        programCount: 0,
+        unavailableReason: "Buy now! Points on sale from the provider",
+      },
+    },
+  });
+  assert.equal(hostile.tripRealityCard, null);
+});

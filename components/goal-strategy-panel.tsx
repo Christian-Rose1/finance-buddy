@@ -5,7 +5,7 @@ import { Loader2, Sparkles, Trash2 } from "lucide-react";
 import { deleteGoalStrategyAction, generateGoalFlightStageAction, generateGoalHotelStageAction, finalizeGoalStrategyRunAction } from "@/lib/goals/strategyActions";
 import type { PersonalizedStrategy, StrategyAwardOption } from "@/lib/goals/strategyTypes";
 import type { Goal } from "@/lib/goals/types";
-import { buildCustomerSafeStrategyPresentation, type CustomerSafeStrategyPresentation, type CustomerSafeEstimate, type CustomerSafeHotelPlanningEstimateOption } from "@/lib/goals/customerSafeStrategyPresentation";
+import { buildCustomerSafeStrategyPresentation, type CustomerSafeStrategyPresentation, type CustomerSafeEstimate, type CustomerSafeHotelPlanningEstimateOption, type CustomerSafeTripRealityCard } from "@/lib/goals/customerSafeStrategyPresentation";
 import { normalizePersistedStrategyTimestamp, transitionStrategyTimestamp } from "@/lib/goals/customerSafeStrategyTimestamp";
 import { buildCustomerSafeGoalSummary, buildCustomerSafePlanningPreview, type CustomerSafePlanningPreview } from "@/lib/goals/customerSafeGoalSummary";
 import {
@@ -93,6 +93,44 @@ function CashQuoteOverview({ quotes }: { quotes: CustomerSafeStrategyPresentatio
   </li>)}</ul>;
 }
 
+/**
+ * Trip Reality Card section. Every value is fixed server-owned copy projected
+ * by the presentation boundary; the component renders labels only and never
+ * composes figures itself.
+ */
+function TripRealitySection({ card }: { card: CustomerSafeTripRealityCard }) {
+  return <section className="space-y-4" aria-label="Trip reality overview">
+    <h3 className="text-xl font-semibold text-white">{card.label}</h3>
+    <div className="grid gap-4 md:grid-cols-2">
+      <div className={`${cardStyle} border-sky-400/40`}>
+        <p className="text-sm text-sky-200">Paying cash</p>
+        {card.cash.status === "available" && card.cash.amountLabel ? <>
+          <p className="mt-2 text-2xl font-semibold text-white">{card.cash.amountLabel}</p>
+          {card.cash.travelersLabel ? <p className="mt-1 text-sm text-slate-300">{card.cash.travelersLabel}</p> : null}
+        </> : <p className="mt-2 text-2xl font-semibold text-white">Cash total not confirmed</p>}
+      </div>
+      <div className={cardStyle}>
+        <p className="text-sm text-sky-200">Booking with points</p>
+        {card.points.status === "available" && card.points.pointsLabel ? <>
+          <p className="mt-2 text-2xl font-semibold text-white">{card.points.pointsLabel}</p>
+          <p className="mt-1 text-sm text-slate-300">{card.points.programName} · {card.points.pricingLabel}</p>
+          {card.points.feesLabel ? <p className="mt-1 text-sm text-slate-300">{card.points.feesLabel}</p> : null}
+        </> : card.points.unavailableReason ? <p className="mt-2 text-sm text-slate-300">{card.points.unavailableReason}</p> : <p className="mt-2 text-2xl font-semibold text-white">Points requirement not confirmed</p>}
+      </div>
+    </div>
+    {card.funding ? <div className="rounded-xl bg-sky-400/10 p-4">
+      <h4 className="font-semibold text-sky-100">Can your points cover it?</h4>
+      <p className="mt-1 text-sm leading-relaxed text-slate-200">{card.funding.statusLabel}{card.funding.programName ? ` (${card.funding.programName})` : ""}{card.funding.surplusLabel ? ` — ${card.funding.surplusLabel}` : ""}{card.funding.bestPointsLabel ? `. ${card.funding.bestPointsLabel}.` : ""}</p>
+    </div> : null}
+    {card.bestCard ? <div className="rounded-xl border border-slate-700 p-4">
+      <h4 className="font-semibold text-white">Card to pay with</h4>
+      <p className="mt-1 text-sm leading-relaxed text-slate-200">{card.bestCard.cardName}{card.bestCard.monthlyLabel ? ` — ${card.bestCard.monthlyLabel}` : ""}{card.bestCard.comparisonLabel ? ` (${card.bestCard.comparisonLabel})` : ""}</p>
+    </div> : card.bestCardHint ? <p className="text-sm text-slate-300">{card.bestCardHint}</p> : null}
+    {card.warnings.length > 0 ? <ul className="list-disc space-y-1 pl-5 text-sm text-amber-200">{card.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : null}
+    <p className="text-xs text-slate-400">{card.disclosure}</p>
+  </section>;
+}
+
 function savedResultStatus(presentation: CustomerSafeStrategyPresentation | null): string {
   if (!presentation) return "No saved plan yet.";
   const hasFlight = presentation.flightPlanningEstimate !== null || presentation.currentCash.some((quote) => quote.kind === "flight") || presentation.customerVerified.some((option) => option.kind === "flight");
@@ -119,6 +157,7 @@ function PlanResults({ presentation, isPrevious }: { presentation: CustomerSafeS
   ])];
   return <div className="mt-6 space-y-8">
     {isPrevious ? <p className="rounded-xl border border-amber-300/40 bg-amber-300/10 p-4 font-medium text-amber-100">Previous plan · These results stay here until an updated plan is saved successfully.</p> : null}
+    {presentation.tripRealityCard ? <TripRealitySection card={presentation.tripRealityCard} /> : null}
     <section className="space-y-4" aria-label="Plan overview">
       <h3 className="text-xl font-semibold text-white">Plan overview</h3>
       <div className="grid gap-4 md:grid-cols-2">
